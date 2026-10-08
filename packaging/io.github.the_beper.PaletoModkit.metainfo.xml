@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.the_beper.PaletoModkit</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Paleto Modkit</name>
+  <summary>Mod GTA V on Linux: archives, mods folder and OIV packages</summary>
+  <developer id="io.github.the_beper">
+    <name>the-beper</name>
+  </developer>
+  <description>
+    <p>
+      Paleto Modkit is a native Linux tool for modding Grand Theft Auto V, both the
+      Legacy and the Enhanced edition. It opens the game's RPF archives, lets you
+      change them and installs mods packaged as OIV files.
+    </p>
+    <ul>
+      <li>Browse the game folder and its archives, nested archives included</li>
+      <li>Add, replace, extract and delete files, or drop them on the window</li>
+      <li>Edit XML and META files with syntax highlighting</li>
+      <li>View, export, replace, add and rename textures, importing PNG or DDS</li>
+      <li>Edit binary metadata (.ymap, .ytyp, .ymt, .pso) as XML and text tables (.gxt2) as text</li>
+      <li>Preview 3D models; play, export or replace game audio, radio songs included</li>
+      <li>Check that the game loads the mods folder, and what it read in the last session</li>
+      <li>Install OIV packages with a preview of what they contain</li>
+      <li>Never touches the original game files: changes go to the mods folder</li>
+    </ul>
+    <p>
+      Encryption keys are not included: they are read from your own copy of the game.
+      Loading the mods folder in game needs an ASI loader, installed separately.
+      Paleto Modkit is not affiliated with Rockstar Games or the OpenIV team.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.the_beper.PaletoModkit.desktop</launchable>
+  <url type="homepage">https://github.com/the-beper/paleto-modkit</url>
+  <url type="bugtracker">https://github.com/the-beper/paleto-modkit/issues</url>
+  <url type="vcs-browser">https://github.com/the-beper/paleto-modkit</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/archive-browser.png</image>
+      <caption>Archive browser with a 3D preview of a vehicle</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/texture-viewer.png</image>
+      <caption>Texture dictionary viewer: export, replace, add and rename textures</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/xml-editor.png</image>
+      <caption>Binary metadata (.ymt, .ytyp, .ymap) edited as XML</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/audio-preview.png</image>
+      <caption>Audio container preview: play, export and replace sounds</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/oiv-installer.png</image>
+      <caption>OpenIV package (.oiv) installer targeting the mods folder</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/game-folder.png</image>
+      <caption>Game folder with its archives</caption>
+    </screenshot>
+  </screenshots>
+  <provides>
+    <binary>paleto-modkit</binary>
+    <binary>paleto</binary>
+    <mediatype>application/x-openiv-package</mediatype>
+    <mediatype>application/x-rage-package</mediatype>
+  </provides>
+  <keywords>
+    <keyword>GTA V</keyword>
+    <keyword>mod</keyword>
+    <keyword>OpenIV</keyword>
+    <keyword>OIV</keyword>
+    <keyword>RPF</keyword>
+  </keywords>
+  <branding>
+    <color type="primary" scheme_preference="light">#FFC15E</color>
+    <color type="primary" scheme_preference="dark">#7B3F98</color>
+  </branding>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-10-11">
+      <description>
+        <p>Initial release</p>
+      </description>
+    </release>
+  </releases>
+</component>

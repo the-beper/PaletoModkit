@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="#2e3436">
+    <!-- crate: top, left and right faces; the gaps between them draw the edges -->
+    <path d="M8 0.5 L14 3.5 L8 6.5 L2 3.5 Z"/>
+    <path d="M1.5 4.4 L7.4 7.35 L7.4 11.5 L1.5 8.55 Z"/>
+    <path d="M14.5 4.4 L8.6 7.35 L8.6 11.5 L14.5 8.55 Z"/>
+    <!-- wave -->
+    <path d="M0 13 Q2 11.6 4 13 T8 13 T12 13 T16 13 L16 15 Q14 16.4 12 15 T8 15 T4 15 T0 15 Z"/>
+  </g>
+</svg>

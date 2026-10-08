@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-openiv-package">
+    <comment>OpenIV mod package</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.oiv"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  <mime-type type="application/x-rage-package">
+    <comment>RAGE package (GTA V archive)</comment>
+    <acronym>RPF</acronym>
+    <expanded-acronym>RAGE Package File</expanded-acronym>
+    <glob pattern="*.rpf"/>
+    <magic priority="50">
+      <match type="string" value="7FPR" offset="0"/>
+    </magic>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+</mime-info>

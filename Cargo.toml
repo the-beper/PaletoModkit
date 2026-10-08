@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/rpf", "crates/formats", "crates/core", "crates/cli", "crates/gui"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.95"
+
+[workspace.dependencies]
+paleto-rpf = { path = "crates/rpf" }
+paleto-core = { path = "crates/core" }
+paleto-formats = { path = "crates/formats" }
+
+[profile.dev.package."*"]
+opt-level = 3

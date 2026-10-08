@@ -1,0 +1,21 @@
+[package]
+name = "paleto-core"
+description = "GTA V game folder, mods folder and OIV package handling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+paleto-formats.workspace = true
+paleto-rpf.workspace = true
+roxmltree = "0.21"
+sha2 = "0.10"
+thiserror = "2"
+ureq = "3"
+xee-xpath = "0.1"
+xot = "0.31"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

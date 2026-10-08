@@ -1,0 +1,21 @@
+[package]
+name = "paleto-formats"
+description = "GTA V file formats: resources, textures, metadata, text tables, audio and models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+nanomp3 = "0.2"
+rayon = "1"
+roxmltree = "0.21"
+texpresso = { version = "2", features = ["rayon"] }
+texture2ddecoder = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+paleto-rpf.workspace = true
+flate2 = "1"

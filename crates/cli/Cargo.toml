@@ -1,0 +1,19 @@
+[package]
+name = "paleto-cli"
+description = "Command line tool for GTA V archives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "paleto"
+path = "src/main.rs"
+
+[dependencies]
+paleto-rpf.workspace = true
+paleto-core.workspace = true
+paleto-formats.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Paleto Modkit
+GenericName=GTA V Mod Tool
+Comment=Browse and edit GTA V archives, install OIV mods and manage the mods folder
+Icon=io.github.the_beper.PaletoModkit
+Exec=paleto-modkit %f
+TryExec=paleto-modkit
+Terminal=false
+Categories=Game;
+Keywords=GTA;GTA V;GTA 5;mod;mods;modding;OpenIV;OIV;RPF;archive;
+MimeType=application/x-openiv-package;application/x-rage-package;
+StartupNotify=true
+StartupWMClass=io.github.the_beper.PaletoModkit
+SingleMainWindow=true
