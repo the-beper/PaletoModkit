@@ -5,6 +5,7 @@
 - [Tests](#tests)
 - [Screenshots](#screenshots)
 - [Checks against a real game](#checks-against-a-real-game)
+- [Contributing](#contributing)
 - [Packaging](#packaging)
 
 ## Project layout
@@ -59,8 +60,8 @@ The screenshots are rendered by tests from a real game install, and are skipped 
 # README and AppStream screenshots (an Enhanced install when there is one, else Legacy)
 PALETO_SCREENS=$PWD/screenshots cargo test --release -p paleto-modkit --test screens readme -- --nocapture
 
-# docs/images (needs an Enhanced install; uses tmp/sppiccolo/dlc.rpf, a Legacy add-on pack,
-# when present, and target/cwconv when built)
+# docs/images (needs an Enhanced install; for the conversion dialogs, put a Legacy add-on
+# pack at tmp/sppiccolo/dlc.rpf, a folder git ignores, and build target/cwconv)
 PALETO_SCREENS=$PWD/docs/images cargo test --release -p paleto-modkit --test screens docs -- --nocapture
 
 # Every menu and window, to review how they read (uses the installed game as it is, read-only)
@@ -79,6 +80,14 @@ cargo run --release -p paleto-rpf --example compare -- <keys.bin> <a.rpf> <b.rpf
 ```
 
 The keys are in `~/.local/share/paleto/keys.bin` once the app or `paleto setup` has prepared them. Each example's header describes it. `roundtrip` edits a copy of an archive in a work folder you give it.
+
+## Contributing
+
+Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says what helps. Before sending a change:
+
+- `cargo clippy --all-targets -- -D warnings` is clean, and `cargo test` passes, also with an empty home folder (see [Tests](#tests));
+- the Rust code is formatted by hand, in one style (long lines, method chains on one line) that `rustfmt` does not reproduce: do not run `cargo fmt` over the tree, and match the code around your change;
+- a change that users see comes with its test (the GUI tests are small and fast) and an update of the page of [docs/](README.md) that describes it.
 
 ## Packaging
 

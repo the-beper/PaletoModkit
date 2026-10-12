@@ -1,6 +1,6 @@
 # Installation
 
-Paleto Modkit runs on x86-64 Linux. Every package holds the desktop app (`paleto-modkit`), the command-line tool (`paleto`) and the Legacy → Enhanced converter (`paleto-cwconv`, with its own .NET runtime). Download them from [GitHub Releases](https://github.com/the-beper/paleto-modkit/releases).
+Paleto Modkit runs on x86-64 Linux, on a Wayland or X11 desktop (I use and test it on KDE Plasma with Wayland). Every package holds the desktop app (`paleto-modkit`), the command-line tool (`paleto`) and the Legacy → Enhanced converter (`paleto-cwconv`, with its own .NET runtime). Download them from [GitHub Releases](https://github.com/the-beper/paleto-modkit/releases).
 
 - [Flatpak](#flatpak)
 - [AppImage](#appimage)
@@ -34,6 +34,14 @@ Files elsewhere can still be opened from the file chooser or dropped on the wind
 flatpak override --user --filesystem="/path/to/SteamLibrary" io.github.the_beper.PaletoModkit
 ```
 
+**One permission to know about**: the Flatpak is allowed to talk to `org.freedesktop.Flatpak`, which lets it run commands on your host through `flatpak-spawn --host`. It uses that for one thing, **Prefix tweaks**: Proton's Wine starts 32-bit processes, which the sandbox forbids and has no libraries for, so the Flatpak runs Wine on the host, with your Proton, exactly as the AppImage would. Nothing else in the app runs host commands. If you prefer to keep the sandbox closed, remove the permission:
+
+```bash
+flatpak override --user --no-talk-name=org.freedesktop.Flatpak io.github.the_beper.PaletoModkit
+```
+
+Prefix tweaks then says it is not available, and the AppImage or the tarball do the same job.
+
 The command-line tool is inside the Flatpak too:
 
 ```bash
@@ -48,6 +56,8 @@ chmod +x PaletoModkit-x86_64.AppImage
 ```
 
 On first run the AppImage adds itself to the application menu, unless Paleto Modkit is also installed as a Flatpak or from the tarball. If you delete the AppImage, delete `~/.local/share/applications/io.github.the_beper.PaletoModkit.desktop` too.
+
+If it does not start, your system may lack FUSE 2 (`libfuse2` on Debian and Ubuntu, `fuse2` on Fedora and Arch). Install it, or run the AppImage without FUSE: `./PaletoModkit-x86_64.AppImage --appimage-extract-and-run`.
 
 ## Tarball
 
@@ -86,7 +96,7 @@ The game's archives are encrypted. Paleto Modkit does not ship the keys; it find
 2. It downloads CodeWalker's `magic.dat` table once, checks it against a pinned SHA-256 hash, and derives the NG key tables from it and the executable.
 3. It saves the result in `~/.local/share/paleto/keys.bin` (inside the Flatpak: `~/.var/app/io.github.the_beper.PaletoModkit/data/paleto/`), so this happens once.
 
-`paleto setup` does the same from the terminal. This is the only time Paleto Modkit uses the network.
+`paleto setup` does the same from the terminal. The network is also used by **Prefix tweaks**, when you ask it to install .NET (see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)); Paleto Modkit does nothing else online and has no telemetry.
 
 ## What the game needs to load your mods
 

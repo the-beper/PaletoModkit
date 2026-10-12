@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 paleto-formats.workspace = true
 paleto-rpf.workspace = true
+libc = "0.2"
 roxmltree = "0.21"
 sha2 = "0.10"
 thiserror = "2"

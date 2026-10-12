@@ -30,7 +30,9 @@
 
 The RPF7 layout and the `magic.dat` decoding scheme follow
 [CodeWalker](https://github.com/dexyfex/CodeWalker). `magic.dat` itself is
-**not** distributed with this project; the user supplies it.
+**not** distributed with this project: the first time the keys are needed,
+the program downloads it from CodeWalker's repository (a pinned commit, checked
+against a fixed SHA-256) and keeps it in the user's data folder.
 The texture dictionary layouts (Legacy and Enhanced) in `crates/formats/src/ytd.rs`
 follow CodeWalker's `Texture.cs`, and the page layout used when rebuilding
 resources (`crates/formats/src/pages.rs`) follows its `ResourceBuilder.cs`.
@@ -82,3 +84,15 @@ is a dependency, not copied code.
 
 [nanomp3](https://crates.io/crates/nanomp3), a Rust port of minimp3, decodes
 the MP3 audio of the Enhanced edition. It is a dependency, not copied code.
+
+## Downloaded by Prefix tweaks — not distributed
+
+Only when the user asks it to install .NET Framework 4.8 in the game's Wine
+prefix (**Game > Prefix tweaks**, `paleto prefix dotnet`), Paleto Modkit
+downloads, once and checked against fixed SHA-256 sums:
+
+- [winetricks](https://github.com/Winetricks/winetricks) (LGPL-2.1-or-later),
+  from a pinned commit, which it runs;
+- Microsoft's .NET Framework 4.0 and 4.8 installers, from Microsoft's download
+  servers, which winetricks runs. They are Microsoft's software under
+  Microsoft's licence terms; none of it is part of this project.

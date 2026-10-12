@@ -1,0 +1,16 @@
+name: Idea or request
+description: Something Paleto Modkit could do, or do better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like to do?
+      description: The job you are trying to get done matters more than the way to do it.
+    validations:
+      required: true
+  - type: textarea
+    id: now
+    attributes:
+      label: How do you do it today?
+      description: With another tool, by hand, or not at all.

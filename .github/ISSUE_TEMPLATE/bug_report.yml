@@ -1,0 +1,52 @@
+name: Bug report
+description: Something does not work, or the game breaks after using Paleto Modkit
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The more of this you can fill in, the faster it gets fixed. Please check [the FAQ](https://github.com/the-beper/paleto-modkit/blob/main/docs/faq.md) and [When the game breaks](https://github.com/the-beper/paleto-modkit/blob/main/docs/troubleshooting.md) first.
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Game edition
+      options: [Enhanced, Legacy, Both, Not about a game]
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed Paleto Modkit
+      options: [Flatpak, AppImage, Tarball, Built from source]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Help > About, or `paleto --version`
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Distribution, desktop and Proton
+      placeholder: "Fedora 44, KDE Plasma (Wayland), Proton-GE 10"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw. A screenshot or the exact error message helps.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: Output of `paleto check` (and `paleto crash`, after a crash)
+      description: In the Flatpak, `flatpak run --command=paleto io.github.the_beper.PaletoModkit check`
+      render: text
+  - type: textarea
+    id: file
+    attributes:
+      label: The mod or file involved
+      description: A link to the mod, or the path inside the archive. Do not attach game files.

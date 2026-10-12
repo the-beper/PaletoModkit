@@ -625,6 +625,32 @@ fn docs() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
 
+    // The game's Wine prefix, as Steam leaves it before .NET: made here, with a Proton
+    // that has only the files the window looks for, and one backup.
+    let steamapps = base.join("steamapps");
+    let proton = steamapps.join("common/Proton - Experimental");
+    std::fs::create_dir_all(proton.join("files/bin")).unwrap();
+    for tool in ["wine", "wineserver"] {
+        std::fs::write(proton.join("files/bin").join(tool), b"").unwrap();
+    }
+    let compat = steamapps.join("compatdata/3240220");
+    std::fs::write(compat.join("config_info"), format!("1760000000\n{}/files/share/fonts/\n", proton.display())).unwrap();
+    let net = compat.join("pfx/drive_c/windows/Microsoft.NET/Framework64/v4.0.30319");
+    std::fs::create_dir_all(&net).unwrap();
+    std::fs::write(net.join("mscorlib.dll"), vec![0u8; 700_000]).unwrap();
+    std::fs::write(
+        compat.join("pfx/system.reg"),
+        "[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion] 1\n\"CurrentBuild\"=\"22000\"\n\n",
+    )
+    .unwrap();
+    let prefix = paleto_core::prefix::find(&game).unwrap();
+    paleto_core::prefix::backup(&prefix, "before the .NET mods").unwrap();
+    harness.state_mut().open_prefix_tweaks(&ctx);
+    wait(&mut harness);
+    save(&mut harness, &dir, "prefix-tweaks");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+
     harness.state_mut().open_last_crash(&ctx);
     harness.run_steps(3);
     save(&mut harness, &dir, "last-crash");

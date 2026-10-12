@@ -21,8 +21,12 @@
       <li>View, export, replace, add and rename textures, importing PNG or DDS</li>
       <li>Edit binary metadata (.ymap, .ytyp, .ymt, .pso) as XML and text tables (.gxt2) as text</li>
       <li>Preview 3D models; play, export or replace game audio, radio songs included</li>
+      <li>Install OIV packages and add-on packs (dlc.rpf), with a preview of what they contain</li>
+      <li>On the Enhanced edition, convert models and textures made for Legacy</li>
+      <li>Export your own changes to the game as an OIV package</li>
       <li>Check that the game loads the mods folder, and what it read in the last session</li>
-      <li>Install OIV packages with a preview of what they contain</li>
+      <li>Read the game's last crash, find the mod that crashes it, and keep snapshots of the mods folder</li>
+      <li>Prepare the game's Wine prefix for ScriptHookVDotNet mods</li>
       <li>Never touches the original game files: changes go to the mods folder</li>
     </ul>
     <p>
@@ -87,6 +91,16 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.0" date="2026-10-12">
+      <description>
+        <p>Prefix tweaks now works in the Flatpak.</p>
+        <ul>
+          <li>In the Flatpak, Wine runs on the host through flatpak-spawn, because the sandbox does not allow the 32-bit processes of Proton's Wine. This needs the permission to talk to org.freedesktop.Flatpak, which the Flatpak now asks for.</li>
+          <li>Without that permission, Prefix tweaks shows a warning with the command to grant it, instead of crashing.</li>
+          <li>Release files are named PaletoModkit-x86_64 followed by the extension.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-10-11">
       <description>
         <p>Initial release</p>

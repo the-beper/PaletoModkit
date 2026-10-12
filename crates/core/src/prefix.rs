@@ -297,9 +297,25 @@ impl Report {
     }
 }
 
+/// The shell of [`is_running`] on the host: succeeds when some process has
+/// the prefix (`$1`) or its Steam data folder (`$2`) in its environment.
+const RUNNING_ON_HOST: &str = "for e in /proc/[0-9]*/environ; do { tr '\\0' '\\n' < \"$e\"; } 2>/dev/null; done | grep -qxF -e \"WINEPREFIX=$1\" -e \"WINEPREFIX=$1/\" -e \"STEAM_COMPAT_DATA_PATH=$2\" -e \"STEAM_COMPAT_DATA_PATH=$2/\"";
+
 /// Whether a process is using the prefix (the game, or a wineserver of it).
 /// Steam gives the processes of a game the prefix in their environment.
 pub fn is_running(prefix: &Prefix) -> bool {
+    if let Some(spawn) = host_spawn() {
+        // The processes of the host are not in this sandbox's /proc.
+        return Command::new(spawn)
+            .args(["--host", "sh", "-c", RUNNING_ON_HOST, "sh"])
+            .arg(&prefix.path)
+            .arg(&prefix.compat)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+    }
     let wanted = [
         format!("WINEPREFIX={}", prefix.path.display()),
         format!("STEAM_COMPAT_DATA_PATH={}", prefix.compat.display()),
@@ -614,7 +630,7 @@ fn wineserver(prefix: &Prefix, option: &str) {
     let mut cmd = Command::new(&prefix.proton.wineserver);
     cmd.arg(option).env("WINEPREFIX", &prefix.path);
     isolate(&mut cmd);
-    let _ = cmd.status();
+    let _ = finish(cmd).status();
 }
 
 /// A command with Wine's environment for this prefix. `headless` cuts it off
@@ -641,11 +657,11 @@ fn wine_command(prefix: &Prefix, program: &Path, headless: bool) -> Command {
 /// all the lines. Cancelling kills it and stops the prefix's wineserver.
 fn run_command(
     prefix: &Prefix,
-    mut cmd: Command,
+    cmd: Command,
     run: &mut Run,
     file: &mut std::fs::File,
 ) -> Result<(bool, Vec<String>), Error> {
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = finish(cmd).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (tx, rx) = mpsc::channel::<String>();
     let mut readers = Vec::new();
     if let Some(out) = child.stdout.take() {
@@ -684,7 +700,7 @@ fn run_command(
         }
         if run.cancel.load(Ordering::Relaxed) && !cancelled {
             cancelled = true;
-            let _ = child.kill();
+            stop(&mut child);
             wineserver(prefix, "-k");
         }
     }
@@ -765,8 +781,130 @@ fn display_available(var: &dyn Fn(&str) -> Option<String>) -> bool {
     wayland || var("DISPLAY").is_some_and(|d| !d.is_empty())
 }
 
+/// The tool that runs a command on the host, which is where Wine runs when the
+/// program is in a Flatpak: its sandbox forbids the 32-bit processes Proton's
+/// Wine starts (the system call filter kills their loader, with a crash
+/// report) and has no 32-bit libraries for them.
+const SPAWN: &str = "flatpak-spawn";
+
+fn host_spawn() -> Option<PathBuf> {
+    Path::new("/.flatpak-info")
+        .exists()
+        .then(|| PathBuf::from(SPAWN))
+}
+
+/// Wine runs on the host, because this is a Flatpak.
+pub fn on_host() -> bool {
+    host_spawn().is_some()
+}
+
+const NO_HOST: &str = "This Flatpak is not allowed to run Wine on the host. Allow it with: flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.the_beper.PaletoModkit (or use the AppImage or the tarball)";
+
+/// Why Wine cannot be run, if it cannot: in a Flatpak, running commands on
+/// the host needs the permission to talk to `org.freedesktop.Flatpak`.
+pub fn sandbox_problem() -> Option<&'static str> {
+    static PROBLEM: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PROBLEM.get_or_init(|| {
+        host_problem(on_host(), || {
+            Command::new(SPAWN)
+                .args(["--host", "true"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+    })
+}
+
+fn host_problem(sandboxed: bool, allowed: impl FnOnce() -> bool) -> Option<&'static str> {
+    (sandboxed && !allowed()).then_some(NO_HOST)
+}
+
+/// `cmd` as a command that runs it on the host: `flatpak-spawn --host`, its
+/// directory, then `env` to unset and set its variables (the host gives its own
+/// otherwise). The user's session variables are passed on unless `cmd` sets or
+/// removes them, so what needs a window can open one.
+fn host_command(cmd: &Command, spawn: &Path, var: &dyn Fn(&str) -> Option<String>) -> Command {
+    let mut out = Command::new(spawn);
+    out.arg("--host");
+    if let Some(dir) = cmd.get_current_dir() {
+        out.arg(format!("--directory={}", dir.display()));
+    }
+    out.arg("env");
+    let envs: Vec<_> = cmd.get_envs().collect();
+    for (name, value) in &envs {
+        if value.is_none() {
+            out.arg("-u").arg(name);
+        }
+    }
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR"] {
+        if !envs.iter().any(|(k, _)| *k == name)
+            && let Some(value) = var(name)
+        {
+            out.arg(format!("{name}={value}"));
+        }
+    }
+    for (name, value) in &envs {
+        if let Some(value) = value {
+            let mut pair = name.to_os_string();
+            pair.push("=");
+            pair.push(value);
+            out.arg(pair);
+        }
+    }
+    out.arg(cmd.get_program()).args(cmd.get_args());
+    out.stdin(Stdio::null());
+    out
+}
+
+/// What to spawn for `cmd`: itself, or, in a Flatpak, the same on the host
+/// (with the private runtime folder of the isolated commands made there too).
+fn finish(cmd: Command) -> Command {
+    let Some(spawn) = host_spawn() else {
+        return cmd;
+    };
+    let runtime = runtime_dir();
+    let isolated = cmd
+        .get_envs()
+        .any(|(k, v)| k == "XDG_RUNTIME_DIR" && v.is_some_and(|v| v == runtime.as_os_str()));
+    if isolated {
+        let _ = Command::new(&spawn)
+            .args(["--host", "mkdir", "-p", "-m", "700"])
+            .arg(&runtime)
+            .status();
+    }
+    host_command(&cmd, &spawn, &|name| std::env::var(name).ok())
+}
+
+/// Removes the private runtime folder, here and on the host.
+fn remove_runtime() {
+    let _ = std::fs::remove_dir_all(runtime_dir());
+    if let Some(spawn) = host_spawn() {
+        let _ = Command::new(spawn)
+            .args(["--host", "rm", "-rf"])
+            .arg(runtime_dir())
+            .status();
+    }
+}
+
+/// Stops a command started by [`finish`]: from a Flatpak that is the
+/// `flatpak-spawn` client, which hands SIGTERM on to the command on the host
+/// (killing the client would leave the command running).
+fn stop(child: &mut std::process::Child) {
+    if on_host() {
+        // SAFETY: kill(2) with the pid of our own child.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    } else {
+        let _ = child.kill();
+    }
+}
+
 /// Installs .NET Framework 4.8 in the prefix.
 pub fn install_dotnet(prefix: &Prefix, options: &Options, run: &mut Run) -> Result<(), Error> {
+    if let Some(why) = sandbox_problem() {
+        return Err(Error::Prefix(why.into()));
+    }
     if is_running(prefix) {
         return Err(Error::Prefix(
             "the game (or Wine) is using the prefix: close it first".into(),
@@ -797,7 +935,7 @@ pub fn install_dotnet(prefix: &Prefix, options: &Options, run: &mut Run) -> Resu
             &backups_dir(),
         )
     });
-    let _ = std::fs::remove_dir_all(runtime_dir());
+    remove_runtime();
     if let Err(e) = &result {
         let _ = writeln!(file, "stopped: {e}");
         if !matches!(e, Error::Prefix(m) if m == "cancelled") {
@@ -927,6 +1065,70 @@ mod tests {
             .as_deref(),
             Some("\"22000\"")
         );
+    }
+
+    #[test]
+    fn the_host_needs_a_permission_in_a_flatpak() {
+        assert_eq!(host_problem(false, || false), None, "not in a Flatpak: nothing to allow");
+        assert_eq!(host_problem(true, || true), None);
+        let why = host_problem(true, || false).unwrap();
+        assert!(why.contains("--talk-name=org.freedesktop.Flatpak") && why.contains("AppImage"), "{why}");
+    }
+
+    /// A stand-in for flatpak-spawn: runs what follows the host options, from the
+    /// directory asked for, in the "host" environment it makes up (B is set there).
+    fn fake_spawn(dir: &Path) -> PathBuf {
+        let path = dir.join("flatpak-spawn");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n[ \"$1\" = --host ] && shift\nwhile case \"$1\" in --directory=*) cd \"${1#--directory=}\"; true;; --*) true;; *) false;; esac; do shift; done\nB=fromhost; export B\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_command_runs_on_the_host_as_it_would_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let spawn = fake_spawn(dir.path());
+        let work = dir.path().join("a folder");
+        std::fs::create_dir(&work).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo \"$A|${B-unset}|$WAYLAND_DISPLAY|$PWD|$1\"", "sh", "two words"])
+            .env("A", "x=y")
+            .env_remove("B")
+            .current_dir(&work);
+        let session = |name: &str| (name == "WAYLAND_DISPLAY").then(|| "wayland-7".to_string());
+        let out = host_command(&cmd, &spawn, &session).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        // A set (its value kept whole), B unset although the host has it, the
+        // session passed on, the folder and the arguments as given.
+        assert_eq!(text.trim(), format!("x=y|unset|wayland-7|{}|two words", work.display()), "{text}");
+        // What the command sets itself is not replaced by the session's.
+        let mut own = Command::new("sh");
+        own.args(["-c", "echo $WAYLAND_DISPLAY"]).env("WAYLAND_DISPLAY", "mine");
+        let out = host_command(&own, &spawn, &session).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "mine");
+    }
+
+    #[test]
+    fn the_running_check_of_the_host_finds_the_prefix() {
+        // The shell script, on a process that has the prefix in its environment.
+        let run = |prefix: &str| {
+            Command::new("sh")
+                .args(["-c", RUNNING_ON_HOST, "sh", prefix, "/compat"])
+                .status()
+                .unwrap()
+                .success()
+        };
+        let mut child = Command::new("sleep").arg("5").env("WINEPREFIX", "/steam/pfx/").spawn().unwrap();
+        let found = run("/steam/pfx");
+        let other = run("/steam/other");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found, "a process with WINEPREFIX=/steam/pfx/ is using /steam/pfx");
+        assert!(!other);
     }
 
     #[test]

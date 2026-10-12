@@ -85,4 +85,6 @@ Snapshots are kept in the game folder's `mods_snapshots/`. On btrfs, XFS and bca
 
 **An add-on pack does not show up in game.** It must be in the DLC list: **Mods in game** lists the packs that are not. Check also that the log shows its archive was read.
 
+**ScriptHookVDotNet mods (a `scripts` folder with `.dll` files) do nothing, or the game stops at startup.** They need the real .NET Framework 4.8 in the game's Wine prefix: **Mods in game** says whether it is there, and **Game → Prefix tweaks…** installs it ([mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). If the game says "Support for Windows XP and Vista has ended", the prefix was left on an old Windows version; the same tool sets it back.
+
 **Steam reports changed files.** Paleto Modkit edits only the mods folder, but other tools (or deleting game files outside `mods/` by hand) may change the game's own files. **Verify integrity of game files** in Steam puts them back; your mods folder is not touched by it.

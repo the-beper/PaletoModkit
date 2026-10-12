@@ -4,6 +4,7 @@
 - [OIV packages](#oiv-packages)
 - [Add-on packs](#add-on-packs)
 - [Legacy files on the Enhanced edition](#legacy-files-on-the-enhanced-edition)
+- [ScriptHookVDotNet mods (.NET) on Linux](#scripthookvdotnet-mods-net-on-linux)
 - [Exporting your mods as an OIV package](#exporting-your-mods-as-an-oiv-package)
 - [Cleaning up the mods folder](#cleaning-up-the-mods-folder)
 
@@ -84,12 +85,14 @@ The app also checks the mods folder in the background when it starts, and warns 
 
 Mods written for ScriptHookVDotNet (a `scripts` folder with `.dll` files) need the real **.NET Framework 4.8** in the game's Wine prefix. Wine only has stubs, and installing .NET by hand with winetricks fails in a Proton prefix. **Prefix tweaks** (the button beside Install, or **Game → Prefix tweaks…**) prepares the prefix for you:
 
+![Prefix tweaks](images/prefix-tweaks.png)
+
 1. It finds the game's prefix (`steamapps/compatdata/<app id>/pfx`) and the Proton the game last ran with.
 2. It backs the prefix up (instant and free on btrfs and XFS; a full copy elsewhere).
 3. It downloads winetricks and Microsoft's installers once (about 120 MB), checked against fixed checksums, and installs .NET Framework 4.8 with the Proton's own Wine. It takes about five minutes. Microsoft's installer needs your graphical session for its windows, which it keeps hidden; the rest of the work runs cut off from the desktop, so no window or message box appears.
 4. It sets the Windows version back (winetricks leaves Windows 7, and the game then refuses to start), and verifies the result.
 
-The game must be closed. A failed or cancelled installation can be undone with **Restore** in the same window. **Reinstall** or **Repair** runs it again, for example after changing the Proton version of the game.
+Tried so far with one Proton build (Wine 11) and the native build of the app. In the Flatpak, Wine runs on the host through `flatpak-spawn --host` (the sandbox cannot run Proton's 32-bit Wine), which the Flatpak's permission to talk to `org.freedesktop.Flatpak` allows; without that permission the window and `paleto prefix dotnet` say so, and backups and restores still work. The game must be closed. A failed or cancelled installation can be undone with **Restore** in the same window. **Reinstall** or **Repair** runs it again, for example after changing the Proton version of the game.
 
 Paleto does not install ScriptHookVDotNet, LemonUI or the mods: copy those to the game folder yourself. On Enhanced use **ScriptHookVDotNet Enhanced** (SHVDNE), and give its console a key the other mods do not use (`ConsoleKeyBinding` in `ScriptHookVDotNet.ini`). **Mods in game** shows whether the prefix is ready, and warns when ScriptHookVDotNet is installed without .NET. From a terminal: `paleto prefix` (see [cli.md](cli.md)).
 

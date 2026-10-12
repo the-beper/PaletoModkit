@@ -290,10 +290,19 @@ impl PrefixWindow {
         } else {
             "Install .NET Framework 4.8…"
         };
+        // Wine cannot run in a Flatpak: say so, and do not offer what would crash.
+        let sandbox = prefix::sandbox_problem();
+        if let Some(why) = sandbox {
+            ui.label(RichText::new(format!("⚠ {why}.")).color(theme::warning(dark)));
+        } else if prefix::on_host() {
+            crate::widgets::hint(ui, "In the Flatpak, Wine runs on the host, through flatpak-spawn.");
+        }
         ui.horizontal(|ui| {
-            let enabled = !busy && !found.in_use;
+            let enabled = !busy && !found.in_use && sandbox.is_none();
             let mut button = ui.add_enabled(enabled, crate::widgets::primary(ui, label));
-            if found.in_use {
+            if sandbox.is_some() {
+                button = button.on_disabled_hover_text("The Flatpak is not allowed to run Wine on the host: see the warning above");
+            } else if found.in_use {
                 button = button.on_disabled_hover_text(
                     "The game (or Wine) is using the prefix: close it first",
                 );
