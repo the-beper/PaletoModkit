@@ -46,7 +46,7 @@
 - **Find the crashing mod**: turn mods off by halves until the culprit is left.
 - **Snapshots** of the mods folder, instant on btrfs and XFS.
 
-Most of it also works from a terminal, with the `paleto` command:
+Most of it also works from a terminal, with the `paleto` command (in the Flatpak and the tarball, not in the AppImage):
 
 ```bash
 paleto check            # will the game load my mods? what did it read last time?

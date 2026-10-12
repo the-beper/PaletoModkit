@@ -57,6 +57,8 @@ chmod +x PaletoModkit-x86_64.AppImage
 
 On first run the AppImage adds itself to the application menu, unless Paleto Modkit is also installed as a Flatpak or from the tarball. If you delete the AppImage, delete `~/.local/share/applications/io.github.the_beper.PaletoModkit.desktop` too.
 
+The AppImage starts the app only: it has no way to run the `paleto` command-line tool. For that, use the Flatpak or the tarball.
+
 If it does not start, your system may lack FUSE 2 (`libfuse2` on Debian and Ubuntu, `fuse2` on Fedora and Arch). Install it, or run the AppImage without FUSE: `./PaletoModkit-x86_64.AppImage --appimage-extract-and-run`.
 
 ## Tarball

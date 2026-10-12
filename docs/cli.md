@@ -1,6 +1,6 @@
 # Command line: `paleto`
 
-`paleto` does from a terminal what the app does, for scripts and quick jobs. Inside the Flatpak, run it as `flatpak run --command=paleto io.github.the_beper.PaletoModkit …`.
+`paleto` does from a terminal what the app does, for scripts and quick jobs. It comes with the tarball and the Flatpak, not with the AppImage. Inside the Flatpak, run it as `flatpak run --command=paleto io.github.the_beper.PaletoModkit …`.
 
 - [Paths and the game folder](#paths-and-the-game-folder)
 - [Archives](#archives)
