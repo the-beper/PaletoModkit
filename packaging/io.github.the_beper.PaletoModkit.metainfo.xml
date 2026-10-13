@@ -95,7 +95,8 @@
       <description>
         <p>Prefix tweaks asks for the permission it needs, step by step.</p>
         <ul>
-          <li>Without the permission to run Wine on the host, Prefix tweaks shows only how to grant it: copy the command, run it in a terminal, then check again. The window opens once the permission is there.</li>
+          <li>Without the permission to run Wine on the host, Prefix tweaks shows only how to grant it: copy the command, run it in a terminal, then close and reopen the app, and check again. To successfuly apply the permission the app needs to be restarted.</li>
+          <li>The copy and check buttons show a small icon for the result.</li>
           <li>The Original and Mods copy switch buttons centre their label.</li>
           <li>The project moved to the PaletoModkit repository; links are updated.</li>
         </ul>
