@@ -63,9 +63,8 @@ jobs:
           ref: ${{ env.TAG }}
           fetch-depth: 0
           submodules: true
-      - name: Use the current packaging files for an older tag
-        if: github.event_name == 'workflow_dispatch'
-        run: git checkout "$GITHUB_SHA" -- packaging/
+      - name: Use the packaging files from main
+        run: git checkout origin/main -- packaging/
       - name: Build the Flatpak bundle
         run: WORK="$RUNNER_TEMP/flatpak" OUT="$PWD" ./packaging/build-flatpak.sh
       - uses: softprops/action-gh-release@v3
