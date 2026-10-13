@@ -8,6 +8,11 @@ use eframe::egui::{self, Color32, RichText};
 /// closed it (the button or Esc; a click outside does nothing, so work in it
 /// is not lost by accident).
 pub fn dialog<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, content: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
+    dialog_sized(ctx, id, title, width, true, content)
+}
+
+/// [`dialog`], and with `fill` false it is only as tall as its content, up to the window.
+pub fn dialog_sized<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, fill: bool, content: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
     let max_height = ctx.content_rect().height() - 140.0;
     let mut closed = false;
     let response = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
@@ -20,7 +25,8 @@ pub fn dialog<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, content
         });
         ui.separator();
         // Grows with its content up to max_height, also when the content grows.
-        egui::ScrollArea::vertical().id_salt(id).max_height(max_height).min_scrolled_height(max_height).show(ui, content).inner
+        let area = egui::ScrollArea::vertical().id_salt(id).max_height(max_height);
+        if fill { area.min_scrolled_height(max_height).show(ui, content).inner } else { area.show(ui, content).inner }
     });
     let outside = response.backdrop_response.clicked();
     let close = closed || (!outside && response.should_close());
@@ -40,6 +46,23 @@ pub fn bar_height(ui: &egui::Ui) -> f32 {
     let height = (ui.fonts_mut(|f| f.row_height(&text)) + 2.0 * spacing.button_padding.y + 4.0).max(spacing.interact_size.y);
     let ppp = ui.ctx().pixels_per_point();
     (height * ppp).round() / ppp
+}
+
+/// A bar button whose label, icon included, is centred in it. The label is
+/// painted at the centre of the button, so it is not left to the button's own
+/// layout.
+pub fn centred_bar_button(ui: &mut egui::Ui, text: &str, width: f32) -> egui::Response {
+    let height = bar_height(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    // What a screen reader and the tests see: a button with this label.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
+    let visuals = *ui.style().interact(&response);
+    let painter = ui.painter();
+    painter.rect(rect, visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
+    let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+    let at = rect.center() - galley.size() / 2.0;
+    painter.galley(at, galley, visuals.text_color());
+    response
 }
 
 /// A button of a bar, as tall as the others; at least `width` wide.

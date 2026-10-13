@@ -10,9 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/the-beper/paleto-modkit/releases"><img src="https://img.shields.io/badge/Download-Flatpak-3b7086?logo=flatpak&logoColor=white" alt="Flatpak" /></a>
-  <a href="https://github.com/the-beper/paleto-modkit/releases"><img src="https://img.shields.io/badge/Download-AppImage-16a085?logo=linux&logoColor=white" alt="AppImage" /></a>
-  <a href="https://github.com/the-beper/paleto-modkit/actions/workflows/ci.yml"><img src="https://github.com/the-beper/paleto-modkit/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/the-beper/PaletoModkit/releases"><img src="https://img.shields.io/badge/Download-Flatpak-3b7086?logo=flatpak&logoColor=white" alt="Flatpak" /></a>
+  <a href="https://github.com/the-beper/PaletoModkit/releases"><img src="https://img.shields.io/badge/Download-AppImage-16a085?logo=linux&logoColor=white" alt="AppImage" /></a>
+  <a href="https://github.com/the-beper/PaletoModkit/actions/workflows/ci.yml"><img src="https://github.com/the-beper/PaletoModkit/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue" alt="License" />
 </p>
 
@@ -68,7 +68,7 @@ paleto export my.oiv    # my changes to the game, as an OIV package
 
 ## Install
 
-Download from [GitHub Releases](https://github.com/the-beper/paleto-modkit/releases):
+Download from [GitHub Releases](https://github.com/the-beper/PaletoModkit/releases):
 
 ```bash
 # Flatpak (needs the Flathub remote for its runtime)
@@ -101,7 +101,7 @@ A tarball and building from source are covered in [docs/installation.md](docs/in
 - [FAQ](docs/faq.md): what it is and is not, what has not been tried in game, questions people ask.
 - [Development](docs/development.md): project layout, building, tests, packaging.
 
-Found a problem? [Open an issue](https://github.com/the-beper/paleto-modkit/issues/new/choose): the form asks for what helps most (edition, how you installed it, `paleto check`). Pull requests are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Found a problem? [Open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose): the form asks for what helps most (edition, how you installed it, `paleto check`). Pull requests are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 

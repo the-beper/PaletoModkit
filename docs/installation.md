@@ -1,6 +1,6 @@
 # Installation
 
-Paleto Modkit runs on x86-64 Linux, on a Wayland or X11 desktop (I use and test it on KDE Plasma with Wayland). Every package holds the desktop app (`paleto-modkit`), the command-line tool (`paleto`) and the Legacy → Enhanced converter (`paleto-cwconv`, with its own .NET runtime). Download them from [GitHub Releases](https://github.com/the-beper/paleto-modkit/releases).
+Paleto Modkit runs on x86-64 Linux, on a Wayland or X11 desktop (I use and test it on KDE Plasma with Wayland). Every package holds the desktop app (`paleto-modkit`), the command-line tool (`paleto`) and the Legacy → Enhanced converter (`paleto-cwconv`, with its own .NET runtime). Download them from [GitHub Releases](https://github.com/the-beper/PaletoModkit/releases).
 
 - [Flatpak](#flatpak)
 - [AppImage](#appimage)
@@ -79,7 +79,7 @@ cd paleto-modkit-*
 You need Rust 1.95 or later and the usual build tools. The converter also needs the .NET 10 SDK, or podman (the build script then uses Microsoft's .NET SDK container). The converter's source is a git submodule, so clone with `--recurse-submodules` (or run `git submodule update --init` in an existing clone):
 
 ```bash
-git clone --recurse-submodules https://github.com/the-beper/paleto-modkit.git
+git clone --recurse-submodules https://github.com/the-beper/PaletoModkit.git
 cd paleto-modkit
 cargo build --release
 ./packaging/build-cwconv.sh   # optional: Legacy -> Enhanced conversion

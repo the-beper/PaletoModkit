@@ -29,7 +29,7 @@ Next to them:
 ## Building
 
 ```bash
-git clone --recurse-submodules https://github.com/the-beper/paleto-modkit.git
+git clone --recurse-submodules https://github.com/the-beper/PaletoModkit.git
 cd paleto-modkit
 cargo build --release              # target/release/paleto-modkit and paleto
 ./packaging/build-cwconv.sh        # target/cwconv/paleto-cwconv

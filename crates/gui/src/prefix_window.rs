@@ -14,6 +14,49 @@ use paleto_core::{Error, Game};
 use crate::mods_check::age;
 use crate::theme;
 
+/// How long the "copied" icon stays, and the "refused" and "granted" ones.
+const COPIED_SHOWN: Duration = Duration::from_secs(3);
+const REFUSED_SHOWN: Duration = Duration::from_secs(4);
+/// A granted permission stays on screen this long before the tweaks open.
+const GRANTED_SHOWN: Duration = Duration::from_millis(1200);
+
+/// The icons of the permission gate. They are drawn, not typed: no font of the
+/// interface has a clipboard.
+#[derive(Clone, Copy)]
+enum Mark {
+    Copied,
+    Granted,
+    Refused,
+}
+
+fn paint_mark(ui: &egui::Ui, rect: egui::Rect, mark: Mark, color: egui::Color32) {
+    let painter = ui.painter();
+    let c = rect.center();
+    let s = rect.height() * 0.3;
+    let check = |o: egui::Vec2, k: f32, width: f32| {
+        painter.line(
+            vec![c + o + egui::vec2(-0.7 * k * s, 0.0), c + o + egui::vec2(-0.2 * k * s, 0.6 * k * s), c + o + egui::vec2(0.8 * k * s, -0.6 * k * s)],
+            egui::Stroke::new(width, color),
+        );
+    };
+    match mark {
+        Mark::Copied => {
+            // A clipboard: its board, the clip on top, and a check on the board.
+            let board = egui::Rect::from_center_size(c + egui::vec2(0.0, 0.12 * s), egui::vec2(1.7 * s, 2.0 * s));
+            painter.rect_stroke(board, 2.0, egui::Stroke::new(1.6, color), egui::StrokeKind::Inside);
+            let clip = egui::Rect::from_center_size(egui::pos2(board.center().x, board.top()), egui::vec2(0.9 * s, 0.5 * s));
+            painter.rect_filled(clip, 1.5, color);
+            check(egui::vec2(0.0, 0.12 * s), 0.6, 1.6);
+        }
+        Mark::Granted => check(egui::Vec2::ZERO, 1.0, 2.2),
+        Mark::Refused => {
+            let k = 0.8 * s;
+            painter.line_segment([c + egui::vec2(-k, -k), c + egui::vec2(k, k)], egui::Stroke::new(2.2, color));
+            painter.line_segment([c + egui::vec2(k, -k), c + egui::vec2(-k, k)], egui::Stroke::new(2.2, color));
+        }
+    }
+}
+
 /// What the prefix looks like now.
 struct Found {
     prefix: Prefix,
@@ -44,11 +87,19 @@ enum Do {
     Restore(String),
     Delete(String),
     Refresh,
+    /// "Check again" in the permission gate.
+    Check,
 }
 
 pub struct PrefixWindow {
     game: Game,
     found: Result<Found, String>,
+    /// Why nothing here can run, while the Flatpak is not allowed to run Wine on the host.
+    /// Until it is allowed, the window shows only how to allow it.
+    gate: Option<&'static str>,
+    /// When the command was copied, and when the permission was last checked (and found).
+    copied_at: Option<Instant>,
+    checked_at: Option<(Instant, bool)>,
     job: Option<Job>,
     confirm_install: bool,
     /// Back the prefix up before installing.
@@ -89,6 +140,9 @@ impl PrefixWindow {
         Self {
             game: game.clone(),
             found: gather(game),
+            gate: prefix::current_sandbox_problem(),
+            copied_at: None,
+            checked_at: None,
             job: None,
             confirm_install: false,
             backup_first: true,
@@ -162,15 +216,31 @@ impl PrefixWindow {
     /// Shows the window; true when it is closed.
     pub fn show(&mut self, ctx: &egui::Context) -> bool {
         self.poll(ctx);
+        if let Some((at, true)) = self.checked_at
+            && at.elapsed() >= GRANTED_SHOWN
+        {
+            self.gate = None;
+            self.checked_at = None;
+            self.found = gather(&self.game);
+            self.outcome = Some(Ok("Permission granted: Prefix tweaks are available".to_string()));
+        }
+        // The permission gate is short: it is only as tall as its text.
+        let fill = self.gate.is_none();
         let (action, closed) =
-            crate::widgets::dialog(ctx, "prefix_tweaks", "Prefix tweaks", 580.0, |ui| {
+            crate::widgets::dialog_sized(ctx, "prefix_tweaks", "Prefix tweaks", 580.0, fill, |ui| {
                 self.contents(ui)
             });
         match action {
             Some(Do::Refresh) => {
+                self.gate = prefix::current_sandbox_problem();
                 self.found = gather(&self.game);
                 self.outcome = None;
             }
+            Some(Do::Check) => match prefix::current_sandbox_problem() {
+                // The gate stays up for a moment with the check mark, then opens.
+                None => self.checked_at = Some((Instant::now(), true)),
+                Some(_) => self.checked_at = Some((Instant::now(), false)),
+            },
             Some(Do::Delete(id)) => {
                 if let Ok(f) = &self.found {
                     self.outcome = Some(
@@ -233,7 +303,67 @@ impl PrefixWindow {
         closed && self.job.is_none()
     }
 
+    /// What the window shows instead of the tweaks while the permission is missing.
+    fn needs_permission(&mut self, ui: &mut egui::Ui) -> Option<Do> {
+        let dark = ui.visuals().dark_mode;
+        let mut request = None;
+        let command = format!(
+            "flatpak override --user --talk-name=org.freedesktop.Flatpak {}",
+            crate::APP_ID
+        );
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new("Prefix tweaks need a permission first").strong());
+            ui.label("Wine runs on the host, and this Flatpak is not allowed to run commands there. Allow it once, in a terminal:");
+            ui.add_space(4.0);
+            ui.label(RichText::new(&command).monospace());
+            ui.add_space(4.0);
+            // Each button has an icon slot beside it. The slots are always there, so the
+            // icon appearing does not move anything.
+            let height = ui.spacing().interact_size.y;
+            let padding = ui.spacing().button_padding.x * 2.0;
+            let gap = ui.spacing().item_spacing.x;
+            let text_width = |ui: &egui::Ui, text: &str| {
+                egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x + padding
+            };
+            let row = height + gap + text_width(ui, "Copy command") + gap + text_width(ui, "Check again") + gap + height;
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - row) / 2.0).max(0.0));
+                let (left, _) = ui.allocate_exact_size(egui::vec2(height, height), egui::Sense::hover());
+                if let Some(at) = self.copied_at.filter(|at| at.elapsed() < COPIED_SHOWN) {
+                    paint_mark(ui, left, Mark::Copied, theme::ok(dark));
+                    ui.ctx().request_repaint_after(COPIED_SHOWN - at.elapsed());
+                }
+                if ui.button("Copy command").clicked() {
+                    ui.ctx().copy_text(command.clone());
+                    self.copied_at = Some(Instant::now());
+                }
+                if ui.button("Check again").clicked() {
+                    request = Some(Do::Check);
+                }
+                let (right, _) = ui.allocate_exact_size(egui::vec2(height, height), egui::Sense::hover());
+                if let Some((at, granted)) = self.checked_at {
+                    let shown = if granted { GRANTED_SHOWN } else { REFUSED_SHOWN };
+                    if at.elapsed() < shown {
+                        let mark = if granted { Mark::Granted } else { Mark::Refused };
+                        let color = if granted { theme::ok(dark) } else { theme::error(dark) };
+                        paint_mark(ui, right, mark, color);
+                        ui.ctx().request_repaint_after(shown - at.elapsed());
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            crate::widgets::hint(
+                ui,
+                "Until it is allowed, nothing in this window can run. To take the permission back, run the same command with --no-talk-name in place of --talk-name.",
+            );
+        });
+        request
+    }
+
     fn contents(&mut self, ui: &mut egui::Ui) -> Option<Do> {
+        if self.gate.is_some() {
+            return self.needs_permission(ui);
+        }
         let dark = ui.visuals().dark_mode;
         let found = match &self.found {
             Ok(found) => found,
@@ -290,19 +420,13 @@ impl PrefixWindow {
         } else {
             "Install .NET Framework 4.8…"
         };
-        // Wine cannot run in a Flatpak: say so, and do not offer what would crash.
-        let sandbox = prefix::sandbox_problem();
-        if let Some(why) = sandbox {
-            ui.label(RichText::new(format!("⚠ {why}.")).color(theme::warning(dark)));
-        } else if prefix::on_host() {
+        if prefix::on_host() {
             crate::widgets::hint(ui, "In the Flatpak, Wine runs on the host, through flatpak-spawn.");
         }
         ui.horizontal(|ui| {
-            let enabled = !busy && !found.in_use && sandbox.is_none();
+            let enabled = !busy && !found.in_use;
             let mut button = ui.add_enabled(enabled, crate::widgets::primary(ui, label));
-            if sandbox.is_some() {
-                button = button.on_disabled_hover_text("The Flatpak is not allowed to run Wine on the host: see the warning above");
-            } else if found.in_use {
+            if found.in_use {
                 button = button.on_disabled_hover_text(
                     "The game (or Wine) is using the prefix: close it first",
                 );

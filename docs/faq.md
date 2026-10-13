@@ -33,7 +33,7 @@ I developed it and tried it in game on one machine: KDE Plasma on Wayland, Proto
 - **The Legacy edition in game**: its archives and formats are tested like the Enhanced ones, but most of the testing in game was on Enhanced.
 - **Other launchers and distributions**: Steam's folders are found by themselves; a game from another launcher can be opened with **Game → Choose the game folder…**, but the crash report, **Mods in game** and **Prefix tweaks** look for Steam's `compatdata` folder to find the game's logs and prefix.
 
-If one of these fails for you, [open an issue](https://github.com/the-beper/paleto-modkit/issues/new/choose) with the details: that is the most useful thing you can do.
+If one of these fails for you, [open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose) with the details: that is the most useful thing you can do.
 
 ## Questions
 

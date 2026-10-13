@@ -8,20 +8,27 @@ sdk-extensions:
 command: paleto-modkit
 
 finish-args:
+  # Display and GPU: the egui window on Wayland, with X11 as fallback where Wayland is missing,
+  # and DRI for the GPU
   - --share=ipc
-  - --socket=fallback-x11
   - --socket=wayland
+  - --socket=fallback-x11
   - --device=dri
+  # Sound: playing the game's audio containers (.awc) in the preview talks to the PulseAudio
+  # or PipeWire server (crates/gui/src/audio.rs); without it the preview cannot play
   - --socket=pulseaudio
-  # Prefix tweaks runs Proton's Wine on the host (flatpak-spawn --host): the sandbox
-  # cannot run it (32-bit processes). Drop this to keep the app sandboxed; the tweak then
-  # says so and is not offered.
-  - --talk-name=org.freedesktop.Flatpak
+  # Not granted here. Prefix tweaks runs Proton's Wine on the host (flatpak-spawn --host), which
+  # the sandbox cannot run (32-bit processes): the app asks the user to allow it with
+  # `flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.the_beper.PaletoModkit`
+  # and does not offer the tweak until then
+  # Downloads only, all pinned by URL and SHA-256 in the code: CodeWalker's magic.dat (raw.githubusercontent.com) for the converter, and the Winetricks script and the .NET Framework 4.0/4.8 installers (download.microsoft.com, visualstudio.microsoft.com) for the prefix. The app only downloads from these hosts
   - --share=network
+  # Steam and the game: the app reads the Steam libraries (libraryfolders.vdf), the GTA V Enhanced install, and writes to its compatdata prefix (Proton, .NET, crash logs). A Steam library elsewhere is not visible; the app then shows `flatpak override --filesystem=` hint. Steam installed as a Flatpak is not reachable here (Flathub does not allow another app's data folder): its users grant `~/.var/app/com.valvesoftware.Steam/data/Steam` with `flatpak override --filesystem=`
   - --filesystem=~/.local/share/Steam
   - --filesystem=~/.steam:ro
-  - --filesystem=~/.var/app/com.valvesoftware.Steam/data/Steam
+  # Common place for a game library kept outside Steam
   - --filesystem=~/Games
+  # Removable and secondary disks where a game library may be mounted
   - --filesystem=/mnt
   - --filesystem=/media
   - --filesystem=/run/media
@@ -33,9 +40,7 @@ build-options:
     CARGO_NET_OFFLINE: 'true'
 
 modules:
-  # The Legacy -> Enhanced converter (CodeWalker based), with the .NET runtime
-  # bundled; its NuGet packages come from nuget-sources.json
-  # (packaging/flatpak-nuget-sources.sh).
+  # The Legacy -> Enhanced converter (CodeWalker based), with the .NET runtime bundled; its NuGet packages come from nuget-sources.json (packaging/flatpak-nuget-sources.sh).
   - name: paleto-cwconv
     buildsystem: simple
     build-options:
@@ -48,14 +53,10 @@ modules:
       - dotnet publish tools/cwconv/paleto-cwconv.csproj -c Release -r linux-x64 --self-contained true
         -p:DebugType=none --source ./nuget-sources -o /app/lib/paleto-modkit/cwconv
     sources:
-      - type: dir
-        path: ..
-        skip:
-          - target
-          - dist
-          - screenshots
-          - tmp
-          - .flatpak-builder
+      - type: git
+        url: https://github.com/the-beper/PaletoModkit.git
+        tag: v1.2.0
+        commit: 038f8124610dffcbc36b6fba343381c8ff6edb34
       - nuget-sources.json
 
   - name: paleto-modkit
@@ -75,12 +76,8 @@ modules:
             /app/share/icons/hicolor/${s}x${s}/apps/io.github.the_beper.PaletoModkit.png
         done
     sources:
-      - type: dir
-        path: ..
-        skip:
-          - target
-          - dist
-          - screenshots
-          - tmp
-          - .flatpak-builder
+      - type: git
+        url: https://github.com/the-beper/PaletoModkit.git
+        tag: v1.2.0
+        commit: 038f8124610dffcbc36b6fba343381c8ff6edb34
       - cargo-sources.json
