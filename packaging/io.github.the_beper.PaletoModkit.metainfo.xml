@@ -36,32 +36,32 @@
     </p>
   </description>
   <launchable type="desktop-id">io.github.the_beper.PaletoModkit.desktop</launchable>
-  <url type="homepage">https://github.com/the-beper/paleto-modkit</url>
-  <url type="bugtracker">https://github.com/the-beper/paleto-modkit/issues</url>
-  <url type="vcs-browser">https://github.com/the-beper/paleto-modkit</url>
+  <url type="homepage">https://github.com/the-beper/PaletoModkit</url>
+  <url type="bugtracker">https://github.com/the-beper/PaletoModkit/issues</url>
+  <url type="vcs-browser">https://github.com/the-beper/PaletoModkit</url>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/archive-browser.png</image>
+      <image>https://raw.githubusercontent.com/the-beper/PaletoModkit/main/screenshots/archive-browser.png</image>
       <caption>Archive browser with a 3D preview of a vehicle</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/texture-viewer.png</image>
+      <image>https://raw.githubusercontent.com/the-beper/PaletoModkit/main/screenshots/texture-viewer.png</image>
       <caption>Texture dictionary viewer: export, replace, add and rename textures</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/xml-editor.png</image>
+      <image>https://raw.githubusercontent.com/the-beper/PaletoModkit/main/screenshots/xml-editor.png</image>
       <caption>Binary metadata (.ymt, .ytyp, .ymap) edited as XML</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/audio-preview.png</image>
+      <image>https://raw.githubusercontent.com/the-beper/PaletoModkit/main/screenshots/audio-preview.png</image>
       <caption>Audio container preview: play, export and replace sounds</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/oiv-installer.png</image>
+      <image>https://raw.githubusercontent.com/the-beper/PaletoModkit/main/screenshots/oiv-installer.png</image>
       <caption>OpenIV package (.oiv) installer targeting the mods folder</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/the-beper/paleto-modkit/main/screenshots/game-folder.png</image>
+      <image>https://raw.githubusercontent.com/the-beper/PaletoModkit/main/screenshots/game-folder.png</image>
       <caption>Game folder with its archives</caption>
     </screenshot>
   </screenshots>
@@ -91,6 +91,16 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.0" date="2026-10-13">
+      <description>
+        <p>Prefix tweaks asks for the permission it needs, step by step.</p>
+        <ul>
+          <li>Without the permission to run Wine on the host, Prefix tweaks shows only how to grant it: copy the command, run it in a terminal, then check again. The window opens once the permission is there.</li>
+          <li>The Original and Mods copy switch buttons centre their label.</li>
+          <li>The project moved to the PaletoModkit repository; links are updated.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-10-12">
       <description>
         <p>Prefix tweaks now works in the Flatpak.</p>
