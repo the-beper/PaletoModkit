@@ -1,17 +1,4 @@
-# Flathub: cosa resta da fare
-
-Questo file elenca lo stato della sottomissione su Flathub. Il branch è `flathub-prep`.
-
-## Già fatto
-
-- Branch `flathub-prep` creato dal branch `claude/compassionate-mayer-cze0t5`.
-- `packaging/cargo-sources.json` generato con `packaging/flatpak-cargo-sources.sh` (1291 voci). Il file è in `.gitignore`, quindi non è nel commit: va copiato nella PR Flathub.
-- Submodule `third_party/codewalker` inizializzato in locale (commit `485d56b`).
-- `packaging/flathub/flathub.json` creato con `only-arches: x86_64`. Va copiato nella radice del repo Flathub, non in questo repo.
-
-## Da fare a mano (non l'ho fatto io)
-
-Il manifest e la PR non li ho scritti io: la policy di Flathub sul contenuto generato con AI vieta che il manifest contenga materiale generato o assistito da AI. Vanno scritti e verificati da una persona.
+# Flathub
 
 1. **Manifest** (`packaging/io.github.the_beper.PaletoModkit.yml`), in entrambi i moduli:
    - sostituire `type: dir` con `type: git`, `url: https://github.com/the-beper/paleto-modkit.git`, `tag: v1.1.0`, `commit: 8d2f366f338aceee51b8096af7eaeca4137d6103` (commit verificato: il tag `v1.1.0` punta a questo commit);
@@ -31,7 +18,3 @@ Il manifest e la PR non li ho scritti io: la policy di Flathub sul contenuto gen
    - creare un branch dal base `new-pr` con `io.github.the_beper.PaletoModkit.yml`, `flathub.json` e i due JSON delle sorgenti;
    - aprire la PR verso `new-pr` con titolo "Add io.github.the_beper.PaletoModkit".
 9. **Dopo l'accettazione**: accettare l'invito al repo `flathub/io.github.the_beper.PaletoModkit` e verificare la proprietà dell'ID `io.github.*` dalla dashboard Flathub, loggandosi come `the-beper`.
-
-## Da decidere
-
-- Il branch `flathub-prep` è committato in locale ma **non è stato pushato**. Dimmi se vuoi che lo pushi su `origin`.
