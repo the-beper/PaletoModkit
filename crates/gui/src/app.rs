@@ -48,7 +48,7 @@ fn right_width(ui: &egui::Ui) -> f32 {
 const MODS_LINK: &str = "↪";
 const MODS_LINK_HOVER: &str = "The game loads the modified copy of this file in the mods folder";
 
-const REPO_URL: &str = "https://github.com/the-beper/paleto-modkit";
+const REPO_URL: &str = "https://github.com/the-beper/PaletoModkit";
 
 /// What the main view shows: a folder on disk or a folder inside an archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -2635,7 +2635,7 @@ impl App {
                 } else {
                     (ORIGINAL, "Show the game's own archive, without the changes in the mods folder")
                 };
-                if crate::widgets::bar_button(ui, egui::Button::new(label), right_width(ui)).on_hover_text(hover).clicked() {
+                if crate::widgets::centred_bar_button(ui, label, right_width(ui)).on_hover_text(hover).clicked() {
                     actions.push(Action::PeekOriginal(!peeking));
                 }
             }
@@ -4126,7 +4126,7 @@ fn about(ui: &mut egui::Ui) {
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.add_space(4.0);
         ui.label("GTA V modding for Linux: archives, mods folder and OIV packages.");
-        ui.hyperlink_to("github.com/the-beper/paleto-modkit", REPO_URL);
+        ui.hyperlink_to("github.com/the-beper/PaletoModkit", REPO_URL);
     });
     ui.separator();
     ui.label("Licence: GNU General Public License v3.0 or later.");

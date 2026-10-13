@@ -804,16 +804,19 @@ const NO_HOST: &str = "This Flatpak is not allowed to run Wine on the host. Allo
 /// the host needs the permission to talk to `org.freedesktop.Flatpak`.
 pub fn sandbox_problem() -> Option<&'static str> {
     static PROBLEM: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-    *PROBLEM.get_or_init(|| {
-        host_problem(on_host(), || {
-            Command::new(SPAWN)
-                .args(["--host", "true"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        })
+    *PROBLEM.get_or_init(current_sandbox_problem)
+}
+
+/// [`sandbox_problem`] checked now, for when the user has just granted the permission.
+pub fn current_sandbox_problem() -> Option<&'static str> {
+    host_problem(on_host(), || {
+        Command::new(SPAWN)
+            .args(["--host", "true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     })
 }
 
