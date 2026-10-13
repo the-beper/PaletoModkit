@@ -6,3 +6,4 @@ packaging/nuget-sources.json
 .flatpak-builder/
 tmp/
 TODO.md
+NOTES.md

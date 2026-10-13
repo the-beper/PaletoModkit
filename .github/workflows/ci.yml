@@ -3,7 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: &docs-only
+      - "**.md"
+      - "docs/**"
+      - "screenshots/**"
   pull_request:
+    paths-ignore: *docs-only
 
 env:
   CARGO_PROFILE_DEV_DEBUG: 0
