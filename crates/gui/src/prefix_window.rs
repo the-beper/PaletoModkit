@@ -354,7 +354,7 @@ impl PrefixWindow {
             ui.add_space(4.0);
             crate::widgets::hint(
                 ui,
-                "Until it is allowed, nothing in this window can run. To take the permission back, run the same command with --no-talk-name in place of --talk-name.",
+                "A permission applies when the app starts: after allowing it, close and reopen Paleto Modkit, then check again. Until it is allowed, nothing in this window can run. To take it back, run the same command with --no-talk-name in place of --talk-name.",
             );
         });
         request
