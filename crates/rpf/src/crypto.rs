@@ -1,7 +1,7 @@
 //! RPF decryption: Rockstar's custom "NG" cipher and AES-256-ECB.
 
 use aes::Aes256;
-use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{BlockCipherDecrypt, KeyInit};
 
 use crate::keys::{Keys, NG_KEY_COUNT, NgKey, NgTables};
 
@@ -64,8 +64,8 @@ fn words_to_bytes(w: [u32; 4]) -> [u8; 16] {
 
 /// AES-256-ECB without padding; a trailing partial block is left as is.
 pub fn decrypt_aes(key: &[u8; 32], data: &mut [u8]) {
-    let cipher = Aes256::new(GenericArray::from_slice(key));
+    let cipher = Aes256::new(&(*key).into());
     for block in data.as_chunks_mut::<16>().0 {
-        cipher.decrypt_block(GenericArray::from_mut_slice(block));
+        cipher.decrypt_block(block.into());
     }
 }

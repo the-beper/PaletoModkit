@@ -2529,7 +2529,7 @@ impl App {
             if is_dir {
                 // Open/closed state lives in `open_dirs`, so it can be expanded,
                 // collapsed and remembered as a whole.
-                let id = egui::Id::new(("tree", &path));
+                let id = egui::Id::unique(("tree", &path));
                 let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
                 if self.reveal && current.is_some_and(|c| c.starts_with(&path) && c != path) {
                     self.open_dirs.insert(path.clone());
@@ -2691,7 +2691,7 @@ impl App {
 
         // Toolbar.
         let selected: Vec<String> = b.selected.iter().cloned().collect();
-        let filter_id = egui::Id::new(FILTER_ID);
+        let filter_id = egui::Id::unique(FILTER_ID);
         // Icons only when the full labels do not fit; the names show on hover.
         const TOOLS: [&str; 6] = ["➕ Add files…", "📁 Add folder…", "🗀 New folder…", "✏ Rename…", "⬇ Extract…", "🗑 Delete"];
         let spacing = ui.spacing().item_spacing.x + 2.0 * ui.spacing().button_padding.x;
@@ -2972,7 +2972,7 @@ impl App {
                     && can_format
                 {
                     let tidy = highlight::is_tidy(ui.ctx(), text);
-                    let hint = "Format: indent the lines by the XML structure (only whitespace changes); save to keep it";
+                    let hint = "Format: indent the lines by the XML structure and drop blank lines between tags (only whitespace changes); save to keep it";
                     let enabled = !tidy && !busy;
                     let response = ui.add_enabled_ui(enabled, |ui| crate::widgets::bar_button(ui, button(FORMAT), min)).inner;
                     if response.on_hover_text(hint).on_disabled_hover_text(if tidy { "Already indented" } else { hint }).clicked() {
@@ -3005,7 +3005,7 @@ impl App {
                         .hint_text("Find in file")
                         .desired_width((ui.available_width() - controls).max(80.0))
                         .min_size(egui::vec2(0.0, height))
-                        .vertical_align(egui::Align::Center),
+                        .align(egui::Align2::LEFT_CENTER),
                 );
                 if find.focus {
                     field.request_focus();
@@ -3155,7 +3155,7 @@ impl App {
     /// Shown while files are dragged over the window: what dropping them does here.
     fn drop_overlay(&self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        egui::Area::new(egui::Id::new("drop-dim")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("drop-dim")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(140));
         });
         let ytd = self.preview.as_ref().filter(|p| p.textures.is_some() && matches!(p.source, PreviewSource::Archive(_))).map(|p| p.name.clone());
@@ -3173,7 +3173,7 @@ impl App {
                 "To add other files, first open a folder inside an archive (.rpf).".to_string(),
             ),
         };
-        egui::Area::new(egui::Id::new("drop-card"))
+        egui::Area::new(egui::Id::unique("drop-card"))
             .order(egui::Order::Tooltip)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
@@ -3222,7 +3222,7 @@ impl App {
         let (game_ready, keys_ready, keys_pending) = (self.game.is_some(), self.keys.is_some(), self.keys_task.is_some());
         let can_convert = paleto_core::convert::converter().is_some();
         let Some(d) = &mut self.install else { return };
-        egui::Modal::new(egui::Id::new("install")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("install")).show(ctx, |ui| {
             ui.set_width(520.0);
             ui.horizontal(|ui| {
                 if let Some(icon) = &d.icon {
@@ -3328,7 +3328,7 @@ impl App {
         }
         let name = self.preview.as_ref().map_or(String::new(), |p| p.name.clone());
         let can_save = !self.busy();
-        let response = egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("unsaved")).show(ctx, |ui| {
             ui.heading("Unsaved changes");
             ui.label(format!("{name} has changes that are not saved. Save them before going on?"));
             ui.add_space(6.0);
@@ -3391,9 +3391,9 @@ impl App {
             }
         };
         let mut submit = None;
-        let response = egui::Modal::new(egui::Id::new("name")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("name")).show(ctx, |ui| {
             ui.heading(if renaming.is_some() { "Rename" } else { "New folder" });
-            let id = egui::Id::new("name-field");
+            let id = egui::Id::unique("name-field");
             let field = ui.add(egui::TextEdit::singleline(&mut d.name).id(id).desired_width(320.0));
             if d.focus {
                 d.focus = false;
@@ -3446,7 +3446,7 @@ impl App {
         let (dict, ytd_name) = (view.dict.clone(), self.preview.as_ref().map(|p| p.name.clone()).unwrap_or_default());
         let Some(d) = &mut self.texture_dialog else { return };
         let mut submit = false;
-        let response = egui::Modal::new(egui::Id::new("texture")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("texture")).show(ctx, |ui| {
             let (title, button) = match &d.edit {
                 TextureEdit::Replace { .. } => ("Replace texture", "Replace"),
                 TextureEdit::Add { .. } => ("Add texture", "Add"),
@@ -3463,7 +3463,7 @@ impl App {
                 _ => (None, None),
             };
             if let Some(name) = name {
-                let id = egui::Id::new("texture-name");
+                let id = egui::Id::unique("texture-name");
                 let field = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(320.0));
                 if d.focus {
                     d.focus = false;
@@ -3557,7 +3557,7 @@ impl App {
         let Some(d) = &mut self.texture_batch else { return };
         let file_name = |f: &PathBuf| f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut confirm = false;
-        let response = egui::Modal::new(egui::Id::new("texture-batch")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("texture-batch")).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.heading(format!("Replace textures in {ytd_name}"));
             let height = crate::widgets::dialog_list_height(ui.ctx()) / 2.0;
@@ -3606,7 +3606,7 @@ impl App {
         let can_convert = paleto_core::convert::converter().is_some();
         let Some(game) = &self.game else { return };
         let Some(dialog) = &mut self.addon_dialog else { return };
-        let response = egui::Modal::new(egui::Id::new("addon-packs")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("addon-packs")).show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
             ui.set_max_width(560.0);
             ui.heading(if dialog.packs.len() == 1 { "Install add-on pack" } else { "Install add-on packs" });
@@ -3654,7 +3654,7 @@ impl App {
     fn legacy_add_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let can_convert = paleto_core::convert::converter().is_some();
         let Some(add) = &mut self.legacy_add else { return };
-        let response = egui::Modal::new(egui::Id::new("legacy-add")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("legacy-add")).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.heading("Files made for Legacy");
             let (what, it) = match add.legacy.len() {
@@ -3700,7 +3700,7 @@ impl App {
             (Some(dir), Some(game)) => dir.starts_with(&game.root) && !dir.starts_with(game.mods_dir()) && !(dir == &game.root && names.iter().all(|n| n == "mods")),
             _ => false,
         };
-        let response = egui::Modal::new(egui::Id::new("delete")).show(ctx, |ui| {
+        let response = egui::Modal::new(egui::Id::unique("delete")).show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
             ui.heading(if names.len() == 1 { "Delete this item?".to_string() } else { format!("Delete these {} items?", names.len()) });
             ui.add_space(4.0);
@@ -4183,13 +4183,13 @@ const FILTER_ID: &str = "browser filter";
 
 /// The box that filters the file list by name, at `rect`; typing in the list goes there.
 fn filter_box(ui: &mut egui::Ui, b: &mut Browser, rect: egui::Rect) {
-    let id = egui::Id::new(FILTER_ID);
+    let id = egui::Id::unique(FILTER_ID);
     let field = egui::TextEdit::singleline(&mut b.filter)
         .id(id)
         .hint_text("🔍 Filter this folder…")
         .desired_width(rect.width())
         .min_size(rect.size())
-        .vertical_align(egui::Align::Center);
+        .align(egui::Align2::LEFT_CENTER);
     let response = ui.put(rect, field);
     if b.blur_filter {
         b.blur_filter = false;

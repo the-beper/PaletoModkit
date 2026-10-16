@@ -14,23 +14,24 @@ path = "src/main.rs"
 paleto-core.workspace = true
 paleto-formats.workspace = true
 paleto-rpf.workspace = true
-eframe = { version = "0.36", features = ["persistence"] }
-egui_extras = { version = "0.36", features = ["image"] }
+eframe = { version = "0.37", features = ["persistence"] }
+# The icons and emoji in the labels come from bundled fonts: system ones sit at another height.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui_extras = { version = "0.37", features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pulseaudio = "0.3"
 rfd = "0.17"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 raw-window-handle = "0.6"
-smithay-client-toolkit = { version = "0.20", default-features = false }
+smithay-client-toolkit = { version = "0.21", default-features = false }
 wayland-backend = { version = "0.3", features = ["client_system"] }
 # Already built for accesskit; used for the document portal.
 futures-lite = "2"
 zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [dev-dependencies]
-eframe = "0.36"
-egui = "0.36"
-egui_kittest = { version = "0.36", features = ["eframe", "wgpu", "snapshot"] }
+eframe = "0.37"
+egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
 tempfile = "3"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }

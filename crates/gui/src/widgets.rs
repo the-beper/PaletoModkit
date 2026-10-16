@@ -15,7 +15,7 @@ pub fn dialog<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, content
 pub fn dialog_sized<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, fill: bool, content: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
     let max_height = ctx.content_rect().height() - 140.0;
     let mut closed = false;
-    let response = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
+    let response = egui::Modal::new(egui::Id::unique(id)).show(ctx, |ui| {
         ui.set_width(width.min(ctx.content_rect().width() - 60.0));
         ui.horizontal(|ui| {
             ui.heading(title);
@@ -55,7 +55,7 @@ pub fn centred_bar_button(ui: &mut egui::Ui, text: &str, width: f32) -> egui::Re
     let height = bar_height(ui);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     // What a screen reader and the tests see: a button with this label.
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
     let visuals = *ui.style().interact(&response);
     let painter = ui.painter();
     painter.rect(rect, visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
@@ -104,7 +104,7 @@ pub fn list_row(ui: &mut egui::Ui, selected: bool, name: &str, details: &str) ->
     let height = ui.text_style_height(&text_style) + 2.0 * padding.y;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click());
     // Screen readers (and tests) get the details too.
-    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, format!("{name}  {details}")));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, format!("{name}  {details}")));
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -147,5 +147,5 @@ pub fn fit_combo(ui: &mut egui::Ui, text: &str) {
 /// The height of a list inside a dialog: as tall as it was designed, less on a
 /// short window so the dialog's buttons stay on screen.
 pub fn dialog_list_height(ctx: &egui::Context) -> f32 {
-    (ctx.content_rect().height() - 300.0).clamp(80.0, 260.0)
+    (ctx.content_rect().height() - 330.0).clamp(80.0, 260.0)
 }

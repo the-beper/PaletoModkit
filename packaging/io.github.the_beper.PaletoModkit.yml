@@ -8,19 +8,14 @@ sdk-extensions:
 command: paleto-modkit
 
 finish-args:
-  # Display and GPU: the egui window on Wayland, with X11 as fallback where Wayland is missing,
-  # and DRI for the GPU
+  # Display and GPU: the egui window on Wayland, with X11 as fallback where Wayland is missing, and DRI for the GPU
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # Sound: playing the game's audio containers (.awc) in the preview talks to the PulseAudio
-  # or PipeWire server (crates/gui/src/audio.rs); without it the preview cannot play
+  # Sound: playing the game's audio containers (.awc) in the preview talks to the PulseAudio or PipeWire server (crates/gui/src/audio.rs); without it the preview cannot play
   - --socket=pulseaudio
-  # Not granted here. Prefix tweaks runs Proton's Wine on the host (flatpak-spawn --host), which
-  # the sandbox cannot run (32-bit processes): the app asks the user to allow it with
-  # `flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.the_beper.PaletoModkit`
-  # and does not offer the tweak until then
+  # Not granted here. Prefix tweaks runs Proton's Wine on the host (flatpak-spawn --host), which the sandbox cannot run (32-bit processes): the app asks the user to allow it with `flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.the_beper.PaletoModkit` and does not offer the tweak until then.
   # Downloads only, all pinned by URL and SHA-256 in the code: CodeWalker's magic.dat (raw.githubusercontent.com) for the converter, and the Winetricks script and the .NET Framework 4.0/4.8 installers (download.microsoft.com, visualstudio.microsoft.com) for the prefix. The app only downloads from these hosts
   - --share=network
   # Steam and the game: the app reads the Steam libraries (libraryfolders.vdf), the GTA V Enhanced install, and writes to its compatdata prefix (Proton, .NET, crash logs). A Steam library elsewhere is not visible; the app then shows `flatpak override --filesystem=` hint. Steam installed as a Flatpak is not reachable here (Flathub does not allow another app's data folder): its users grant `~/.var/app/com.valvesoftware.Steam/data/Steam` with `flatpak override --filesystem=`
@@ -53,10 +48,9 @@ modules:
       - dotnet publish tools/cwconv/paleto-cwconv.csproj -c Release -r linux-x64 --self-contained true
         -p:DebugType=none --source ./nuget-sources -o /app/lib/paleto-modkit/cwconv
     sources:
-      - type: git
-        url: https://github.com/the-beper/PaletoModkit.git
-        tag: v1.2.0
-        commit: 81872c106a54e616e9e6b27357a9d1e2a9148837
+      - type: dir
+        path: ..
+        skip: [target, dist, .git, .flatpak-builder, .claude, tmp]
       - nuget-sources.json
 
   - name: paleto-modkit
@@ -76,8 +70,7 @@ modules:
             /app/share/icons/hicolor/${s}x${s}/apps/io.github.the_beper.PaletoModkit.png
         done
     sources:
-      - type: git
-        url: https://github.com/the-beper/PaletoModkit.git
-        tag: v1.2.0
-        commit: 81872c106a54e616e9e6b27357a9d1e2a9148837
+      - type: dir
+        path: ..
+        skip: [target, dist, .git, .flatpak-builder, .claude, tmp]
       - cargo-sources.json

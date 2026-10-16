@@ -9,6 +9,8 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-$ROOT/target/cwconv}
 cd "$ROOT"
+# podman reads a relative -v source as a volume name.
+mkdir -p "$OUT" && OUT=$(cd "$OUT" && pwd)
 if [ ! -f third_party/codewalker/CodeWalker.Core/CodeWalker.Core.csproj ]; then
     git submodule update --init third_party/codewalker
 fi

@@ -91,6 +91,18 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.1" date="2026-10-16">
+      <description>
+        <p>Updated interface toolkit, with the icons drawn from bundled fonts.</p>
+        <ul>
+          <li>Icons and symbols in buttons and labels are centred on the text. They come from fonts bundled with the app, so they look the same on every system.</li>
+          <li>Format on an XML file also removes the blank lines between tags, besides indenting.</li>
+          <li>The Mods in game window keeps its buttons on screen in a small window.</li>
+          <li>Updated egui, the cryptography crates, the zip library and the Wayland toolkit.</li>
+          <li>The Flatpak is built from the source tree instead of a fixed commit. The converter script works with podman when .NET is not installed.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-13">
       <description>
         <p>Prefix tweaks asks for the permission it needs, step by step.</p>

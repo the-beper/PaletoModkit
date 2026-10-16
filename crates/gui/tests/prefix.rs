@@ -52,7 +52,7 @@ fn shows_the_prefix_and_asks_before_installing() {
     settle(&mut harness);
     // The button beside Install.
     harness.get_by_label("🛠 Prefix tweaks…").click();
-    harness.run_steps(2);
+    harness.run_steps(4);
     let summary = harness.state().prefix_tweaks_summary().unwrap();
     assert!(summary.contains("not installed"), "{summary}");
     harness.get_by_label("Proton X");

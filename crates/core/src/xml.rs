@@ -113,15 +113,27 @@ pub fn apply(input: &[u8], ops: &[XmlOp]) -> Result<(Vec<u8>, Vec<String>), Erro
 
 /// Indents every line by its depth in the element tree, with the file's own
 /// indentation unit (a tab, or its smallest step of spaces). Only whitespace
-/// at the start and end of lines changes: content, blank lines, line endings
-/// and lines inside comments or CDATA stay as they are.
+/// at the start and end of lines changes, and blank lines between two tags
+/// inside the root element go: content, other blank lines, line endings and
+/// lines inside comments or CDATA stay as they are.
 pub fn reindent(text: &str) -> String {
     let unit = indent_unit(text);
     let mut out = String::with_capacity(text.len());
     let (mut depth, mut inside) = (0usize, None::<&str>);
-    for line in text.split_inclusive('\n') {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut prev_closes_tag = false;
+    for (i, line) in lines.iter().enumerate() {
         let body = line.trim_start_matches([' ', '\t']);
         let content = body.trim_end_matches(['\r', '\n']);
+        if content.is_empty() && inside.is_none() && depth > 0 && prev_closes_tag {
+            let next = lines[i + 1..].iter().map(|l| l.trim_start_matches([' ', '\t', '\r', '\n'])).find(|l| !l.is_empty());
+            if next.is_some_and(|l| l.starts_with('<')) {
+                continue;
+            }
+        }
+        if !content.is_empty() {
+            prev_closes_tag = content.trim_end_matches([' ', '\t']).ends_with('>');
+        }
         if inside.is_none() && !content.is_empty() {
             let level = if content.starts_with("</") { depth.saturating_sub(1) } else { depth };
             out.push_str(&unit.repeat(level));
@@ -276,8 +288,8 @@ mod tests {
     #[test]
     fn reindenting() {
         // dlclist.xml as a mod installer left it: tabs, spaces, nothing, mixed endings.
-        let messy = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\r\n<SMandatoryPacksData>\r\n\t<Paths>\r\n        <Item>dlcpacks:/spMapFixes/</Item>\n<Item>dlcpacks:/greenhouses/</Item>\r\n  \t\t<Item>platform:/dlcPacks/mpBeach/</Item>\t\t\r\n\r\n<!-- <Item>\r\n   old </Item> -->\r\n\t\t<col value=\"a>b\" />\r\n\t</Paths>\r\n</SMandatoryPacksData>\r\n";
-        let tidy = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\r\n<SMandatoryPacksData>\r\n\t<Paths>\r\n\t\t<Item>dlcpacks:/spMapFixes/</Item>\n\t\t<Item>dlcpacks:/greenhouses/</Item>\r\n\t\t<Item>platform:/dlcPacks/mpBeach/</Item>\r\n\r\n\t\t<!-- <Item>\r\n   old </Item> -->\r\n\t\t<col value=\"a>b\" />\r\n\t</Paths>\r\n</SMandatoryPacksData>\r\n";
+        let messy = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\r\n<SMandatoryPacksData>\r\n\t<Paths>\r\n        <Item>dlcpacks:/spMapFixes/</Item>\n<Item>dlcpacks:/greenhouses/</Item>\r\n  \t\t<Item>platform:/dlcPacks/mpBeach/</Item>\t\t\r\n\r\n\r\n<!-- <Item>\r\n   old </Item> -->\r\n\t\t<col value=\"a>b\" />\r\n\t</Paths>\r\n</SMandatoryPacksData>\r\n";
+        let tidy = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n\r\n<SMandatoryPacksData>\r\n\t<Paths>\r\n\t\t<Item>dlcpacks:/spMapFixes/</Item>\n\t\t<Item>dlcpacks:/greenhouses/</Item>\r\n\t\t<Item>platform:/dlcPacks/mpBeach/</Item>\r\n\t\t<!-- <Item>\r\n   old </Item> -->\r\n\t\t<col value=\"a>b\" />\r\n\t</Paths>\r\n</SMandatoryPacksData>\r\n";
         assert_eq!(reindent(messy), tidy);
         assert_eq!(reindent(tidy), tidy);
         // Spaces when the file uses them, by its own step.

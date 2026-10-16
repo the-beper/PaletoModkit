@@ -100,7 +100,7 @@ downloads, once and checked against fixed SHA-256 sums:
 ## Fonts in the binary (egui's defaults) — mixed licences
 
 egui draws its text and icons with the fonts of
-[epaint_default_fonts](https://crates.io/crates/epaint_default_fonts) (0.36),
+[epaint_default_fonts](https://crates.io/crates/epaint_default_fonts) (0.37),
 compiled into `paleto-modkit`. Each font keeps its own licence; the texts are
 in that crate's `fonts/` folder:
 
@@ -110,7 +110,8 @@ in that crate's `fonts/` folder:
 - Hack-Regular (monospace): MIT licence, Copyright 2018 Source Foundry Authors;
   its Bitstream Vera and DejaVu parts are under the Bitstream Vera licence and
   the public domain.
-- emoji-icon-font (symbols): MIT licence, Copyright (c) 2014 John Slegers.
+- emoji-icon-font (symbols), and egui-icons, a subset of it with five logos: MIT licence,
+  Copyright (c) 2014 John Slegers.
 
 The crate's own code is MIT OR Apache-2.0.
 

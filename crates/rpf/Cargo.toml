@@ -7,9 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-aes = "0.8"
+aes = "0.9"
 flate2 = "1"
 rayon = "1"
-sha1 = "0.10"
+sha1 = "0.11"
 tempfile = "3"
 thiserror = "2"

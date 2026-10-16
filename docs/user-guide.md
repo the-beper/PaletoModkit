@@ -74,7 +74,7 @@ Selecting a text file shows it in the preview panel, where you can edit it:
 
 - syntax highlighting for XML (`.xml`, `.meta`) and configuration files (`.ini`, `.cfg`, `.dat`, `.ide`…);
 - **💾 Save** (Ctrl+S) writes it back into the archive (into its mods copy, for an original);
-- **⚙ Format** re-indents messy XML. Only whitespace changes;
+- **⚙ Format** re-indents messy XML and removes the blank lines between tags. Only whitespace changes;
 - **🔍 Search** (Ctrl+F) finds text in the file, whatever its case: matches are highlighted, **Enter** goes to the next one, **Shift+Enter** to the previous one, **Esc** closes the search. It works on read-only files too.
 
 On a narrow panel the three buttons shrink to their icons (names on hover).

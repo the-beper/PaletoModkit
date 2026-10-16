@@ -502,7 +502,7 @@ fn content_path(source: &str) -> String {
 fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, Error> {
     let wanted = name.replace('\\', "/").to_ascii_lowercase();
     let index = (0..zip.len())
-        .find(|&i| zip.name_for_index(i).is_some_and(|n| n.replace('\\', "/").to_ascii_lowercase() == wanted))
+        .find(|&i| zip.name_for_index(i).is_some_and(|n| n.is_ok_and(|n| n.replace('\\', "/").to_ascii_lowercase() == wanted)))
         .ok_or_else(|| Error::Package(format!("missing {name}")))?;
     let mut entry = zip.by_index(index).map_err(zip_err)?;
     let mut data = Vec::with_capacity(entry.size() as usize);

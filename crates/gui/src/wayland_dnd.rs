@@ -25,7 +25,7 @@ use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, QueueHandle};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::{Capability, SeatHandler, SeatState};
-use sctk::{delegate_data_device, delegate_registry, delegate_seat, registry_handlers};
+use sctk::{delegate_dispatch2, delegate_registry, registry_handlers};
 use smithay_client_toolkit as sctk;
 
 const URI_LIST: &str = "text/uri-list";
@@ -176,7 +176,7 @@ impl DataOfferHandler for State {
     fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
 }
 
-/// Only needed by `delegate_data_device!`: this client never offers data.
+/// Only needed by `delegate_dispatch2!`: this client never offers data.
 impl DataSourceHandler for State {
     fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
     fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: String, _: WritePipe) {}
@@ -213,8 +213,7 @@ impl ProvidesRegistryState for State {
 }
 
 delegate_registry!(State);
-delegate_seat!(State);
-delegate_data_device!(State);
+delegate_dispatch2!(State);
 
 /// The files behind a portal transfer key, as paths visible in the sandbox.
 fn retrieve_files(key: &str) -> Result<Vec<PathBuf>, String> {

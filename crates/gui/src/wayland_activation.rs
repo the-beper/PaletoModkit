@@ -9,7 +9,7 @@ use sctk::reexports::client::globals::registry_queue_init;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, Proxy};
 use sctk::registry::{ProvidesRegistryState, RegistryState};
-use sctk::{delegate_activation, delegate_registry, registry_handlers};
+use sctk::{delegate_dispatch2, delegate_registry, registry_handlers};
 use smithay_client_toolkit as sctk;
 
 /// The window's Wayland display and surface.
@@ -46,8 +46,8 @@ struct State {
 }
 
 impl ActivationHandler for State {
-    type RequestData = RequestData;
-    fn new_token(&mut self, _: String, _: &RequestData) {}
+    type RequestUdata = ();
+    fn new_token(&mut self, _: String, _: &RequestData<()>) {}
 }
 
 impl ProvidesRegistryState for State {
@@ -59,4 +59,4 @@ impl ProvidesRegistryState for State {
 }
 
 delegate_registry!(State);
-delegate_activation!(State);
+delegate_dispatch2!(State);
