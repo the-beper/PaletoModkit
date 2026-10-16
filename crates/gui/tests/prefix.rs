@@ -94,6 +94,9 @@ fn says_when_there_is_no_prefix() {
     harness.state_mut().open_prefix_tweaks(&ctx);
     harness.run_steps(2);
     harness.get_by_label("The game's Wine prefix cannot be changed from here.");
+    // A prefix can be chosen by hand; nothing was chosen, so no way back to Steam's.
+    harness.get_by_label("Choose prefix folder…");
+    assert!(harness.query_by_label("Use Steam's prefix again").is_none());
     assert!(
         harness
             .state()
@@ -154,4 +157,26 @@ fn installs_dotnet_from_the_window() {
     if let Some(shots) = std::env::var_os("PALETO_SCREENS") {
         harness.render().unwrap().save(std::path::Path::new(&shots).join("prefix-tweaks-done.png")).unwrap();
     }
+}
+
+#[test]
+fn warns_when_the_prefix_is_its_own_pfx() {
+    // The layout of Faugus: pfx is a link to the folder that holds it.
+    let dir = tempfile::tempdir().unwrap();
+    let root = steam(dir.path());
+    let compat = dir.path().join("steamapps/compatdata/3240220");
+    std::fs::rename(compat.join("pfx"), dir.path().join("moved")).unwrap();
+    for entry in std::fs::read_dir(dir.path().join("moved")).unwrap().flatten() {
+        std::fs::rename(entry.path(), compat.join(entry.file_name())).unwrap();
+    }
+    std::os::unix::fs::symlink(".", compat.join("pfx")).unwrap();
+    let mut harness = Harness::builder()
+        .with_size([1000.0, 800.0])
+        .build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.state_mut().open_prefix_tweaks(&ctx);
+    harness.run_steps(4);
+    harness.get_by_label_contains("close the game before changing it");
 }

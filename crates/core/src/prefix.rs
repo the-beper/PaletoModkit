@@ -94,9 +94,17 @@ pub struct Prefix {
     pub proton: Proton,
 }
 
-/// Finds the Proton prefix of a game installed through Steam, and the Proton
-/// that last used it.
+/// Finds the game's Proton prefix: the folder the user chose with [`choose`],
+/// or else the one Steam made for a game installed through it. Also finds the
+/// Proton that last used it.
 pub fn find(game: &Game) -> Result<Prefix, Error> {
+    find_in(game, &data_dir())
+}
+
+fn find_in(game: &Game, data: &Path) -> Result<Prefix, Error> {
+    if let Some(chosen) = chosen_in(game, data) {
+        return find_at(game, &chosen);
+    }
     let root = std::fs::canonicalize(&game.root)?;
     let steamapps = root
         .ancestors()
@@ -122,6 +130,87 @@ pub fn find(game: &Game) -> Result<Prefix, Error> {
         path,
         proton,
     })
+}
+
+/// What to tell about a prefix that is its own `pfx`.
+pub const OWN_PFX_NOTE: &str = "This prefix is the folder itself (its pfx is a link to it), as some launchers like Faugus make it. Paleto cannot tell whether the game is running with it, so close the game before changing it. Restoring a backup is not supported for it: copy the folder yourself as a backup before changing it.";
+
+/// Faugus and some other launchers make `pfx` a link to the folder that holds it.
+/// The prefix is then the folder itself, which cannot be swapped for a copy, and
+/// the processes of the game may not show it in their environment.
+pub fn is_own_pfx(prefix: &Prefix) -> bool {
+    match (std::fs::canonicalize(&prefix.path), std::fs::canonicalize(&prefix.compat)) {
+        (Ok(path), Ok(compat)) => path == compat,
+        _ => false,
+    }
+}
+
+/// A prefix the user points at: Steam's `compatdata/<app id>` folder of the
+/// game (a non-Steam shortcut has an id of its own), or its `pfx` folder.
+pub fn find_at(game: &Game, folder: &Path) -> Result<Prefix, Error> {
+    let compat = if folder.join("pfx/drive_c").is_dir() {
+        folder.to_path_buf()
+    } else if folder.join("drive_c").is_dir() && folder.file_name().is_some_and(|n| n == "pfx") {
+        folder.parent().map(Path::to_path_buf).unwrap_or_default()
+    } else {
+        return Err(Error::Prefix(format!(
+            "{} is not a Proton prefix: choose the game's compatdata/<app id> folder (the one that has pfx inside)",
+            folder.display()
+        )));
+    };
+    let proton = proton_of(&compat)?;
+    Ok(Prefix {
+        app_id: match game.edition {
+            Edition::Legacy => "271590",
+            Edition::Enhanced => "3240220",
+        },
+        path: compat.join("pfx"),
+        compat,
+        proton,
+    })
+}
+
+/// Where the chosen prefix of the game's edition is remembered.
+fn chosen_file(game: &Game, data: &Path) -> PathBuf {
+    data.join(match game.edition {
+        Edition::Legacy => "prefix-legacy.txt",
+        Edition::Enhanced => "prefix-enhanced.txt",
+    })
+}
+
+/// The folder the user chose as the game's prefix, if any.
+pub fn chosen(game: &Game) -> Option<PathBuf> {
+    chosen_in(game, &data_dir())
+}
+
+fn chosen_in(game: &Game, data: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(chosen_file(game, data)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| PathBuf::from(text))
+}
+
+/// Remembers a prefix folder for the game (after checking it is one), or with
+/// `None` forgets it and goes back to looking in Steam's library.
+pub fn choose(game: &Game, folder: Option<&Path>) -> Result<(), Error> {
+    choose_in(game, folder, &data_dir())
+}
+
+fn choose_in(game: &Game, folder: Option<&Path>, data: &Path) -> Result<(), Error> {
+    let file = chosen_file(game, data);
+    match folder {
+        Some(folder) => {
+            find_at(game, folder)?;
+            if let Some(dir) = file.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&file, folder.to_string_lossy().as_bytes())?;
+        }
+        None => match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        },
+    }
+    Ok(())
 }
 
 /// The Proton that last used a prefix: Steam lists its folders in `config_info`.
@@ -431,6 +520,9 @@ fn restore_in(base: &Path, prefix: &Prefix, id: &str) -> Result<(), Error> {
         .ok_or_else(|| Error::Prefix(format!("no backup {id}")))?;
     if is_running(prefix) {
         return Err(Error::Prefix("the game is running: close it first".into()));
+    }
+    if is_own_pfx(prefix) {
+        return Err(Error::Prefix(OWN_PFX_NOTE.into()));
     }
     backup_in(base, prefix, "before restoring a backup")?;
     let incoming = prefix.compat.join(".pfx.restoring");
@@ -1209,6 +1301,68 @@ mod tests {
         assert_eq!(found.wine, proton.join("files/bin/wine"));
         std::fs::remove_file(compat.join("config_info")).unwrap();
         assert!(proton_of(&compat).is_err());
+    }
+
+    #[test]
+    fn a_chosen_prefix_replaces_the_steam_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let proton = dir.path().join("Proton X");
+        std::fs::create_dir_all(proton.join("files/bin")).unwrap();
+        std::fs::write(proton.join("files/bin/wine"), b"").unwrap();
+        let compat = dir.path().join("shortcut/compatdata/2954812100");
+        std::fs::create_dir_all(compat.join("pfx/drive_c")).unwrap();
+        std::fs::write(
+            compat.join("config_info"),
+            format!("X-1\n{}/files/share/\n", proton.display()),
+        )
+        .unwrap();
+        // A game outside any Steam library.
+        let root = dir.path().join("games/GTAV");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        let game = Game::open(&root).unwrap();
+        assert!(find_in(&game, &data).is_err());
+        assert!(choose_in(&game, Some(&dir.path().join("games")), &data).is_err());
+        assert_eq!(chosen_in(&game, &data), None);
+        // Either the compat folder or its pfx will do.
+        choose_in(&game, Some(&compat.join("pfx")), &data).unwrap();
+        let found = find_in(&game, &data).unwrap();
+        assert_eq!(found.path, compat.join("pfx"));
+        assert_eq!(found.compat, compat);
+        assert_eq!(found.proton.name, "Proton X");
+        choose_in(&game, Some(&compat), &data).unwrap();
+        assert_eq!(find_in(&game, &data).unwrap().compat, compat);
+        choose_in(&game, None, &data).unwrap();
+        assert!(find_in(&game, &data).is_err());
+    }
+
+    #[test]
+    fn a_prefix_that_is_its_own_pfx_cannot_be_swapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let proton = dir.path().join("Proton X");
+        std::fs::create_dir_all(proton.join("files/bin")).unwrap();
+        std::fs::write(proton.join("files/bin/wine"), b"").unwrap();
+        // The layout of Faugus: drive_c beside config_info, and pfx -> .
+        let compat = dir.path().join("faugus/game");
+        std::fs::create_dir_all(compat.join("drive_c")).unwrap();
+        std::os::unix::fs::symlink(".", compat.join("pfx")).unwrap();
+        std::fs::write(
+            compat.join("config_info"),
+            format!("X-1\n{}/files/share/\n", proton.display()),
+        )
+        .unwrap();
+        let root = dir.path().join("games/GTAV");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        let game = Game::open(&root).unwrap();
+        let prefix = find_at(&game, &compat).unwrap();
+        let base = dir.path().join("backups");
+        let made = backup_in(&base, &prefix, "x").unwrap();
+        let err = restore_in(&base, &prefix, &made.id).unwrap_err().to_string();
+        assert!(err.contains("the folder itself"), "{err}");
+        // Nothing was moved.
+        assert!(compat.join("drive_c").is_dir());
     }
 
     /// A fake Proton (scripts for wine and wineserver) and a fake prefix whose

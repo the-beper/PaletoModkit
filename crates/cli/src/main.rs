@@ -60,6 +60,10 @@ enum PrefixAction {
     Restore { id: String },
     /// Delete a backup of the prefix.
     DeleteBackup { id: String },
+    /// Use this folder as the game's prefix (the game's compatdata/<app id>
+    /// folder, for a game Steam does not know by its own app id), or with no
+    /// folder go back to looking in Steam's library.
+    Use { path: Option<PathBuf> },
 }
 
 #[derive(Subcommand)]
@@ -876,6 +880,14 @@ fn main() -> Result<()> {
         Command::Prefix { action } => {
             use paleto_core::prefix;
             let game = find_game(cli.game.as_deref(), None)?;
+            if let Some(PrefixAction::Use { path }) = &action {
+                prefix::choose(&game, path.as_deref())?;
+                match path {
+                    Some(path) => println!("prefix set to {}", path.display()),
+                    None => println!("prefix back to Steam's library"),
+                }
+                return Ok(());
+            }
             let prefix = prefix::find(&game)?;
             let pick = |id: &str| -> Result<String> {
                 if id == "last" {
@@ -890,8 +902,14 @@ fn main() -> Result<()> {
                     println!("proton: {}", prefix.proton.name);
                     println!("{}", prefix::dotnet_state(&prefix).describe());
                     println!("{}", if prefix::is_running(&prefix) { "the game (or Wine) is using the prefix now" } else { "not in use" });
+                    if prefix::is_own_pfx(&prefix) {
+                        println!("warning: {}", prefix::OWN_PFX_NOTE);
+                    }
                 }
                 PrefixAction::Dotnet { yes, no_backup } => {
+                    if prefix::is_own_pfx(&prefix) {
+                        eprintln!("warning: {}", prefix::OWN_PFX_NOTE);
+                    }
                     let needed = prefix::needed_downloads();
                     let missing: Vec<_> = needed.iter().filter(|n| !n.cached).collect();
                     if !missing.is_empty() && !yes {
@@ -930,6 +948,7 @@ fn main() -> Result<()> {
                     prefix::delete_backup(&prefix, &id)?;
                     println!("deleted backup {id}");
                 }
+                PrefixAction::Use { .. } => {}
             }
         }
         Command::Convert { undo: Some(time), .. } => {

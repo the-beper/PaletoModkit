@@ -87,7 +87,7 @@ Mods written for ScriptHookVDotNet (a `scripts` folder with `.dll` files) need t
 
 ![Prefix tweaks](images/prefix-tweaks.png)
 
-1. It finds the game's prefix (`steamapps/compatdata/<app id>/pfx`) and the Proton the game last ran with.
+1. It finds the game's prefix (`steamapps/compatdata/<app id>/pfx`) and the Proton the game last ran with. For a game Steam knows as a non-Steam game (its app id is a long number of its own) or one outside Steam's library, the window offers **Choose prefix folder…**: pick the game's `compatdata/<app id>` folder (the one with `pfx` inside; it must have been started once with Proton). Paleto remembers the choice; **Use Steam's prefix again** forgets it. This also works for the folders other launchers make (Faugus, for example), which have the same `config_info` and `drive_c`; where `pfx` is only a link to the folder itself, the window warns in bold that the game must be closed first (Paleto cannot see it running), **Back up now** works but **Restore** is not supported: copy the folder yourself before changing it.
 2. It backs the prefix up (instant and free on btrfs and XFS; a full copy elsewhere).
 3. It downloads winetricks and Microsoft's installers once (about 120 MB), checked against fixed checksums, and installs .NET Framework 4.8 with the Proton's own Wine. It takes about five minutes. Microsoft's installer needs your graphical session for its windows, which it keeps hidden; the rest of the work runs cut off from the desktop, so no window or message box appears.
 4. It sets the Windows version back (winetricks leaves Windows 7, and the game then refuses to start), and verifies the result.

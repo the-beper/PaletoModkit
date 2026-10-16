@@ -91,6 +91,15 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.0" date="2026-10-16">
+      <description>
+        <p>Prefix tweaks works for games that are not in Steam's library.</p>
+        <ul>
+          <li>When the game's Wine prefix is not found, Prefix tweaks offers Choose prefix folder: pick the game's compatdata folder (the one with pfx inside), for example a non-Steam game added to Steam or a Faugus prefix. The choice is remembered; Use Steam's prefix again forgets it. From a terminal: paleto prefix use PATH.</li>
+          <li>For a prefix whose pfx is a link to its own folder (Faugus), the window warns that the game must be closed first and that Restore is not supported; backups still work.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.1" date="2026-10-16">
       <description>
         <p>Updated interface toolkit, with the icons drawn from bundled fonts.</p>

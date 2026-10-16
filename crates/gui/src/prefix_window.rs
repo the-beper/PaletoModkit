@@ -63,6 +63,8 @@ struct Found {
     dotnet: DotnetState,
     /// The game, or Wine, is using the prefix.
     in_use: bool,
+    /// The prefix is the folder itself (`pfx` links to it): no restore, no way to see the game running.
+    own_pfx: bool,
     backups: Vec<Backup>,
     /// What installing .NET downloads, and what is already downloaded.
     needed: Vec<Needed>,
@@ -89,6 +91,10 @@ enum Do {
     Refresh,
     /// "Check again" in the permission gate.
     Check,
+    /// Pick the prefix folder by hand.
+    Choose,
+    /// Go back to the prefix in Steam's library.
+    Forget,
 }
 
 pub struct PrefixWindow {
@@ -123,6 +129,7 @@ fn gather(game: &Game) -> Result<Found, String> {
     Ok(Found {
         dotnet: prefix::dotnet_state(&prefix),
         in_use: prefix::is_running(&prefix),
+        own_pfx: prefix::is_own_pfx(&prefix),
         backups: prefix::backups(&prefix),
         needed: prefix::needed_downloads(),
         backup_gb: if shared {
@@ -235,6 +242,17 @@ impl PrefixWindow {
                 self.gate = prefix::current_sandbox_problem();
                 self.found = gather(&self.game);
                 self.outcome = None;
+            }
+            Some(Do::Choose) => {
+                let dialog = rfd::FileDialog::new().set_title("The game's compatdata folder (the one with pfx inside)");
+                if let Some(dir) = dialog.pick_folder() {
+                    self.found = prefix::choose(&self.game, Some(&dir)).map_err(message).and_then(|()| gather(&self.game));
+                    self.outcome = self.found.as_ref().err().map(|e| Err(e.clone()));
+                }
+            }
+            Some(Do::Forget) => {
+                self.outcome = prefix::choose(&self.game, None).err().map(|e| Err(message(e)));
+                self.found = gather(&self.game);
             }
             Some(Do::Check) => match prefix::current_sandbox_problem() {
                 // The gate stays up for a moment with the check mark, then opens.
@@ -372,12 +390,23 @@ impl PrefixWindow {
                     RichText::new("The game's Wine prefix cannot be changed from here.").strong(),
                 );
                 ui.label(why);
+                if let Some(Err(e)) = &self.outcome {
+                    ui.label(RichText::new(e).color(theme::error(dark)));
+                }
                 ui.add_space(4.0);
                 crate::widgets::hint(
                     ui,
-                    "Prefix tweaks need the game installed through Steam and started once with Proton.",
+                    "Prefix tweaks need the game started once with Proton. If it is not in Steam's library, or Steam knows it as a non-Steam game, choose its prefix: the game's compatdata/<app id> folder (the one that has pfx inside).",
                 );
-                return None;
+                ui.add_space(4.0);
+                let mut request = None;
+                if ui.button("Choose prefix folder…").clicked() {
+                    request = Some(Do::Choose);
+                }
+                if prefix::chosen(&self.game).is_some() && ui.button("Use Steam's prefix again").clicked() {
+                    request = Some(Do::Forget);
+                }
+                return request;
             }
         };
         let mut request = None;
@@ -393,6 +422,11 @@ impl PrefixWindow {
             ui.label(RichText::new("Proton").weak());
             ui.label(&found.prefix.proton.name);
         });
+
+        if found.own_pfx {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("⚠ {}", prefix::OWN_PFX_NOTE)).color(theme::warning(dark)));
+        }
 
         crate::widgets::section(ui, ".NET Framework 4.8");
         ui.label("ScriptHookVDotNet and the mods written for it (scripts/*.dll) run on .NET. Paleto installs it in the prefix; ScriptHookVDotNet and the mods themselves you add yourself.");
@@ -575,7 +609,7 @@ impl PrefixWindow {
                         request = Some(Do::Delete(b.id.clone()));
                     }
                     if ui
-                        .add_enabled(!busy && !found.in_use, egui::Button::new("Restore…"))
+                        .add_enabled(!busy && !found.in_use && !found.own_pfx, egui::Button::new("Restore…"))
                         .on_hover_text("Put the prefix back as it was then")
                         .clicked()
                     {
@@ -607,6 +641,12 @@ impl PrefixWindow {
             .clicked()
         {
             request = Some(Do::Refresh);
+        }
+        if prefix::chosen(&self.game).is_some() {
+            ui.add_space(4.0);
+            if ui.button("Use Steam's prefix again").on_hover_text("Forget the folder you chose and look in Steam's library").clicked() {
+                request = Some(Do::Forget);
+            }
         }
         request
     }

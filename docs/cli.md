@@ -165,6 +165,7 @@ paleto prefix dotnet                 # install .NET Framework 4.8 (asks before d
 paleto prefix backups                # list the backups
 paleto prefix restore last           # or a backup's id, as listed
 paleto prefix delete-backup ID
+paleto prefix use PATH                # a compatdata/<app id> folder, for a non-Steam game; no PATH forgets it
 
 # Find the mod that crashes the game, by halves
 paleto hunt start      # half of the suspects are turned off; start the game
@@ -198,7 +199,7 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `clean [--delete]` | Copies of game files left unchanged in the mods folder |
 | `hunt [status\|start\|crashed\|works\|stop\|inside [ARCHIVE]]` | Find the mod that crashes the game |
 | `snapshot [list\|save NOTE\|restore ID\|delete ID]` | Snapshots of the mods folder |
-| `prefix [status\|dotnet\|backups\|restore ID\|delete-backup ID]` | The game's Wine prefix: install .NET for ScriptHookVDotNet mods, backups |
+| `prefix [status\|dotnet\|backups\|restore ID\|delete-backup ID\|use [PATH]]` | The game's Wine prefix: install .NET for ScriptHookVDotNet mods, backups |
 | `xml PATH [-o FILE] [--import FILE]` | Binary metadata as XML |
 | `text PATH [-o FILE] [--import FILE]` | Text tables as lines |
 | `audio PATH [-o DIR] [--replace ID=FILE…]` | Sounds of an audio container |
