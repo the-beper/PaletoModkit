@@ -17,11 +17,7 @@
 </p>
 
 > [!WARNING]
-> **A personal, experimental project.** I started it to fix the problems I had with GTA V modding tools on Linux. Most of the code was written by AI ([Claude Code](https://claude.com/claude-code)); I tested it by hand and reviewed parts of it. Expect rough edges.
->
-> - **Your game files are safe by design**: originals are never modified, every change goes to the `mods/` folder.
-> - **The file formats are checked against every file of both editions**, but I developed and tried it in game on one machine (KDE Plasma on Wayland, Proton, mostly the Enhanced edition). Not every change has been tried in game; [what is not](docs/faq.md#what-has-not-been-tried-in-game) is listed.
-> - **Single player only**: modified files in GTA Online get you banned.
+> PaletoModkit began as a project for my own personal use, and is shared as-is. Claude Code assisted me in writing the code and drafted the documentation and diagrams.
 
 ![Paleto Modkit: archive browser with a 3D model preview](screenshots/archive-browser.png)
 
