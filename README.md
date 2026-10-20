@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue" alt="License" />
 </p>
 
-> [!WARNING]
+> [!IMPORTANT]
 > PaletoModkit began as a project for my own personal use, and is shared as-is. Claude Code assisted me in writing the code and drafted the documentation and diagrams.
 
 ![Paleto Modkit: archive browser with a 3D model preview](screenshots/archive-browser.png)
