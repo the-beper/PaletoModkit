@@ -94,7 +94,8 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 | Script | What it does |
 | :--- | :--- |
 | `packaging/build-release.sh` | Builds the tarball (`PaletoModkit-x86_64.tar.gz`) and the AppImage (`PaletoModkit-x86_64.AppImage`) in `dist/`, with `paleto-cwconv`. |
-| `packaging/build-flatpak.sh` | Builds `PaletoModkit-x86_64.flatpak` in `dist/` (or `OUT`), with flatpak-builder in the Flathub build image through podman or docker. It needs the network and about 15 GB; `WORK` sets where its cache lives (default `~/.cache/paleto-flatpak`). |
+| `packaging/build-flatpak.sh` | Builds `PaletoModkit-x86_64.flatpak` in `dist/` (or `OUT`), with flatpak-builder in the Flathub build image through podman or docker. It needs the network and about 15 GB; `WORK` sets where its cache lives (default `~/.cache/paleto-flatpak`). With `GPG_KEY_ID` set (key from `$GNUPGHOME`) it signs the repository and adds the new commit to `WORK/repo` if there is one. |
+| `packaging/publish-flatpak-repo.sh` | Writes `paleto-modkit.flatpakrepo`, `.flatpakref` and the icon next to the signed repository, for GitHub Pages (needs `GPG_KEY_ID`). |
 | `packaging/install.sh` | Installs into `~/.local` (or `$PREFIX`) from a release tarball or from a source tree; `--uninstall` removes it. |
 | `packaging/build-cwconv.sh` | Builds `paleto-cwconv`, self-contained. |
 | `packaging/flatpak-cargo-sources.sh` | Generates `cargo-sources.json` from `Cargo.lock` with flatpak-cargo-generator, for offline Flatpak builds (`build-flatpak.sh` runs it). |
@@ -107,6 +108,13 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 flatpak install --user dist/PaletoModkit-x86_64.flatpak
 ```
 
-The release workflow (`.github/workflows/release.yml`) builds the tarball and the AppImage for each `v*` tag, then the Flatpak bundle with `build-flatpak.sh`, and attaches all of them to the release. The Flatpak job runs on the runner itself, after freeing its disk: the build needs more room than a container job has.
+The release workflow (`.github/workflows/release.yml`) builds the tarball and the AppImage for each `v*` tag, then the Flatpak with `build-flatpak.sh`, and attaches all of them to the release. The Flatpak job runs on the runner itself, after freeing its disk: the build needs more room than a container job has. It also signs the Flatpak and publishes the repository on the `gh-pages` branch (served by GitHub Pages), replaced by a single commit each release so OSTree objects do not pile up in git history. A manual run of the workflow with the latest tag publishes the repository without a new release (an older tag would put an older version on top of `master`).
+
+One-time setup for the repository:
+
+1. Create a signing key without a passphrase in a scratch keyring and store its private part as the repository secret `FLATPAK_GPG_PRIVATE_KEY`: `export GNUPGHOME=$(mktemp -d)`, `gpg --batch --pinentry-mode loopback --passphrase '' --quick-gen-key "Paleto Modkit Flatpak" default default never`, then `gpg --armor --export-secret-keys "Paleto Modkit Flatpak" | gh secret set FLATPAK_GPG_PRIVATE_KEY`. Keep a copy: a new key means every user must re-add the remote.
+2. After the first run, set Settings, Pages to deploy from the `gh-pages` branch (root).
+
+Dependabot updates the GitHub Actions weekly; they are pinned to commit SHAs. CI skips pushes and pull requests that only touch documentation, screenshots or other non-code files.
 
 Third-party code and data, and their licences, are listed in [THIRD_PARTY.md](../THIRD_PARTY.md).

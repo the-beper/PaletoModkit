@@ -21,14 +21,14 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: "10.0.x"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Check the tag matches Cargo.toml
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
@@ -37,7 +37,7 @@ jobs:
         run: cargo test --locked
       - name: Build release artifacts
         run: ./packaging/build-release.sh
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/*
           generate_release_notes: true
@@ -46,8 +46,11 @@ jobs:
     needs: release
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
+    # Two runs must not publish the Pages branch at once.
+    concurrency: flatpak-pages
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+      SITE_URL: https://the-beper.github.io/PaletoModkit
     steps:
       # The build needs the Flathub runtimes (about 12 GB) and a release build of the
       # app: more than the runner has free. It runs on the runner itself, not in a
@@ -58,16 +61,58 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/local/share/chromium /usr/share/swift
           sudo docker image prune --all --force > /dev/null
           df -h /
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
           submodules: true
       - name: Use the packaging files from main
         run: git checkout origin/main -- packaging/
-      - name: Build the Flatpak bundle
+      - name: Fetch the published repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          remote="https://x-access-token:$GH_TOKEN@github.com/${GITHUB_REPOSITORY}.git"
+          mkdir -p "$RUNNER_TEMP/flatpak"
+          if git ls-remote --exit-code --heads "$remote" gh-pages >/dev/null; then
+            git clone --quiet --depth 1 --branch gh-pages "$remote" "$RUNNER_TEMP/pages"
+            # Git keeps no empty directories; OSTree wants these.
+            if [ -d "$RUNNER_TEMP/pages/repo" ]; then
+              mv "$RUNNER_TEMP/pages/repo" "$RUNNER_TEMP/flatpak/repo"
+              mkdir -p "$RUNNER_TEMP/flatpak/repo"/{tmp,state,refs/heads,refs/mirrors,refs/remotes}
+            fi
+          else
+            mkdir "$RUNNER_TEMP/pages"
+          fi
+      - name: Import the signing key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          test -n "$FLATPAK_GPG_PRIVATE_KEY" || { echo "secret FLATPAK_GPG_PRIVATE_KEY is not set (see docs/development.md)"; exit 1; }
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')" >> "$GITHUB_ENV"
+      - name: Build and sign the Flatpak
         run: WORK="$RUNNER_TEMP/flatpak" OUT="$PWD" ./packaging/build-flatpak.sh
-      - uses: softprops/action-gh-release@v3
+      - name: Publish to GitHub Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The container wrote as root.
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/flatpak" "$GNUPGHOME"
+          mv "$RUNNER_TEMP/flatpak/repo" "$RUNNER_TEMP/pages/repo"
+          ./packaging/publish-flatpak-repo.sh "$RUNNER_TEMP/pages" "$SITE_URL"
+          cd "$RUNNER_TEMP/pages"
+          rm -rf .git repo/tmp
+          git init --quiet --initial-branch=gh-pages
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add --all
+          git commit --quiet -m "Flatpak repository for ${TAG}"
+          git push --force "https://x-access-token:$GH_TOKEN@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ env.TAG }}
           files: PaletoModkit-x86_64.flatpak

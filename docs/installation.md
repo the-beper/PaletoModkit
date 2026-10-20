@@ -11,13 +11,16 @@ Paleto Modkit runs on x86-64 Linux, on a Wayland or X11 desktop (I use and test 
 
 ## Flatpak
 
-The bundle takes its runtime from Flathub, so the Flathub remote must be configured (it is on most distributions):
+The runtime comes from Flathub, so the Flathub remote must be configured (it is on most distributions). Installing from the signed repository keeps the app up to date with `flatpak update` or the software center, which can also add the repository from the [.flatpakrepo file](https://the-beper.github.io/PaletoModkit/paleto-modkit.flatpakrepo):
 
 ```bash
 flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install --user PaletoModkit-x86_64.flatpak
+flatpak remote-add --user --if-not-exists paletomodkit https://the-beper.github.io/PaletoModkit/paleto-modkit.flatpakrepo
+flatpak install --user paletomodkit io.github.the_beper.PaletoModkit
 flatpak run io.github.the_beper.PaletoModkit
 ```
+
+The `.flatpak` bundle on the release page works too (`flatpak install --user PaletoModkit-x86_64.flatpak`), but it is not updated automatically.
 
 ### Folders the sandbox can see
 

@@ -64,10 +64,14 @@ paleto export my.oiv    # my changes to the game, as an OIV package
 
 ## Install
 
-Download from [GitHub Releases](https://github.com/the-beper/PaletoModkit/releases):
+The AppImage and the Flatpak bundle are on [GitHub Releases](https://github.com/the-beper/PaletoModkit/releases):
 
 ```bash
-# Flatpak (needs the Flathub remote for its runtime)
+# Flatpak from the signed repository, updated by `flatpak update` (needs the Flathub remote for its runtime)
+flatpak remote-add --user --if-not-exists paletomodkit https://the-beper.github.io/PaletoModkit/paleto-modkit.flatpakrepo
+flatpak install --user paletomodkit io.github.the_beper.PaletoModkit
+
+# or the Flatpak bundle, with no automatic updates
 flatpak install --user PaletoModkit-x86_64.flatpak
 
 # or AppImage
