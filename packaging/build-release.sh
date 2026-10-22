@@ -48,7 +48,18 @@ APPDIR=$DIST/AppDir
 stage "$APPDIR/usr"
 cp packaging/$ID.desktop "$APPDIR/"
 cp packaging/icons/hicolor/256x256/apps/$ID.png "$APPDIR/"
-ln -s usr/bin/paleto-modkit "$APPDIR/AppRun"
+for lib in libxkbcommon-x11.so.0 libxcb-xkb.so.1; do
+    src=$(ldconfig -p | awk -v l="$lib" '$1 == l && /x86-64|AArch64/ { print $NF; exit }')
+    [ -n "$src" ] || { echo "missing $lib: install libxkbcommon-x11-0" >&2; exit 1; }
+    install -Dm644 "$(readlink -f "$src")" "$APPDIR/usr/lib/$lib"
+done
+cat > "$APPDIR/AppRun" <<'RUN'
+#!/bin/sh
+HERE=$(dirname "$(readlink -f "$0")")
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$HERE/usr/bin/paleto-modkit" "$@"
+RUN
+chmod +x "$APPDIR/AppRun"
 TOOL=$ROOT/target/tools/appimagetool-$ARCH.AppImage
 if [ ! -x "$TOOL" ]; then
     mkdir -p "$(dirname "$TOOL")"

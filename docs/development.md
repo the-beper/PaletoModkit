@@ -108,7 +108,7 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 flatpak install --user dist/PaletoModkit-x86_64.flatpak
 ```
 
-The release workflow (`.github/workflows/release.yml`) builds the tarball and the AppImage for each `v*` tag, then the Flatpak with `build-flatpak.sh`, and attaches all of them to the release. The Flatpak job runs on the runner itself, after freeing its disk: the build needs more room than a container job has. It also signs the Flatpak and publishes the repository on the `gh-pages` branch (served by GitHub Pages), replaced by a single commit each release so OSTree objects do not pile up in git history. A manual run of the workflow with the latest tag publishes the repository without a new release (an older tag would put an older version on top of `master`).
+The release workflow (`.github/workflows/release.yml`) builds the tarball and the AppImage for each `v*` tag on `ubuntu-22.04` (the AppImage links the build system's glibc, and the AppImage catalog tests on the oldest supported Ubuntu LTS; it also carries `libxkbcommon-x11`, which winit loads when there is no Wayland session), then the Flatpak with `build-flatpak.sh`, and attaches all of them to the release. The Flatpak job runs on the runner itself, after freeing its disk: the build needs more room than a container job has. It also signs the Flatpak and publishes the repository on the `gh-pages` branch (served by GitHub Pages), replaced by a single commit each release so OSTree objects do not pile up in git history. A manual run of the workflow with the latest tag publishes the repository without a new release (an older tag would put an older version on top of `master`).
 
 One-time setup for the repository:
 
