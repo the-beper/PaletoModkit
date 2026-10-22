@@ -91,6 +91,14 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.1" date="2026-10-22">
+      <description>
+        <p>Desktop entry fix for the AppImage catalog.</p>
+        <ul>
+          <li>The desktop file uses the standard X- prefix for the non-standard SingleMainWindow key, so it passes desktop-file-validate.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-10-16">
       <description>
         <p>Prefix tweaks works for games that are not in Steam's library.</p>

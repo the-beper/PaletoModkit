@@ -12,4 +12,4 @@ Keywords=GTA;GTA V;GTA 5;mod;mods;modding;OpenIV;OIV;RPF;archive;
 MimeType=application/x-openiv-package;application/x-rage-package;
 StartupNotify=true
 StartupWMClass=io.github.the_beper.PaletoModkit
-SingleMainWindow=true
+X-SingleMainWindow=true
