@@ -91,6 +91,17 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.2" date="2026-10-22">
+      <description>
+        <p>AppImage fixes for the AppImage catalog.</p>
+        <ul>
+          <li>The AppImage is built on Ubuntu 22.04, so it needs glibc 2.35 instead of 2.39 and runs on older distributions.</li>
+          <li>The AppImage carries libxkbcommon-x11, so it starts in an X11-only session.</li>
+          <li>The AppImage has update information and a .zsync file, so AppImageUpdate can update it.</li>
+          <li>The system theme falls back to light when the desktop states no colour preference.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.1" date="2026-10-22">
       <description>
         <p>Desktop entry fix for the AppImage catalog.</p>

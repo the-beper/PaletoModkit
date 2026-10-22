@@ -151,7 +151,7 @@ Dropping on the window:
 
 The **View** menu:
 
-- **Theme**: light, dark, or the same as the desktop (followed live, also on Wayland).
+- **Theme**: light, dark, or the same as the desktop (followed live, also on Wayland; light when the desktop states no preference).
 - **Text and icon size** and **Density** (row spacing).
 - **Folders and files**: folders first, grouped by type, or mixed.
 - **Side tree** shows or hides the tree of the game folder; **Coloured icons**; **Show all files in the side tree** (by default it shows folders and archives only); **Remember open folders** (the side tree opens as you left it).

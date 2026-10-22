@@ -3,7 +3,7 @@
 #   PaletoModkit-<arch>.tar.gz     binaries + desktop files + install.sh (in a paleto-modkit-<version>/ folder)
 # Both include paleto-cwconv (lib/paleto-modkit/cwconv), which needs the
 # CodeWalker submodule and the .NET 10 SDK (or podman, see build-cwconv.sh).
-#   PaletoModkit-<arch>.AppImage   single portable file
+#   PaletoModkit-<arch>.AppImage   single portable file, plus its .zsync for AppImageUpdate
 # The names carry no version, so a release's download links are the same every time
 # (releases/latest/download/PaletoModkit-x86_64.AppImage); the Flatpak bundle is made
 # by the release workflow as PaletoModkit-x86_64.flatpak.
@@ -67,7 +67,11 @@ if [ ! -x "$TOOL" ]; then
     chmod +x "$TOOL"
 fi
 # Extract-and-run works without FUSE (CI runners, containers).
-APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH "$TOOL" --no-appstream "$APPDIR" "$DIST/PaletoModkit-$ARCH.AppImage"
+# The update information lets AppImageUpdate fetch deltas. appimagetool writes the .zsync file
+# in the current folder, not next to the AppImage, and needs zsyncmake (the zsync package).
+command -v zsyncmake > /dev/null || { echo "missing zsyncmake: install zsync" >&2; exit 1; }
+UPDATE="gh-releases-zsync|the-beper|PaletoModkit|latest|PaletoModkit-$ARCH.AppImage.zsync"
+(cd "$DIST" && APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$ARCH "$TOOL" --no-appstream -u "$UPDATE" "$APPDIR" "PaletoModkit-$ARCH.AppImage")
 rm -rf "$APPDIR"
 
 (cd "$DIST" && sha256sum ./* > SHA256SUMS)

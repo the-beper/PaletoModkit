@@ -19,8 +19,6 @@ env:
 jobs:
   release:
     if: github.event_name == 'push'
-    # The oldest runner still offered: the AppImage uses the C library of the build system, and the
-    # AppImage catalog tests on the oldest supported Ubuntu LTS.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,8 +35,8 @@ jobs:
           test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
       - name: Tests
         run: cargo test --locked
-      - name: Install libraries bundled in the AppImage
-        run: sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0
+      - name: Install what the AppImage needs
+        run: sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0 zsync
       - name: Build release artifacts
         run: ./packaging/build-release.sh
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -50,15 +48,11 @@ jobs:
     needs: release
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
-    # Two runs must not publish the Pages branch at once.
     concurrency: flatpak-pages
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
       SITE_URL: https://the-beper.github.io/PaletoModkit
     steps:
-      # The build needs the Flathub runtimes (about 12 GB) and a release build of the
-      # app: more than the runner has free. It runs on the runner itself, not in a
-      # container job, so that this can make room first.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \

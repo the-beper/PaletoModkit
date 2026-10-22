@@ -92,12 +92,12 @@ async fn follow(state: &AtomicU8, ctx: &egui::Context) -> zbus::Result<()> {
 }
 
 /// Switches egui to the chosen theme; "same as the system" follows the
-/// desktop, else what egui itself detects, else dark.
+/// desktop, else what egui itself detects, else light.
 pub fn apply(choice: Theme, system: &SystemTheme, ctx: &egui::Context) {
     let dark = match choice {
         Theme::Light => false,
         Theme::Dark => true,
-        Theme::System => system.prefers_dark().or_else(|| ctx.system_theme().map(|t| t == egui::Theme::Dark)).unwrap_or(true),
+        Theme::System => system.prefers_dark().or_else(|| ctx.system_theme().map(|t| t == egui::Theme::Dark)).unwrap_or(false),
     };
     let wanted = if dark { egui::Theme::Dark } else { egui::Theme::Light };
     if ctx.theme() != wanted {
@@ -122,8 +122,8 @@ mod tests {
         assert_eq!(theme(Theme::Dark, 2), egui::Theme::Dark);
         assert_eq!(theme(Theme::System, 2), egui::Theme::Light);
         assert_eq!(theme(Theme::System, 1), egui::Theme::Dark);
-        // No preference known (and none egui could detect): dark.
-        assert_eq!(theme(Theme::System, 0), egui::Theme::Dark);
+        // No preference known (and none egui could detect): light.
+        assert_eq!(theme(Theme::System, 0), egui::Theme::Light);
         // Every colour differs between the themes.
         for f in [modded, error, ok] {
             assert_ne!(f(true), f(false));
