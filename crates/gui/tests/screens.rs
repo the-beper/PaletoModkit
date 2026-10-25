@@ -473,11 +473,10 @@ fn tour() {
     }
 
     type Open = fn(&mut App, &egui::Context);
-    let windows: [(&str, Open); 5] = [
+    let windows: [(&str, Open); 4] = [
         ("mods-check", |a, c| a.check_mods(c)),
         ("snapshots", |a, c| a.open_snapshots(c)),
-        ("last-crash", |a, c| a.open_last_crash(c)),
-        ("crash-hunt", |a, c| a.open_crash_hunt(c)),
+        ("crash-detection", |a, c| a.open_crash_detection(c)),
         ("export", |a, c| a.open_export(c)),
     ];
     for (name, open) in windows {
@@ -651,26 +650,12 @@ fn docs() {
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
 
-    harness.state_mut().open_last_crash(&ctx);
-    harness.run_steps(3);
-    save(&mut harness, &dir, "last-crash");
+    harness.state_mut().open_crash_detection(&ctx);
+    wait(&mut harness);
+    save(&mut harness, &dir, "crash-detection");
     harness.key_press(egui::Key::Escape);
     harness.run_steps(2);
 
-    harness.state_mut().open_crash_hunt(&ctx);
-    harness.run_steps(3);
-    harness.get_by_label("Start").click();
-    wait(&mut harness);
-    harness.get_by_label("It crashed").click();
-    wait(&mut harness);
-    if let Some(list) = harness.query_by_label_contains("Turned off for this test") {
-        list.click();
-    }
-    harness.event(egui::Event::PointerGone);
-    harness.run_steps(3);
-    save(&mut harness, &dir, "crash-hunt");
-    harness.get_by_label("Stop and turn everything back on").click();
-    wait(&mut harness);
     drop(harness);
     let _ = std::fs::remove_dir_all(&base);
 }

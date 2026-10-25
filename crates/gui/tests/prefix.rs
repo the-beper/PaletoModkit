@@ -106,6 +106,24 @@ fn says_when_there_is_no_prefix() {
     );
 }
 
+#[test]
+fn says_why_once_when_the_prefix_cannot_be_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = steam(dir.path());
+    // Steam's prefix is there, but its Proton is gone.
+    std::fs::remove_dir_all(dir.path().join("Proton X")).unwrap();
+    let mut harness = Harness::builder()
+        .with_size([1000.0, 800.0])
+        .build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.state_mut().open_prefix_tweaks(&ctx);
+    harness.run_steps(2);
+    harness.get_by_label("The game's Wine prefix cannot be changed from here.");
+    assert_eq!(harness.get_all_by_label_contains("(Proton X) is gone").count(), 1);
+}
+
 /// Installs .NET for real, from the window: a copy of a prefix without .NET
 /// (`PALETO_PREFIX_SOURCE`, a compatdata/<app id> folder), the network, about
 /// five minutes. Run it with `XDG_DATA_HOME` pointing to a scratch folder, so

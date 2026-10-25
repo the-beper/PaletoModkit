@@ -27,7 +27,7 @@ const INSIDE: &str = "inside";
 const DELETED: &str = ".paleto-deleted";
 
 /// A part of the setup that can be turned off: an `.asi` plugin
-/// ("Trainer.asi"), an add-on pack ("mods/update/x64/dlcpacks/car") or an
+/// ("Trainer.asi"), a Script Hook V .NET script ("scripts/Mod.dll"), an add-on pack ("mods/update/x64/dlcpacks/car") or an
 /// archive of the mods folder ("mods/x64e.rpf"); paths relative to the game folder.
 pub type Part = String;
 
@@ -68,6 +68,16 @@ pub fn parts(game: &Game) -> Vec<Part> {
     let loader = setup(game).plugin;
     let mods = game.mods_dir();
     let mut out: Vec<Part> = asi_plugins(game).into_iter().map(|p| p.name).filter(|n| !n.eq_ignore_ascii_case(loader)).collect();
+    // SHVDN scripts: compiled or source, directly in the scripts folder.
+    let scripts = resolve_ci(&game.root, "scripts");
+    let folder = scripts.file_name().map_or_else(|| "scripts".to_string(), |n| n.to_string_lossy().into_owned());
+    for entry in std::fs::read_dir(&scripts).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let script = Path::new(&name).extension().is_some_and(|e| ["dll", "cs", "vb"].iter().any(|x| e.eq_ignore_ascii_case(x)));
+        if script && entry.path().is_file() {
+            out.push(format!("{folder}/{name}"));
+        }
+    }
     let packs = resolve_ci(&game.mods_dir(), "update/x64/dlcpacks");
     for entry in std::fs::read_dir(&packs).into_iter().flatten().flatten() {
         if entry.path().is_dir() {
@@ -354,6 +364,19 @@ fn restore_inside(game: &Game, keys: Option<&Keys>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Turns a part (see [`parts`]) off or back on, outside a hunt: it is moved to
+/// `mods_disabled/` and back. Refused while a hunt is going on, which owns that folder.
+pub fn set_enabled(game: &Game, part: &str, enabled: bool) -> Result<(), Error> {
+    if load(game).is_some() {
+        return Err(Error::Package("a hunt is going on: answer it or stop it first".into()));
+    }
+    let known = if enabled { turned_off(game) } else { parts(game) };
+    if !known.iter().any(|p| p == part) {
+        return Err(Error::Package(format!("{part} is not a mod that can be turned {}", if enabled { "on" } else { "off" })));
+    }
+    if enabled { enable(game, part) } else { disable(game, part) }
+}
+
 fn disable(game: &Game, part: &str) -> Result<(), Error> {
     move_part(&game.root.join(part), &disabled_dir(game).join(part))
 }
@@ -539,5 +562,42 @@ mod tests {
         let Outcome::Test(_) = start_inside(&game, None, "mods/update/update.rpf", &cache).unwrap() else { panic!() };
         stop(&game, None).unwrap();
         assert_eq!(contents(&root.join("mods/update/update.rpf")), modded);
+    }
+
+    #[test]
+    fn script_mods_are_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = setup_game(dir.path());
+        std::fs::create_dir_all(game.root.join("scripts/sub")).unwrap();
+        for f in ["Mod.dll", "Other.CS", "third.vb", "notes.txt", "sub/Deep.dll"] {
+            std::fs::write(game.root.join("scripts").join(f), b"").unwrap();
+        }
+        let scripts = ["scripts/Mod.dll", "scripts/Other.CS", "scripts/third.vb"];
+        let all = parts(&game);
+        assert!(scripts.iter().all(|s| all.iter().any(|p| p == s)) && !all.iter().any(|p| p.contains("notes") || p.contains("Deep")), "{all:?}");
+        assert!(scripts.iter().all(|s| suspects(&game).iter().any(|p| p == s)));
+        for culprit in scripts {
+            assert_eq!(hunt_for(&game, culprit), culprit);
+            assert_eq!(turned_off(&game), [culprit]);
+            stop(&game, None).unwrap();
+            assert!(game.root.join(culprit).exists() && turned_off(&game).is_empty());
+        }
+    }
+
+    #[test]
+    fn turns_a_part_off_by_hand() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = setup_game(dir.path());
+        std::fs::create_dir_all(game.root.join("scripts")).unwrap();
+        std::fs::write(game.root.join("scripts/Mod.dll"), b"").unwrap();
+        for part in ["Trainer.asi", "scripts/Mod.dll", "mods/update/x64/dlcpacks/car", "mods/x64e.rpf"] {
+            set_enabled(&game, part, false).unwrap();
+            assert!(!game.root.join(part).exists() && turned_off(&game) == [part]);
+            set_enabled(&game, part, true).unwrap();
+            assert!(game.root.join(part).exists() && turned_off(&game).is_empty());
+        }
+        let Outcome::Test(_) = start(&game).unwrap() else { panic!() };
+        assert!(set_enabled(&game, "Trainer.asi", false).is_err() && set_enabled(&game, "Trainer.asi", true).is_err());
+        stop(&game, None).unwrap();
     }
 }

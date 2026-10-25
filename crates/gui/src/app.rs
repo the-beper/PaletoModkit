@@ -16,8 +16,9 @@ use crate::highlight::{self, Syntax};
 use crate::model::ModelView;
 use crate::mods_check::{self, ModsCheck};
 use crate::prefix_window::PrefixWindow;
+use crate::notices::{self, Startup};
+use crate::scripthook_window::{self, ScriptHookWindow};
 use crate::snapshots_window::{self, SnapshotsWindow};
-use crate::crash_hunt_window::{self, CrashHuntWindow};
 use crate::crash_window::{self, CrashWindow};
 use crate::export_window::{self, ExportWindow};
 use crate::settings::{Density, FileClass, Grouping, Settings, SortBy, TextSize, Theme};
@@ -98,9 +99,11 @@ pub struct App {
     /// The desktop's light or dark preference, for the "same as the system" theme.
     system_theme: SystemTheme,
     mods_check: Option<ModsCheck>,
+    script_hook: Option<ScriptHookWindow>,
+    /// The checks made at start and the notices they bring.
+    startup: Startup,
     snapshots: Option<SnapshotsWindow>,
     prefix_tweaks: Option<PrefixWindow>,
-    crash_hunt: Option<CrashHuntWindow>,
     crash: Option<CrashWindow>,
     export: Option<ExportWindow>,
     /// The comparison of the mods folder for the export window.
@@ -370,6 +373,12 @@ enum Action {
     Quit,
     /// Open (or refresh) the "Mods in game" window, or close it.
     CheckMods(bool),
+    /// Turn a mod (its part path) on or off.
+    ToggleMod(String, bool),
+    /// Open the "Script Hook V" window, or close it.
+    ScriptHook(bool),
+    /// Install this Script Hook V release over the installed one.
+    ScriptHookUpdate(paleto_core::scripthook::Release),
     /// Add DLC packs to the mods copy's dlclist.xml.
     AddDlcPacks(Vec<String>),
     /// Open the "Snapshots" window, or close it.
@@ -383,10 +392,10 @@ enum Action {
     /// Open the "Export mods" window (comparing the mods folder), or close it.
     Export(bool),
     WriteExport(PathBuf, Vec<paleto_core::export::Changed>, paleto_core::export::Metadata),
-    /// Open the "Last crash" window, or close it.
-    LastCrash(bool),
-    /// Open the "Find the crashing mod" window, or close it.
-    CrashHunt(bool),
+    /// Open the "Crash detection" window, or close it.
+    CrashDetection(bool),
+    /// Turn an `.asi` plugin off (from Crash detection).
+    TurnOff(String),
     HuntStart,
     /// Whether the game still crashed.
     HuntAnswer(bool),
@@ -395,7 +404,6 @@ enum Action {
     HuntInside(String),
     /// Convert these files of the mods folder to the Enhanced format.
     ConvertMods(Vec<String>),
-    PickAddonPack,
     /// Open the add-on pack dialog for these packs.
     AskAddonPacks(Vec<paleto_core::addon::Pack>),
     InstallAddonPacks,
@@ -486,9 +494,10 @@ impl App {
             changes_task: None,
             changes_cache: Vec::new(),
             mods_check: None,
+            script_hook: None,
+            startup: Startup::default(),
             snapshots: None,
             prefix_tweaks: None,
-            crash_hunt: None,
             crash: None,
             export: None,
             export_task: None,
@@ -534,6 +543,7 @@ impl App {
     pub fn restore(&mut self, storage: &dyn eframe::Storage, ctx: &egui::Context) {
         self.settings = storage.get_string("settings").map(|s| Settings::from_storage(&s)).unwrap_or_default();
         self.settings.apply(ctx);
+        self.startup.last_seen_crash = storage.get_string("last_seen_crash").and_then(|s| s.parse().ok());
         if self.settings.remember_open_folders {
             let saved = storage.get_string("open_dirs").unwrap_or_default();
             self.open_dirs = saved.lines().map(PathBuf::from).filter(|p| p.is_dir()).collect();
@@ -555,7 +565,9 @@ impl App {
             && self.legacy_scan.is_none()
             && self.copies_task.is_none()
             && self.export_task.is_none()
+            && !self.startup.running()
             && !self.mods_check.as_ref().is_some_and(ModsCheck::checking)
+            && !self.crash.as_ref().is_some_and(CrashWindow::loading)
     }
 
     /// The names marked as differing from the original game files, and
@@ -824,21 +836,13 @@ impl App {
         self.apply(Action::Export(true), ctx);
     }
 
-    /// The verdict of the "Last crash" window, if open with a crash.
-    pub fn crash_verdict(&self) -> Option<String> {
-        self.crash.as_ref().and_then(CrashWindow::verdict)
+    /// What the "Crash detection" window shows (verdict, causes, hunt state), if open.
+    pub fn crash_detection_summary(&self) -> Option<String> {
+        self.crash.as_ref().map(CrashWindow::summary)
     }
 
-    pub fn open_last_crash(&mut self, ctx: &egui::Context) {
-        self.apply(Action::LastCrash(true), ctx);
-    }
-
-    pub fn crash_hunt_summary(&self) -> Option<String> {
-        self.crash_hunt.as_ref().map(CrashHuntWindow::summary)
-    }
-
-    pub fn open_crash_hunt(&mut self, ctx: &egui::Context) {
-        self.apply(Action::CrashHunt(true), ctx);
+    pub fn open_crash_detection(&mut self, ctx: &egui::Context) {
+        self.apply(Action::CrashDetection(true), ctx);
     }
 
     pub fn open_snapshots(&mut self, ctx: &egui::Context) {
@@ -852,6 +856,47 @@ impl App {
     /// What the "Prefix tweaks" window found, while it is open.
     pub fn prefix_tweaks_summary(&self) -> Option<String> {
         self.prefix_tweaks.as_ref().map(PrefixWindow::summary)
+    }
+
+    /// Whether to look on the internet (for Script Hook V updates); off unless the real app turns it on.
+    pub fn set_online_checks(&mut self, online: bool) {
+        self.startup.online = online;
+    }
+
+    /// Checks made at start (news about Script Hook V and the last crash), in the background:
+    /// now if a game is chosen, else once one is.
+    pub fn startup_checks(&mut self, _ctx: &egui::Context) {
+        self.startup.want();
+        self.startup.begin(self.game.as_ref(), &self.ctx);
+    }
+
+    /// Tells the app of the latest Script Hook V release, as if it had been found online.
+    pub fn offer_script_hook(&mut self, release: paleto_core::scripthook::Release) {
+        self.startup.offer_release(self.game.as_ref(), release);
+    }
+
+    /// Tells the app of a crash the user has not been told about.
+    pub fn offer_crash(&mut self, time: std::time::SystemTime, verdict: &str) {
+        self.startup.offer_crash(time, verdict.to_string());
+    }
+
+    /// Installs this zip as the Script Hook V update instead of downloading one.
+    pub fn set_script_hook_zip(&mut self, zip: Vec<u8>) {
+        self.startup.zip = Some(zip);
+    }
+
+    /// The notice on screen, in words.
+    pub fn notice_text(&self) -> Option<String> {
+        self.startup.text()
+    }
+
+    pub fn open_script_hook(&mut self, ctx: &egui::Context) {
+        self.apply(Action::ScriptHook(true), ctx);
+    }
+
+    /// What the "Script Hook V" window shows, while it is open.
+    pub fn script_hook_summary(&self) -> Option<String> {
+        self.script_hook.as_ref().map(ScriptHookWindow::summary)
     }
 
     pub fn mods_check_summary(&self) -> Option<String> {
@@ -913,12 +958,14 @@ impl App {
         }));
         // The edition and folder live at the right end of the status bar.
         self.status = match paleto_core::loader::setup(&game).problem() {
-            Some(problem) => Status::Note(format!("⚠ {problem} (Game > Mods in game)"), game.root.display().to_string()),
+            Some(problem) => Status::Note(format!("⚠ {problem} (Tools > Mods in game)"), game.root.display().to_string()),
             None => Status::Info(String::new()),
         };
         self.mods_check = None;
+        self.script_hook = None;
         let root = game.root.clone();
         self.game = Some(game);
+        self.startup.begin(self.game.as_ref(), ctx);
         self.go(Location::Folder(root));
     }
 
@@ -934,9 +981,10 @@ impl App {
             || self.texture_batch.is_some()
             || self.info.is_some()
             || self.mods_check.is_some()
+            || self.script_hook.is_some()
+            || self.startup.open()
             || self.snapshots.is_some()
             || self.prefix_tweaks.is_some()
-            || self.crash_hunt.is_some()
             || self.crash.is_some()
             || self.export.is_some()
     }
@@ -1260,8 +1308,18 @@ impl App {
                 }
             }
             Action::PickPackage => {
-                if let Some(path) = rfd::FileDialog::new().add_filter("OpenIV package", &["oiv"]).pick_file() {
-                    self.open_package(&path, ctx);
+                let dialog = rfd::FileDialog::new().add_filter("Mod package (.oiv, dlc.rpf)", &["oiv", "rpf"]).set_title("Install a package or an add-on pack");
+                if let Some(path) = dialog.pick_file() {
+                    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rpf")) {
+                        let packs = paleto_core::addon::find_packs(std::slice::from_ref(&path), self.keys.as_deref());
+                        if packs.is_empty() {
+                            self.status = Status::Error(format!("{} is not a dlc.rpf", path.display()));
+                        } else {
+                            self.apply(Action::AskAddonPacks(packs), ctx);
+                        }
+                    } else {
+                        self.open_package(&path, ctx);
+                    }
                 }
             }
             Action::Install => {
@@ -1651,16 +1709,6 @@ impl App {
                 }
                 self.spawn_add(ctx, location, paths, None);
             }
-            Action::PickAddonPack => {
-                if let Some(path) = rfd::FileDialog::new().add_filter("DLC pack", &["rpf"]).set_title("Add-on pack (dlc.rpf)").pick_file() {
-                    let packs = paleto_core::addon::find_packs(std::slice::from_ref(&path), self.keys.as_deref());
-                    if packs.is_empty() {
-                        self.status = Status::Error(format!("{} is not a dlc.rpf", path.display()));
-                    } else {
-                        self.apply(Action::AskAddonPacks(packs), ctx);
-                    }
-                }
-            }
             Action::AskAddonPacks(packs) => {
                 let Some(game) = &self.game else { return };
                 let legacy = if game.edition == paleto_core::Edition::Enhanced {
@@ -1832,6 +1880,45 @@ impl App {
                     _ => None,
                 };
             }
+            Action::ToggleMod(part, enabled) => {
+                if self.busy() {
+                    self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+                    return;
+                }
+                let Some(game) = self.game.clone() else { return };
+                // Files are about to move: an open preview may point at one.
+                self.preview = None;
+                self.task = Some(Task::spawn(if enabled { "Turning a mod on" } else { "Turning a mod off" }, ctx, move || {
+                    match paleto_core::crash_hunt::set_enabled(&game, &part, enabled) {
+                        Ok(()) => Outcome::Done { message: format!("{part} turned {}", if enabled { "on" } else { "off" }), reload: None },
+                        Err(e) => Outcome::Failed(e.to_string()),
+                    }
+                }));
+            }
+            Action::ScriptHook(open) => {
+                self.script_hook = match (&self.game, open) {
+                    (Some(game), true) => Some(ScriptHookWindow::gather(game, self.startup.latest.clone(), self.startup.online, &self.ctx)),
+                    _ => None,
+                };
+            }
+            Action::ScriptHookUpdate(release) => {
+                if self.busy() {
+                    self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+                    return;
+                }
+                let Some(game) = self.game.clone() else { return };
+                let zip = self.startup.zip.clone();
+                self.task = Some(Task::spawn("Updating Script Hook V", ctx, move || {
+                    let result = match zip {
+                        Some(zip) => paleto_core::scripthook::install_from_zip(&game, &zip),
+                        None => paleto_core::scripthook::update(&game, &release),
+                    };
+                    match result {
+                        Ok(version) => Outcome::Done { message: format!("Script Hook V updated to v{version}"), reload: None },
+                        Err(e) => Outcome::Failed(format!("could not update Script Hook V: {e}")),
+                    }
+                }));
+            }
             Action::Snapshots(open) => {
                 self.snapshots = match (&self.game, open) {
                     (Some(game), true) => Some(SnapshotsWindow::gather(game)),
@@ -1864,22 +1951,23 @@ impl App {
                     }
                 }));
             }
-            Action::LastCrash(open) => {
+            Action::CrashDetection(open) => {
                 self.crash = match (&self.game, open) {
-                    (Some(game), true) => {
-                        Some(CrashWindow::new(
-                            paleto_core::crash_report::latest_with_keys(game, self.keys.as_deref()).map_err(|e| e.to_string()),
-                            game.edition.exe_name(),
-                        ))
-                    }
+                    (Some(game), true) => Some(CrashWindow::gather(game, self.keys.clone(), ctx)),
                     _ => None,
                 };
             }
-            Action::CrashHunt(open) => {
-                self.crash_hunt = match (&self.game, open) {
-                    (Some(game), true) => Some(CrashHuntWindow::gather(game)),
-                    _ => None,
-                };
+            Action::TurnOff(part) => {
+                if self.busy() {
+                    self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+                    return;
+                }
+                let Some(game) = self.game.clone() else { return };
+                self.task = Some(Task::spawn("Turning a plugin off", ctx, move || match paleto_core::crash_hunt::set_enabled(&game, &part, false) {
+                    Ok(()) => Outcome::Done { message: format!("{part} is turned off (Crash detection can turn it back on)"), reload: None },
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }));
+                self.after_task = Some(Action::Refresh);
             }
             Action::HuntStart | Action::HuntAnswer(_) | Action::HuntStop | Action::HuntInside(_) => {
                 use paleto_core::crash_hunt;
@@ -2084,6 +2172,13 @@ impl App {
         if let Some(check) = &mut self.mods_check {
             check.poll();
         }
+        if let Some(window) = &mut self.script_hook {
+            window.poll();
+        }
+        self.startup.poll(self.game.as_ref());
+        if !self.dialog_open() && !self.busy() {
+            self.startup.promote(self.game.as_ref());
+        }
         if let Some((location, task)) = &self.changes_task
             && let Some(result) = task.poll()
         {
@@ -2180,11 +2275,14 @@ impl App {
                     if let (Some(_), Some(game)) = (&self.mods_check, &self.game) {
                         self.mods_check = Some(ModsCheck::gather(game, self.keys.clone(), &self.ctx));
                     }
+                    if let Some(window) = &mut self.script_hook {
+                        window.refresh_facts();
+                    }
                     if let (Some(_), Some(game)) = (&self.snapshots, &self.game) {
                         self.snapshots = Some(SnapshotsWindow::gather(game));
                     }
-                    if let (Some(_), Some(game)) = (&self.crash_hunt, &self.game) {
-                        self.crash_hunt = Some(CrashHuntWindow::gather(game));
+                    if let Some(window) = &mut self.crash {
+                        window.reload(None);
                     }
                     match reload {
                         Some(location) => {
@@ -2287,26 +2385,9 @@ impl App {
             let has_game = self.game.is_some();
             let need_game = "Choose the game folder first (Game menu)";
             let need_keys = if has_game { "Reading the game's encryption keys…" } else { need_game };
-            let file = ui.menu_button("File", |ui| {
+            let file = menu_title(ui, "File", |ui| {
                 if ui.button("Open archive…").on_hover_text("Browse an .rpf archive, also outside the game folder").clicked() {
                     actions.push(Action::PickArchive);
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(can_install, egui::Button::new("Install package (.oiv)…"))
-                    .on_hover_text("Install an OpenIV package into the mods folder; the game's own files stay untouched")
-                    .on_disabled_hover_text(need_keys)
-                    .clicked()
-                {
-                    actions.push(Action::PickPackage);
-                }
-                if ui
-                    .add_enabled(can_install, egui::Button::new("Install add-on pack (dlc.rpf)…"))
-                    .on_hover_text("Copy a DLC pack (an add-on car, map…) into the mods folder and add it to the DLC list")
-                    .on_disabled_hover_text(need_keys)
-                    .clicked()
-                {
-                    actions.push(Action::PickAddonPack);
                 }
                 ui.separator();
                 if ui
@@ -2322,7 +2403,7 @@ impl App {
                     actions.push(Action::Quit);
                 }
             });
-            let game = ui.menu_button("Game", |ui| {
+            let game = menu_title(ui, "Game", |ui| {
                 if !self.installs.is_empty() {
                     ui.label(RichText::new("Installed games").weak());
                 }
@@ -2336,11 +2417,11 @@ impl App {
                 if ui.button("Choose the game folder…").on_hover_text("The folder holding GTA5.exe or GTA5_Enhanced.exe").clicked() {
                     actions.push(Action::PickGame);
                 }
-                ui.separator();
-                ui.label(RichText::new("Mods").weak());
+            });
+            let tools = menu_title(ui, "Tools", |ui| {
                 if ui
                     .add_enabled(has_game, egui::Button::new("Mods in game…"))
-                    .on_hover_text("Check that the game loads your mods: ASI loader, Script Hook V, DLC list, file formats")
+                    .on_hover_text("Every mod the game folder holds, whether the game loads it, and what is wrong with the setup")
                     .on_disabled_hover_text(need_game)
                     .clicked()
                 {
@@ -2354,34 +2435,26 @@ impl App {
                 {
                     actions.push(Action::Snapshots(true));
                 }
+                ui.separator();
                 if ui
-                    .add_enabled(has_game, egui::Button::new("Prefix tweaks…"))
-                    .on_hover_text("Changes to the game's Wine prefix that mods need, e.g. .NET for ScriptHookVDotNet mods")
+                    .add_enabled(has_game, egui::Button::new("Crash detection…"))
+                    .on_hover_text("Why the game crashed, which mod is likely to blame, and a search that finds it")
                     .on_disabled_hover_text(need_game)
                     .clicked()
                 {
-                    actions.push(Action::PrefixTweaks(true));
+                    actions.push(Action::CrashDetection(true));
                 }
                 ui.separator();
-                ui.label(RichText::new("Crashes").weak());
                 if ui
-                    .add_enabled(has_game, egui::Button::new("Last crash…"))
-                    .on_hover_text("Read the crash report the game wrote, and what it points to")
+                    .add_enabled(has_game, egui::Button::new("Script Hook V…"))
+                    .on_hover_text("The installed and the latest Script Hook V, whether it suits the game, and the update")
                     .on_disabled_hover_text(need_game)
                     .clicked()
                 {
-                    actions.push(Action::LastCrash(true));
-                }
-                if ui
-                    .add_enabled(has_game, egui::Button::new("Find the crashing mod…"))
-                    .on_hover_text("Turn mods off by halves until the one that crashes the game is found")
-                    .on_disabled_hover_text(need_game)
-                    .clicked()
-                {
-                    actions.push(Action::CrashHunt(true));
+                    actions.push(Action::ScriptHook(true));
                 }
             });
-            let view = ui.menu_button("View", |ui| {
+            let view = menu_title(ui, "View", |ui| {
                 let mut s = self.settings.clone();
                 ui.label(RichText::new("Theme").weak());
                 for (value, label) in Theme::ALL {
@@ -2429,7 +2502,7 @@ impl App {
                     actions.push(Action::Refresh);
                 }
             });
-            let help = ui.menu_button("Help", |ui| {
+            let help = menu_title(ui, "Help", |ui| {
                 if ui.button("Getting started").clicked() {
                     actions.push(Action::ShowInfo(Some(Info::GettingStarted)));
                 }
@@ -2444,7 +2517,7 @@ impl App {
                     actions.push(Action::ShowInfo(Some(Info::About)));
                 }
             });
-            switch_menus(ui.ctx(), &[file.response, game.response, view.response, help.response]);
+            switch_menus(ui.ctx(), &[file, game, tools, view, help]);
             let narrow = ui.ctx().content_rect().width() < 760.0;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Like the other bars, not flat as menu titles.
@@ -3861,7 +3934,7 @@ impl eframe::App for App {
                     let text = RichText::new(label).color(theme::warning(dark));
                     if ui
                         .add(egui::Button::new(text).frame(false))
-                        .on_hover_text("The Enhanced game may crash on them. Click to see them and convert them (Game > Mods in game).")
+                        .on_hover_text("The Enhanced game may crash on them. Click to see them and convert them (Tools > Mods in game).")
                         .clicked()
                     {
                         actions.push(Action::CheckMods(true));
@@ -3932,28 +4005,22 @@ impl eframe::App for App {
         self.unsaved_window(&ctx, &mut actions);
         self.info_window(&ctx, &mut actions);
         let busy = self.busy();
-        if let Some(request) = self.crash.as_ref().and_then(|w| w.show(&ctx)) {
-            match request {
-                crash_window::Request::Close => actions.push(Action::LastCrash(false)),
-                crash_window::Request::Hunt => {
-                    actions.push(Action::LastCrash(false));
-                    actions.push(Action::CrashHunt(true));
-                }
-            }
+        if let Some(request) = self.crash.as_mut().and_then(|w| w.show(&ctx, busy)) {
+            actions.push(match request {
+                crash_window::Request::Close => Action::CrashDetection(false),
+                crash_window::Request::UpdateScriptHook => Action::ScriptHook(true),
+                crash_window::Request::ModsInGame => Action::CheckMods(true),
+                crash_window::Request::TurnOff(part) => Action::TurnOff(part),
+                crash_window::Request::HuntStart => Action::HuntStart,
+                crash_window::Request::HuntAnswer(crashed) => Action::HuntAnswer(crashed),
+                crash_window::Request::HuntStop => Action::HuntStop,
+                crash_window::Request::HuntInside(part) => Action::HuntInside(part),
+            });
         }
         if let Some(request) = self.export.as_mut().and_then(|w| w.show(&ctx, busy)) {
             actions.push(match request {
                 export_window::Request::Close => Action::Export(false),
                 export_window::Request::Write(path, changes, meta) => Action::WriteExport(path, changes, meta),
-            });
-        }
-        if let Some(request) = self.crash_hunt.as_ref().and_then(|w| w.show(&ctx, busy)) {
-            actions.push(match request {
-                crash_hunt_window::Request::Close => Action::CrashHunt(false),
-                crash_hunt_window::Request::Start => Action::HuntStart,
-                crash_hunt_window::Request::Answer(crashed) => Action::HuntAnswer(crashed),
-                crash_hunt_window::Request::Stop => Action::HuntStop,
-                crash_hunt_window::Request::Inside(part) => Action::HuntInside(part),
             });
         }
         if let Some(request) = self.snapshots.as_mut().and_then(|w| w.show(&ctx, busy)) {
@@ -3967,7 +4034,7 @@ impl eframe::App for App {
         if self.prefix_tweaks.as_mut().is_some_and(|w| w.show(&ctx)) {
             actions.push(Action::PrefixTweaks(false));
         }
-        if let Some(request) = self.mods_check.as_ref().and_then(|m| m.show(&ctx)) {
+        if let Some(request) = self.mods_check.as_mut().and_then(|m| m.show(&ctx)) {
             actions.push(match request {
                 mods_check::Request::Close => Action::CheckMods(false),
                 mods_check::Request::Refresh => Action::CheckMods(true),
@@ -3976,7 +4043,30 @@ impl eframe::App for App {
                 mods_check::Request::UndoConversion(time) => Action::UndoConversion(time),
                 mods_check::Request::FindCopies => Action::FindCopies,
                 mods_check::Request::DeleteCopies(copies) => Action::DeleteCopies(copies),
+                mods_check::Request::Toggle(part, enabled) => Action::ToggleMod(part, enabled),
+                mods_check::Request::OpenScriptHook => Action::ScriptHook(true),
+                mods_check::Request::PrefixTweaks => Action::PrefixTweaks(true),
             });
+        }
+        if let Some(request) = self.script_hook.as_ref().and_then(|w| w.show(&ctx)) {
+            match request {
+                scripthook_window::Request::Close => actions.push(Action::ScriptHook(false)),
+                scripthook_window::Request::Retry => {
+                    if let Some(window) = &mut self.script_hook {
+                        window.retry(&ctx);
+                    }
+                }
+                scripthook_window::Request::Update(release) => actions.push(Action::ScriptHookUpdate(release)),
+            }
+        }
+        if let Some(reply) = self.startup.show(&ctx) {
+            self.startup.dismiss();
+            match reply {
+                notices::Reply::Update(release) => actions.push(Action::ScriptHookUpdate(release)),
+                notices::Reply::OpenScriptHook => actions.push(Action::ScriptHook(true)),
+                notices::Reply::OpenCrash => actions.push(Action::CrashDetection(true)),
+                notices::Reply::Dismiss => {}
+            }
         }
         for action in actions {
             self.apply(action, &ctx);
@@ -3988,6 +4078,9 @@ impl eframe::App for App {
             storage.set_string("game", game.root.display().to_string());
         }
         storage.set_string("settings", self.settings.to_storage());
+        if let Some(time) = self.startup.last_seen_crash {
+            storage.set_string("last_seen_crash", time.to_string());
+        }
         if self.settings.remember_open_folders {
             let open_dirs: Vec<String> = self.open_dirs.iter().map(|p| p.display().to_string()).collect();
             storage.set_string("open_dirs", open_dirs.join("\n"));
@@ -3995,6 +4088,27 @@ impl eframe::App for App {
             storage.remove_string("open_dirs");
         }
     }
+}
+
+/// A menu title that stays highlighted while its menu is open, as the hovered one is.
+fn menu_title<R>(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::Response {
+    let key = egui::Id::unique(("menu-title-open", title));
+    let was_open = ui.data(|d| d.get_temp::<bool>(key)).unwrap_or(false);
+    let (response, open) = ui
+        .scope(|ui| {
+            if was_open {
+                let hovered = ui.visuals().widgets.hovered.weak_bg_fill;
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = hovered;
+            }
+            let (response, inner) = egui::containers::menu::MenuButton::new(title).ui(ui, contents);
+            (response, inner.is_some())
+        })
+        .inner;
+    ui.data_mut(|d| d.insert_temp(key, open));
+    if open != was_open {
+        ui.ctx().request_repaint();
+    }
+    response
 }
 
 /// Every folder below `root` (hidden ones excluded), for "Expand all".
@@ -4083,13 +4197,13 @@ fn getting_started(ui: &mut egui::Ui) {
         ui,
         "5. Play",
         &["The game loads the mods folder through an ASI loader with OpenIV.asi (Legacy) or OpenRPF.asi (Enhanced), which you \
-           install separately. Game > Mods in game checks them, and shows which modded archives the last game session read."],
+           install separately. Tools > Mods in game checks them, and shows which modded archives the last game session read."],
     );
     section(
         ui,
         "6. When the game breaks",
-        &["Game > Snapshots saves the mods folder before a change and puts it back after. Game > Last crash reads the game's \
-           crash report, and Find the crashing mod narrows the cause down by halves."],
+        &["Game > Snapshots saves the mods folder before a change and puts it back after. Tools > Crash detection reads the game's \
+           crash reports, names the likely causes and narrows the mod down by halves."],
     );
 }
 

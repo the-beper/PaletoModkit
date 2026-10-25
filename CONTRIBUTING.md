@@ -11,7 +11,7 @@ Thank you for looking. Paleto Modkit is a personal project, mostly written with 
 - [docs/development.md](docs/development.md) covers the project layout, building, the tests, how the screenshots are made and the packaging.
 - Run `cargo clippy --all-targets -- -D warnings` and `cargo test` (also with an empty home folder, as in CI: the command is in the development page).
 - The code is formatted by hand: please do not run `cargo fmt` over the tree; match the style around your change.
-- Keep a change small and say why. A change that users see should come with a test and an update of the page of [docs/](docs/README.md) that describes it.
+- Keep a change small and say why. A change that users see should come with a test and an update of the page of [docs/](docs/) that describes it.
 - Files of the game are not stored in the repository, and tests must not need them.
 
 ## Licence

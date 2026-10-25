@@ -69,6 +69,8 @@ done
     harness.get_by_label("⚠ 1 file in the mods folder was made for Legacy");
     harness.state_mut().check_mods(&ctx);
     settle(&mut harness);
+    // The window's sections open with an animation: click once it has stopped moving.
+    harness.run_steps(15);
     harness.get_by_label("1 file in the mods folder was made for Legacy: the Enhanced game may crash on it or ignore it.");
     harness.get_by_label("Convert it to Enhanced").click();
     settle(&mut harness);
@@ -86,6 +88,8 @@ done
     // The conversion can be undone from the same window.
     let summary = harness.state().mods_check_summary().unwrap();
     assert!(summary.contains("last conversion:"), "{summary}");
+    harness.get_by_label("Maintenance").click();
+    harness.run_steps(10);
     harness.get_by_label("Undo the last conversion").click();
     settle(&mut harness);
     assert_eq!(harness.state().status_error(), None);
@@ -93,7 +97,7 @@ done
     assert_eq!(saved.archive("x64/vehicles.rpf", false, None).unwrap().read("car.ydr", None).unwrap(), resource(165));
     assert_eq!(std::fs::read_dir(root.join("mods_legacy")).unwrap().count(), 0);
     let summary = harness.state().mods_check_summary().unwrap();
-    assert!(summary.contains("not Enhanced:") && !summary.contains("last conversion"), "{summary}");
+    assert!(summary.contains("Not Enhanced:") && !summary.contains("last conversion"), "{summary}");
 
     // A package with a Legacy model inside its dlc.rpf: the installer says so
     // and offers to convert it.

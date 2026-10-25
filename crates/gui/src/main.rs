@@ -26,6 +26,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = paleto_modkit::App::new(cc);
+            app.set_online_checks(true);
+            app.startup_checks(&cc.egui_ctx);
             if let Some(instance) = instance {
                 app.set_instance(instance, &cc.egui_ctx);
             }

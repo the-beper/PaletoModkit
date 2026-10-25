@@ -141,7 +141,7 @@ pub fn script_hook(game: &Game) -> Option<ScriptHook> {
 }
 
 /// "[19:49:14] INIT: x" → "INIT: x".
-fn strip_time(line: &str) -> &str {
+pub(crate) fn strip_time(line: &str) -> &str {
     line.strip_prefix('[').and_then(|l| l.split_once("] ")).map_or(line, |(_, rest)| rest)
 }
 
@@ -553,6 +553,134 @@ pub(crate) fn dlc_pack_order(xml: &str) -> Vec<String> {
         .collect()
 }
 
+/// What a [`ModEntry`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ModKind {
+    /// An `.asi` plugin of the game folder.
+    Plugin,
+    /// A Script Hook V .NET script (`scripts/*.dll`, `.cs`, `.vb`).
+    Script,
+    /// An add-on pack of the mods folder (`update/x64/dlcpacks/<pack>`).
+    AddonPack,
+    /// Any other archive of the mods folder.
+    Archive,
+}
+
+/// What is known about a mod: the good (`Read`, `TurnedOff`) and the bad news.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModStatus {
+    /// The last session read it.
+    Read,
+    /// The last session did not read it.
+    NotRead,
+    /// An add-on pack the DLC list does not name: the game never loads it.
+    NotInDlcList,
+    /// A plugin older than the game's executable.
+    OlderThanGame,
+    /// Moved to `mods_disabled/` (see [`crate::crash_hunt::set_enabled`]).
+    TurnedOff,
+    /// It holds a file the Enhanced game cannot read: the problem, as [`ForeignFile`] says it.
+    NotEnhanced(String),
+}
+
+impl ModStatus {
+    fn is_problem(&self) -> bool {
+        !matches!(self, ModStatus::Read | ModStatus::TurnedOff)
+    }
+}
+
+/// A mod of the setup, as the "Mods in game" list shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModEntry {
+    pub kind: ModKind,
+    /// What to show: the file or pack name, the archive's path in the mods folder.
+    pub name: String,
+    /// The part path for [`crate::crash_hunt::set_enabled`] ("Trainer.asi",
+    /// "scripts/Mod.dll", "mods/update/x64/dlcpacks/car", "mods/x64e.rpf").
+    pub part: String,
+    pub enabled: bool,
+    /// Empty for a mod with nothing to say. A turned off mod has only `TurnedOff`.
+    pub status: Vec<ModStatus>,
+}
+
+/// The mods of the setup: plugins, scripts, add-on packs and archives of the
+/// mods folder (turned off ones too), with what is known about each. Loose
+/// files are not entries. Entries with a problem come first, then by kind and name.
+///
+/// `session` is the last session (archives and packs are `Read` or `NotRead`
+/// only when there is one); `unlisted_dlc` is [`unlisted_dlc_packs`] and
+/// `foreign` is [`foreign_files`], which are slow, so the caller computes them.
+pub fn inventory(game: &Game, session: Option<&Session>, unlisted_dlc: &[String], foreign: &[ForeignFile]) -> Vec<ModEntry> {
+    const PACKS: &str = "mods/update/x64/dlcpacks/";
+    let off = crate::crash_hunt::turned_off(game);
+    let mut parts = crate::crash_hunt::parts(game);
+    // Parts turned off are not in the folders any more; files turned off inside an archive are not parts.
+    for p in &off {
+        let lower = p.to_ascii_lowercase();
+        let known = if let Some(pack) = lower.strip_prefix(PACKS) {
+            !pack.contains('/')
+        } else {
+            !lower.contains('/') && lower.ends_with(".asi") || lower.starts_with("scripts/") || lower.starts_with("mods/") && lower.ends_with(".rpf")
+        };
+        if known && !parts.contains(p) {
+            parts.push(p.clone());
+        }
+    }
+    let older: HashMap<String, bool> = asi_plugins(game).into_iter().map(|p| (p.name, p.older_than_game)).collect();
+    let files: HashMap<String, Option<bool>> = modded_files(game, session).into_iter().map(|f| (f.path.to_ascii_lowercase(), f.loaded)).collect();
+    let mut out: Vec<ModEntry> = parts
+        .into_iter()
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            let enabled = !off.contains(&part);
+            // Where the mod is, in the mods folder's terms (what the log and the foreign files use).
+            let (kind, name, inside) = if let Some(pack) = lower.strip_prefix(PACKS) {
+                (ModKind::AddonPack, part[PACKS.len()..].to_string(), Some(format!("update/x64/dlcpacks/{pack}")))
+            } else if lower.starts_with("scripts/") {
+                (ModKind::Script, part[8..].to_string(), None)
+            } else if let Some(rel) = lower.strip_prefix("mods/") {
+                (ModKind::Archive, part[5..].to_string(), Some(rel.to_string()))
+            } else {
+                (ModKind::Plugin, part.clone(), None)
+            };
+            let mut status = Vec::new();
+            if !enabled {
+                status.push(ModStatus::TurnedOff);
+            } else {
+                if kind == ModKind::Plugin && older.get(&part) == Some(&true) {
+                    status.push(ModStatus::OlderThanGame);
+                }
+                let archive = match (&kind, &inside) {
+                    (ModKind::AddonPack, Some(dir)) => format!("{dir}/dlc.rpf"),
+                    (_, Some(path)) => path.clone(),
+                    _ => String::new(),
+                };
+                if let Some(read) = files.get(&archive).copied().flatten() {
+                    status.push(if read { ModStatus::Read } else { ModStatus::NotRead });
+                }
+                if kind == ModKind::AddonPack && unlisted_dlc.iter().any(|u| u.eq_ignore_ascii_case(&name)) {
+                    status.push(ModStatus::NotInDlcList);
+                }
+                if let Some(dir) = &inside {
+                    let prefix = format!("{dir}/");
+                    for f in foreign.iter().filter(|f| {
+                        let path = f.path.to_ascii_lowercase();
+                        path == *dir || path.starts_with(&prefix)
+                    }) {
+                        let problem = ModStatus::NotEnhanced(f.problem.clone());
+                        if !status.contains(&problem) {
+                            status.push(problem);
+                        }
+                    }
+                }
+            }
+            ModEntry { kind, name, part, enabled, status }
+        })
+        .collect();
+    out.sort_by_cached_key(|e| (!e.status.iter().any(ModStatus::is_problem), e.kind, e.name.to_ascii_lowercase()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +905,77 @@ mod tests {
         assert!(script_hook(&game).unwrap().stale);
         let plugins: Vec<(String, bool)> = asi_plugins(&game).into_iter().map(|p| (p.name, p.older_than_game)).collect();
         assert_eq!(plugins, [("new.ASI".to_string(), false), ("Old.asi".to_string(), true)]);
+    }
+
+    #[test]
+    fn mods_in_game() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        for f in [
+            "GTA5_Enhanced.exe",
+            "OpenRPF.asi",
+            "Old.asi",
+            "scripts/Mod.dll",
+            "mods/x64e.rpf",
+            "mods/update/update.rpf",
+            "mods/update/x64/dlcpacks/car/dlc.rpf",
+            "mods/update/x64/dlcpacks/Bus/dlc.rpf",
+            "mods/update/x64/dlcpacks/Old/dlc.rpf",
+            "mods/update/x64/data/loose.txt",
+        ] {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), b"").unwrap();
+        }
+        // Old.asi predates the game's executable; the others are made after it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"new").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("New.asi"), b"").unwrap();
+        std::fs::write(root.join("OpenRPF.log"), "[info] redirect 'update/update.rpf' (x)\n[info] redirect 'update/x64/dlcpacks/car/dlc.rpf' (x)\n").unwrap();
+        let game = Game::open(&root).unwrap();
+        let session = last_session(&game);
+        let foreign = [ForeignFile { path: "x64e.rpf/props/new.ydr".into(), problem: "resource version 165 (Enhanced uses 159)".into() }];
+        let unlisted = ["old".to_string()];
+
+        let list = |entries: &[ModEntry]| entries.iter().map(|e| format!("{:?} {} {}", e.kind, e.name, e.enabled)).collect::<Vec<_>>();
+        let entries = inventory(&game, session.as_ref(), &unlisted, &foreign);
+        assert_eq!(
+            list(&entries),
+            [
+                "Plugin Old.asi true",
+                "AddonPack Bus true",
+                "AddonPack Old true",
+                "Archive x64e.rpf true",
+                "Plugin New.asi true",
+                "Script Mod.dll true",
+                "AddonPack car true",
+                "Archive update/update.rpf true"
+            ]
+        );
+        let status = |name: &str| entries.iter().find(|e| e.name == name).unwrap().status.clone();
+        assert_eq!(status("Old.asi"), [ModStatus::OlderThanGame]);
+        assert_eq!(status("New.asi"), []);
+        assert_eq!(status("Mod.dll"), []);
+        assert_eq!(status("car"), [ModStatus::Read]);
+        assert_eq!(status("Bus"), [ModStatus::NotRead]);
+        assert_eq!(status("Old"), [ModStatus::NotRead, ModStatus::NotInDlcList]);
+        assert_eq!(status("update/update.rpf"), [ModStatus::Read]);
+        assert_eq!(status("x64e.rpf"), [ModStatus::NotRead, ModStatus::NotEnhanced("resource version 165 (Enhanced uses 159)".into())]);
+        assert_eq!(entries.iter().find(|e| e.name == "car").unwrap().part, "mods/update/x64/dlcpacks/car");
+        assert_eq!(entries.iter().find(|e| e.name == "Mod.dll").unwrap().part, "scripts/Mod.dll");
+
+        // Without a session nothing is read or not read; turned off mods stay in the list.
+        let plain = inventory(&game, None, &[], &[]);
+        assert!(plain.iter().all(|e| e.status.iter().all(|s| *s != ModStatus::Read && *s != ModStatus::NotRead)));
+        for part in ["Old.asi", "scripts/Mod.dll", "mods/update/x64/dlcpacks/car", "mods/x64e.rpf"] {
+            crate::crash_hunt::set_enabled(&game, part, false).unwrap();
+        }
+        let entries = inventory(&game, session.as_ref(), &unlisted, &foreign);
+        assert_eq!(entries.len(), 8);
+        for part in ["Old.asi", "scripts/Mod.dll", "mods/update/x64/dlcpacks/car", "mods/x64e.rpf"] {
+            let e = entries.iter().find(|e| e.part == part).unwrap();
+            assert!(!e.enabled && e.status == [ModStatus::TurnedOff], "{e:?}");
+        }
+        assert!(entries.iter().find(|e| e.part == "New.asi").unwrap().enabled);
     }
 }

@@ -247,7 +247,7 @@ impl PrefixWindow {
                 let dialog = rfd::FileDialog::new().set_title("The game's compatdata folder (the one with pfx inside)");
                 if let Some(dir) = dialog.pick_folder() {
                     self.found = prefix::choose(&self.game, Some(&dir)).map_err(message).and_then(|()| gather(&self.game));
-                    self.outcome = self.found.as_ref().err().map(|e| Err(e.clone()));
+                    self.outcome = None;
                 }
             }
             Some(Do::Forget) => {
@@ -390,7 +390,7 @@ impl PrefixWindow {
                     RichText::new("The game's Wine prefix cannot be changed from here.").strong(),
                 );
                 ui.label(why);
-                if let Some(Err(e)) = &self.outcome {
+                if let Some(Err(e)) = self.outcome.as_ref().filter(|o| o.as_ref().err() != Some(why)) {
                     ui.label(RichText::new(e).color(theme::error(dark)));
                 }
                 ui.add_space(4.0);

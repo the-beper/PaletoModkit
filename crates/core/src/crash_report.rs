@@ -7,12 +7,13 @@
 //! it that point into a module's code are listed, nearest first, which is
 //! enough to see an `.asi` plugin taking part.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use paleto_rpf::{Archive, Keys};
 
-use crate::game::{Edition, Game};
+use crate::game::{Edition, Game, resolve_ci};
 use crate::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,19 +107,24 @@ pub struct CrashReport {
     pub archives: Option<(u32, u32)>,
 }
 
+/// The name of an exception code ("access violation").
+pub fn code_name(code: u32) -> &'static str {
+    match code {
+        0xC000_0005 => "access violation",
+        0x8000_0003 => "breakpoint (the game stopped itself on an error)",
+        0xC000_001D => "illegal instruction",
+        0xC000_0094 => "integer division by zero",
+        0xC000_00FD => "stack overflow",
+        0xC000_0409 => "stack buffer overrun (fail fast)",
+        0xC000_0374 => "heap corruption",
+        0xE06D_7363 => "C++ exception",
+        _ => "exception",
+    }
+}
+
 impl CrashReport {
     pub fn code_name(&self) -> &'static str {
-        match self.code {
-            0xC000_0005 => "access violation",
-            0x8000_0003 => "breakpoint (the game stopped itself on an error)",
-            0xC000_001D => "illegal instruction",
-            0xC000_0094 => "integer division by zero",
-            0xC000_00FD => "stack overflow",
-            0xC000_0409 => "stack buffer overrun (fail fast)",
-            0xC000_0374 => "heap corruption",
-            0xE06D_7363 => "C++ exception",
-            _ => "exception",
-        }
+        code_name(self.code)
     }
 
     /// The plugins (.asi, ScriptHookV) on the crashing thread's stack, or the
@@ -181,7 +187,7 @@ impl CrashReport {
         }
         if !plugins.is_empty() {
             return format!(
-                "{} {} on the crashing thread's stack: try the game without it (Find the crashing mod can confirm).",
+                "{} {} on the crashing thread's stack: try the game without it (Tools > Crash detection can confirm).",
                 plugins.join(", "),
                 if plugins.len() == 1 { "is" } else { "are" }
             );
@@ -247,14 +253,19 @@ pub fn latest(game: &Game) -> Result<Option<CrashReport>, Error> {
 /// [`latest`], with the game's keys for looking in its encrypted add-on packs.
 pub fn latest_with_keys(game: &Game, keys: Option<&Keys>) -> Result<Option<CrashReport>, Error> {
     let Some(dump) = latest_dump(game) else { return Ok(None) };
-    let mut report = read_dump(&dump)?;
+    report_of(game, &dump, keys).map(Some)
+}
+
+/// The detailed report of one crash dump of the game (see [`history`]).
+pub fn report_of(game: &Game, dump: &Path, keys: Option<&Keys>) -> Result<CrashReport, Error> {
+    let mut report = read_dump(dump)?;
     // The game writes crashcontext.log with the dump (the newest crash only).
     let log = dump.with_file_name("crashcontext.log");
     let same_time = |a: &Path, b: &Path| {
         let t = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         t(a).zip(t(b)).is_some_and(|(x, y)| x.duration_since(y).or_else(|_| y.duration_since(x)).is_ok_and(|d| d.as_secs() < 60))
     };
-    if same_time(&log, &dump) {
+    if same_time(&log, dump) {
         report.read_log(&String::from_utf8_lossy(&std::fs::read(&log).unwrap_or_default()));
         if let Some(last) = &mut report.last_archive {
             last.pack = pack_of_archive(game, keys, last.hash);
@@ -262,15 +273,103 @@ pub fn latest_with_keys(game: &Game, keys: Option<&Keys>) -> Result<Option<Crash
     }
     // The same crash again and again points to one cause.
     if let Some(place) = &report.module {
-        report.same_place = crash_dirs(game)
-            .into_iter()
-            .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
-            .map(|e| e.path())
-            .filter(|p| *p != dump && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dmp")))
-            .filter(|p| read_dump(p).is_ok_and(|r| r.module.as_ref() == Some(place)))
-            .count();
+        report.same_place = all_dumps(game).iter().filter(|p| *p != dump).filter(|p| read_dump(p).is_ok_and(|r| r.module.as_ref() == Some(place))).count();
     }
-    Ok(Some(report))
+    Ok(report)
+}
+
+fn all_dumps(game: &Game) -> Vec<PathBuf> {
+    crash_dirs(game)
+        .into_iter()
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dmp")))
+        .collect()
+}
+
+/// One line of the crash history: a dump, in brief.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrashSummary {
+    pub dump: PathBuf,
+    pub time: Option<SystemTime>,
+    pub code: u32,
+    /// The module the exception happened in, with the offset.
+    pub place: Option<(String, u64)>,
+    /// How many of the other dumps crashed at the same place.
+    pub same_place: usize,
+}
+
+/// Every readable crash dump of the game, newest first. Each dump is read
+/// once; unreadable ones are left out.
+pub fn history(game: &Game) -> Vec<CrashSummary> {
+    let mut out: Vec<CrashSummary> =
+        all_dumps(game).into_iter().filter_map(|dump| read_dump(&dump).ok().map(|r| CrashSummary { dump, time: r.time, code: r.code, place: r.module, same_place: 0 })).collect();
+    let mut count: HashMap<(String, u64), usize> = HashMap::new();
+    for place in out.iter().filter_map(|c| c.place.clone()) {
+        *count.entry(place).or_default() += 1;
+    }
+    for c in &mut out {
+        c.same_place = c.place.as_ref().map_or(0, |p| count[p] - 1);
+    }
+    out.sort_by(|a, b| b.time.cmp(&a.time).then_with(|| a.dump.cmp(&b.dump)));
+    out
+}
+
+/// What a plugin's log (not the loader's own) says went wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogFindings {
+    pub path: PathBuf,
+    pub time: Option<SystemTime>,
+    /// The error-like lines without their time stamp, the last ones, each once.
+    pub lines: Vec<String>,
+}
+
+/// The `*.log` files of the game folder and of its `scripts` folder, other
+/// than the loader's own log, with their lines that look like an error.
+/// Logs with no such line are left out; newest first.
+pub fn plugin_logs(game: &Game) -> Vec<LogFindings> {
+    const WORDS: &[&str] = &["error", "exception", "fatal", "crash", "failed", "unable to"];
+    const TAIL: u64 = 512 * 1024;
+    const MAX_LINES: usize = 20;
+    let own = ["OpenIV.log", "OpenRPF.log"];
+    let mut out = Vec::new();
+    for dir in [game.root.clone(), resolve_ci(&game.root, "scripts")] {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !path.is_file() || !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("log")) || own.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
+            let Some(text) = read_tail(&path, TAIL) else { continue };
+            let mut seen = HashSet::new();
+            let mut lines: Vec<String> = text
+                .lines()
+                .map(|l| crate::loader::strip_time(l.trim()).trim().to_string())
+                .filter(|l| !l.is_empty() && WORDS.iter().any(|w| l.to_ascii_lowercase().contains(w)))
+                .filter(|l| seen.insert(l.clone()))
+                .collect();
+            if lines.is_empty() {
+                continue;
+            }
+            lines.drain(..lines.len().saturating_sub(MAX_LINES));
+            let time = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            out.push(LogFindings { path, time, lines });
+        }
+    }
+    out.sort_by(|a, b| b.time.cmp(&a.time).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// The last `max` bytes of a file as text, starting at a whole line.
+fn read_tail(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Some(if len > max { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
 }
 
 /// The asset stores of crashcontext.log. Its rows come run together on one
@@ -596,5 +695,71 @@ mod tests {
     fn context_of_the_crash() {
         let lines = context_lines("###\nGame State : Game Running\nVersion : 1158.16\nPlayer Position (1;2;3)\nPeds: 4\n");
         assert_eq!(lines, ["Game State : Game Running", "Version : 1158.16", "Player Position (1;2;3)"]);
+    }
+
+    /// A fake game folder with the crash dumps at these ages (seconds, newest has the smallest).
+    fn game_with_dumps(dir: &Path, dumps: &[(&str, u64, u64)]) -> Game {
+        let root = dir.join("game");
+        let crashes = root.join("GTAV Enhanced/CrashLogs");
+        std::fs::create_dir_all(&crashes).unwrap();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        let now = SystemTime::now();
+        for (name, address, age) in dumps {
+            let path = crashes.join(name);
+            std::fs::write(&path, dump(*address, &[])).unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(now - std::time::Duration::from_secs(*age)).unwrap();
+        }
+        Game::open(&root).unwrap()
+    }
+
+    #[test]
+    fn history_of_the_crashes() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two crashes in the exe at the same offset, one in the plugin, and a broken file.
+        let game = game_with_dumps(dir.path(), &[("a.dmp", 0x1_4000_1234, 300), ("b.dmp", 0x7000_0010, 200), ("c.DMP", 0x1_4000_1234, 100)]);
+        let bad = game.root.join("GTAV Enhanced/CrashLogs/bad.dmp");
+        std::fs::write(&bad, b"nope").unwrap();
+        std::fs::File::options().write(true).open(&bad).unwrap().set_modified(SystemTime::now() - std::time::Duration::from_secs(1000)).unwrap();
+        let h = history(&game);
+        let names: Vec<_> = h.iter().map(|c| c.dump.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(names, ["c.DMP", "b.dmp", "a.dmp"]);
+        assert_eq!(h.iter().map(|c| c.same_place).collect::<Vec<_>>(), [1, 0, 1]);
+        assert_eq!(h[1].place, Some(("Trainer.asi".into(), 0x10)));
+        assert_eq!(h[0].code, 0xC000_0005);
+        // The detailed report of an older dump, and of the newest one.
+        let old = report_of(&game, &h[2].dump, None).unwrap();
+        assert_eq!((old.module, old.same_place), (Some(("GTA5_Enhanced.exe".into(), 0x1234)), 1));
+        assert_eq!(latest_with_keys(&game, None).unwrap().unwrap().dump, h[0].dump);
+        assert!(report_of(&game, &bad, None).is_err());
+    }
+
+    #[test]
+    fn errors_of_the_plugin_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_with_dumps(dir.path(), &[]);
+        let root = &game.root;
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        // The loader's own log is shown elsewhere; a log with nothing wrong is left out.
+        std::fs::write(root.join("OpenRPF.log"), "[error] x\n").unwrap();
+        std::fs::write(root.join("Quiet.log"), "[10:00:00] all fine\n").unwrap();
+        std::fs::write(root.join("Hook.LOG"), "[19:49:14] INIT: Started\n[19:49:15] FATAL: Unknown game version\n[19:49:16] FATAL: Unknown game version\n[19:49:17] Unable to load x\n").unwrap();
+        let many: String = (0..30).map(|i| format!("Script exception number {i}\n")).collect();
+        std::fs::write(root.join("scripts/Mod.log"), many).unwrap();
+        let logs = plugin_logs(&game);
+        let mut names: Vec<_> = logs.iter().map(|l| l.path.file_name().unwrap().to_str().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["Hook.LOG", "Mod.log"]);
+        let hook = logs.iter().find(|l| l.path.ends_with("Hook.LOG")).unwrap();
+        assert_eq!(hook.lines, ["FATAL: Unknown game version", "Unable to load x"]);
+        let script = logs.iter().find(|l| l.path.ends_with("Mod.log")).unwrap();
+        assert_eq!((script.lines.len(), script.lines[0].as_str(), script.lines[19].as_str()), (20, "Script exception number 10", "Script exception number 29"));
+
+        // Only the end of a big log is read, from a whole line.
+        let mut big = "error at the start\n".to_string();
+        big += &"filler line without a finding\n".repeat(30_000);
+        big += "error at the end\n";
+        std::fs::write(root.join("Big.log"), big).unwrap();
+        let big = plugin_logs(&game).into_iter().find(|l| l.path.ends_with("Big.log")).unwrap();
+        assert_eq!(big.lines, ["error at the end"]);
     }
 }

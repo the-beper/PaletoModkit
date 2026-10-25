@@ -37,9 +37,9 @@
 - **Prefix tweaks**: many script mods are written for ScriptHookVDotNet (a `scripts` folder with `.dll` files) and need the real **.NET Framework 4.8** in the game's Wine prefix. Installing it by hand fails in a Proton prefix. Prefix tweaks does it for you: it backs the prefix up, installs .NET with the Proton's own Wine, sets the Windows version back so the game still starts, and checks the result. **Restore** undoes it. Tried so far with one Proton build (in the Flatpak it runs Wine on the host, with a permission it asks for). See [Prefix tweaks](docs/mods.md#scripthookvdotnet-mods-net-on-linux).
 
 **When the game breaks**
-- **Mods in game**: is the ASI loader in place, does Script Hook V match the game, which mods did the game actually read.
-- **Last crash**: a plain reading of the game's crash dump, down to a full asset store and the pack that was loading.
-- **Find the crashing mod**: turn mods off by halves until the culprit is left.
+- **Mods in game**: an inventory of your mods with an on/off switch each, is the ASI loader in place, which mods did the game actually read.
+- **Script Hook V**: installed, latest and game version side by side, with a one-click update of `ScriptHookV.dll`. Installed, it is also checked against dev-c.com at start ([what is sent](docs/troubleshooting.md#script-hook-v)).
+- **Crash detection**: the likely causes of a crash with a fix for each (down to a full asset store and the pack that was loading), the crash history, and a search that turns mods off by halves until the culprit is left.
 - **Snapshots** of the mods folder, instant on btrfs and XFS.
 
 Most of it also works from a terminal, with the `paleto` command (in the Flatpak and the tarball, not in the AppImage):
@@ -57,10 +57,10 @@ paleto export my.oiv    # my changes to the game, as an OIV package
 | ![Texture Dictionary Viewer](screenshots/texture-viewer.png) | ![Metadata as XML](screenshots/xml-editor.png) |
 | **Mods in game** | **OpenIV Package Installer (`.oiv`)** |
 | ![Mods in game](docs/images/mods-in-game.png) | ![OIV Package Installer](screenshots/oiv-installer.png) |
-| **Audio Preview (`.awc`)** | **Find the crashing mod** |
-| ![Audio Preview](screenshots/audio-preview.png) | ![Find the crashing mod](docs/images/crash-hunt.png) |
-| **Prefix tweaks: .NET for script mods** | **Last crash** |
-| ![Prefix tweaks](docs/images/prefix-tweaks.png) | ![Last crash](docs/images/last-crash.png) |
+| **Audio Preview (`.awc`)** | **Crash detection** |
+| ![Audio Preview](screenshots/audio-preview.png) | ![Crash detection](docs/images/crash-detection.png) |
+| **Prefix tweaks: .NET for script mods** | **Snapshots of the mods folder** |
+| ![Prefix tweaks](docs/images/prefix-tweaks.png) | ![Snapshots](docs/images/snapshots.png) |
 
 ## Install
 
@@ -86,20 +86,22 @@ A tarball and building from source are covered in [docs/installation.md](docs/in
 
 1. **Open the app.** It finds GTA V in your Steam libraries, and reads the encryption keys from the game the first time.
 2. **Set up the game to load mods**: an ASI loader plus `OpenIV.asi` (Legacy) or [`OpenRPF.asi`](https://www.gta5-mods.com/tools/openrpf-openiv-asi-for-gta-v-enhanced) (Enhanced). Under Proton, add `WINEDLLOVERRIDES="xinput1_4=n,b" %command%` (or `dinput8=n,b`) to the game's launch options. [Details](docs/installation.md#what-the-game-needs-to-load-your-mods).
-3. **Install a mod**: drop its `.oiv` or `dlc.rpf` on the window.
-4. **Check it**: **Game → Mods in game** tells you whether the game will load it and, after you play, whether it did.
-5. **Script mods (`scripts/*.dll`, ScriptHookVDotNet)**: close the game and use **Prefix tweaks…** (beside Install) once to put .NET Framework 4.8 in the game's prefix; then copy ScriptHookVDotNet and the mods to the game folder. [Details](docs/mods.md#scripthookvdotnet-mods-net-on-linux).
+3. **Install a mod**: drop its `.oiv` or `dlc.rpf` on the window, or use **Install package…** at the top right.
+4. **Check it**: **Tools → Mods in game** tells you whether the game will load it and, after you play, whether it did.
+5. **Script mods (`scripts/*.dll`, ScriptHookVDotNet)**: close the game and use **Prefix tweaks…** (the wine-red button beside Install) once to put .NET Framework 4.8 in the game's prefix; then copy ScriptHookVDotNet and the mods to the game folder. [Details](docs/mods.md#scripthookvdotnet-mods-net-on-linux).
 
 ## Documentation
 
-- [Installation](docs/installation.md): every install method, the encryption keys, the game setup.
-- [User guide](docs/user-guide.md): browsing and editing, textures, models, audio, shortcuts.
-- [Installing and managing mods](docs/mods.md): OIV packages, add-on packs, Legacy → Enhanced conversion, .NET script mods on Linux (Prefix tweaks), export, clean-up.
-- [When the game breaks](docs/troubleshooting.md): mods check, crash report, crash hunt, snapshots, common problems.
-- [Command line](docs/cli.md): every `paleto` command.
-- [OIV packages](docs/oiv.md): the supported package actions.
-- [FAQ](docs/faq.md): what it is and is not, what has not been tried in game, questions people ask.
-- [Development](docs/development.md): project layout, building, tests, packaging.
+| Page | For |
+| :--- | :--- |
+| [Installation](docs/installation.md) | Flatpak, AppImage, tarball, building from source; the encryption keys; what the game needs to load mods |
+| [User guide](docs/user-guide.md) | The window, browsing and editing archives, text and XML, metadata, textures, models, audio, shortcuts |
+| [Installing and managing mods](docs/mods.md) | The mods folder, OIV packages, add-on packs, Legacy → Enhanced conversion, ScriptHookVDotNet mods on Linux, exporting your mods, clean-up |
+| [When the game breaks](docs/troubleshooting.md) | Mods in game, crash detection, Script Hook V, snapshots, common problems |
+| [Command line](docs/cli.md) | Every `paleto` command, with examples |
+| [OIV packages](docs/oiv.md) | The package actions Paleto Modkit supports, and where changes go |
+| [FAQ](docs/faq.md) | What it is and is not, what has not been tried in game, common questions |
+| [Development](docs/development.md) | Project layout, building, tests, screenshots, packaging |
 
 Found a problem? [Open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose): the form asks for what helps most (edition, how you installed it, `paleto check`). Pull requests are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
 

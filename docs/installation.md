@@ -101,7 +101,7 @@ The game's archives are encrypted. Paleto Modkit does not ship the keys; it find
 2. It downloads CodeWalker's `magic.dat` table once, checks it against a pinned SHA-256 hash, and derives the NG key tables from it and the executable.
 3. It saves the result in `~/.local/share/paleto/keys.bin` (inside the Flatpak: `~/.var/app/io.github.the_beper.PaletoModkit/data/paleto/`), so this happens once.
 
-`paleto setup` does the same from the terminal. The network is also used by **Prefix tweaks**, when you ask it to install .NET (see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)); Paleto Modkit does nothing else online and has no telemetry.
+`paleto setup` does the same from the terminal. The network is also used by **Prefix tweaks**, when you ask it to install .NET (see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)), and by the [Script Hook V check](troubleshooting.md#script-hook-v) at start; Paleto Modkit does nothing else online and has no telemetry.
 
 ## What the game needs to load your mods
 
@@ -120,4 +120,4 @@ WINEDLLOVERRIDES="xinput1_4=n,b" %command%
 
 (with `dinput8=n,b` for `dinput8.dll`; add `ScriptHookV=n,b` when you use Script Hook V).
 
-**Game → Mods in game** then checks that everything is in place; see [troubleshooting.md](troubleshooting.md#mods-in-game).
+**Tools → Mods in game** then checks that everything is in place; see [troubleshooting.md](troubleshooting.md#mods-in-game).

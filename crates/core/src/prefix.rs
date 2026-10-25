@@ -214,10 +214,14 @@ fn choose_in(game: &Game, folder: Option<&Path>, data: &Path) -> Result<(), Erro
 }
 
 /// The Proton that last used a prefix: Steam lists its folders in `config_info`.
+/// When that folder is gone (a custom Proton renamed or updated), the tool Steam
+/// is set to use for the game stands in for it.
 fn proton_of(compat: &Path) -> Result<Proton, Error> {
     let text = std::fs::read_to_string(compat.join("config_info")).map_err(|_| {
         Error::Prefix("Steam has not set the prefix up yet: start the game once".into())
     })?;
+    let mut gone = None;
+    let mut roots: Vec<PathBuf> = Vec::new();
     for line in text.lines().skip(1) {
         for sub in ["files", "dist"] {
             let marker = format!("/{sub}/");
@@ -225,23 +229,166 @@ fn proton_of(compat: &Path) -> Result<Proton, Error> {
                 continue;
             };
             let dir = PathBuf::from(&line[..i]);
-            let wine = dir.join(sub).join("bin/wine");
-            if wine.is_file() {
-                return Ok(Proton {
-                    name: dir
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    wineserver: dir.join(sub).join("bin/wineserver"),
-                    wine,
-                    dir,
-                });
+            if let Some(found) = proton_in(&dir) {
+                return Ok(found);
+            }
+            if gone.is_none() {
+                gone = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+            }
+            // `<steam>/compatibilitytools.d/<tool>` or `<steam>/steamapps/common/<tool>`.
+            let folder = dir.parent();
+            match folder.and_then(Path::file_name).and_then(|n| n.to_str()) {
+                Some("compatibilitytools.d") => roots.extend(folder.and_then(Path::parent).map(Path::to_path_buf)),
+                Some("common") => roots.extend(folder.and_then(Path::parent).and_then(Path::parent).map(Path::to_path_buf)),
+                _ => {}
             }
         }
     }
-    Err(Error::Prefix(
-        "cannot find the Proton the game last ran with: start the game once".into(),
-    ))
+    // `<steam>/steamapps/compatdata/<app id>`.
+    if let Some(root) = compat.parent().and_then(Path::parent).and_then(Path::parent) {
+        roots.push(root.to_path_buf());
+    }
+    let app_id = compat.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
+    for root in &roots {
+        if let Ok(vdf) = std::fs::read_to_string(root.join("config/config.vdf")) {
+            let vdf = parse_vdf(&vdf);
+            let mapping = vdf.find("CompatToolMapping");
+            for id in [app_id.as_str(), "0"] {
+                if let Some(name) = mapping.and_then(|m| m.get(id)).and_then(|e| e.get("name")).and_then(Vdf::text)
+                    && !name.is_empty()
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(version) = std::fs::read_to_string(compat.join("version")) {
+        names.push(version.trim().to_string());
+    }
+    names.extend(gone.clone());
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        for root in &roots {
+            if let Some(found) = tool_named(root, name) {
+                return Ok(found);
+            }
+        }
+    }
+    Err(Error::Prefix(match gone {
+        Some(name) => format!("the Proton the game last ran with ({name}) is gone and no other was found: start the game once"),
+        None => "cannot find the Proton the game last ran with: start the game once".into(),
+    }))
+}
+
+/// The Proton in a folder, if it has a Wine (`files/` or, in older ones, `dist/`).
+fn proton_in(dir: &Path) -> Option<Proton> {
+    ["files", "dist"].into_iter().find_map(|sub| {
+        let wine = dir.join(sub).join("bin/wine");
+        wine.is_file().then(|| Proton {
+            name: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            wineserver: dir.join(sub).join("bin/wineserver"),
+            wine,
+            dir: dir.to_path_buf(),
+        })
+    })
+}
+
+/// The Proton Steam knows as `name` under a Steam folder: a custom tool (by the
+/// name in its `compatibilitytool.vdf`, or its folder's), or one of Steam's own
+/// in `steamapps/common` (matched loosely: "proton_9" finds "Proton 9.0").
+fn tool_named(steam: &Path, name: &str) -> Option<Proton> {
+    let folders = |sub: &str| {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(steam.join(sub)).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        dirs
+    };
+    for dir in folders("compatibilitytools.d") {
+        let named = std::fs::read_to_string(dir.join("compatibilitytool.vdf")).is_ok_and(|text| {
+            parse_vdf(&text).find("compat_tools").is_some_and(|tools| tools.keys().any(|k| k == name))
+        });
+        if (named || dir.file_name().is_some_and(|n| n == name))
+            && let Some(found) = proton_in(&dir)
+        {
+            return Some(found);
+        }
+    }
+    let loose = |s: &str| s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join("_");
+    let wanted = loose(name);
+    folders("steamapps/common").into_iter().find_map(|dir| {
+        let have = loose(&dir.file_name()?.to_string_lossy());
+        (have.starts_with("proton") && (have == wanted || have.starts_with(&format!("{wanted}_")))).then(|| proton_in(&dir))?
+    })
+}
+
+/// A Valve data file (VDF): quoted strings and `{ }` blocks.
+#[derive(Debug)]
+enum Vdf {
+    Text(String),
+    Map(Vec<(String, Vdf)>),
+}
+
+impl Vdf {
+    fn text(&self) -> Option<&str> {
+        match self {
+            Vdf::Text(t) => Some(t),
+            Vdf::Map(_) => None,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&Vdf> {
+        match self {
+            Vdf::Map(items) => items.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v),
+            Vdf::Text(_) => None,
+        }
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Vdf::Map(items) => items.as_slice(),
+            Vdf::Text(_) => &[],
+        }
+        .iter()
+        .map(|(k, _)| k.as_str())
+    }
+
+    /// The first entry called `key`, at any depth.
+    fn find(&self, key: &str) -> Option<&Vdf> {
+        let Vdf::Map(items) = self else {
+            return None;
+        };
+        items.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v).or_else(|| items.iter().find_map(|(_, v)| v.find(key)))
+    }
+}
+
+fn parse_vdf(text: &str) -> Vdf {
+    let mut chars = text.chars();
+    fn items(chars: &mut std::str::Chars) -> Vec<(String, Vdf)> {
+        let mut out = Vec::new();
+        let mut key: Option<String> = None;
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => {
+                    let mut s = String::new();
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '"' => break,
+                            '\\' => s.extend(chars.next()),
+                            c => s.push(c),
+                        }
+                    }
+                    match key.take() {
+                        Some(k) => out.push((k, Vdf::Text(s))),
+                        None => key = Some(s),
+                    }
+                }
+                '{' => out.push((key.take().unwrap_or_default(), Vdf::Map(items(chars)))),
+                '}' => break,
+                _ => {}
+            }
+        }
+        out
+    }
+    Vdf::Map(items(&mut chars))
 }
 
 /// What the registry and the files of a prefix say about .NET.
@@ -1301,6 +1448,63 @@ mod tests {
         assert_eq!(found.wine, proton.join("files/bin/wine"));
         std::fs::remove_file(compat.join("config_info")).unwrap();
         assert!(proton_of(&compat).is_err());
+    }
+
+    /// A Steam folder with a game's prefix whose `config_info` names a Proton folder that is gone.
+    fn stale_steam(steam: &Path, stale: &str) -> Game {
+        let root = steam.join("steamapps/common/Grand Theft Auto V Enhanced");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        let compat = steam.join("steamapps/compatdata/3240220");
+        std::fs::create_dir_all(compat.join("pfx/drive_c")).unwrap();
+        std::fs::write(
+            compat.join("config_info"),
+            format!("X-1\n{}/compatibilitytools.d/{stale}/files/share/\n", steam.display()),
+        )
+        .unwrap();
+        Game::open(&root).unwrap()
+    }
+
+    fn fake_proton(dir: &Path) {
+        std::fs::create_dir_all(dir.join("files/bin")).unwrap();
+        std::fs::write(dir.join("files/bin/wine"), b"").unwrap();
+    }
+
+    #[test]
+    fn a_renamed_custom_proton_is_found_through_steams_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let steam = dir.path();
+        let game = stale_steam(steam, "Proton Latest-x86_64_v3");
+        let data = steam.join("data");
+        // Gone, and nothing else to go by.
+        let why = find_in(&game, &data).unwrap_err().to_string();
+        assert!(why.contains("(Proton Latest-x86_64_v3) is gone"), "{why}");
+        // Another folder, whose internal name differs from its folder's, is what Steam is set to use.
+        let tool = steam.join("compatibilitytools.d/Some Folder");
+        fake_proton(&tool);
+        std::fs::write(tool.join("compatibilitytool.vdf"), "\"compatibilitytools\"\n{\n \"compat_tools\"\n {\n  \"Proton Latest\"\n  {\n   \"install_path\" \".\"\n  }\n }\n}\n").unwrap();
+        fake_proton(&steam.join("compatibilitytools.d/Other"));
+        std::fs::create_dir_all(steam.join("config")).unwrap();
+        std::fs::write(
+            steam.join("config/config.vdf"),
+            "\"InstallConfigStore\"\n{\n \"Software\"\n {\n  \"Valve\"\n  {\n   \"Steam\"\n   {\n    \"CompatToolMapping\"\n    {\n     \"0\"\n     {\n      \"name\"\t\"Other\"\n     }\n     \"3240220\"\n     {\n      \"name\"\t\"Proton Latest\"\n     }\n    }\n   }\n  }\n }\n}\n",
+        )
+        .unwrap();
+        let found = find_in(&game, &data).unwrap();
+        assert_eq!(found.proton.name, "Some Folder");
+        assert_eq!(found.proton.wine, tool.join("files/bin/wine"));
+    }
+
+    #[test]
+    fn steams_own_proton_is_found_by_the_name_of_the_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let steam = dir.path();
+        let game = stale_steam(steam, "Gone");
+        fake_proton(&steam.join("steamapps/common/Proton - Experimental"));
+        fake_proton(&steam.join("steamapps/common/Proton 9.0"));
+        std::fs::create_dir_all(steam.join("config")).unwrap();
+        std::fs::write(steam.join("config/config.vdf"), "\"CompatToolMapping\" { \"3240220\" { \"name\" \"proton_experimental\" } }").unwrap();
+        assert_eq!(find_in(&game, &steam.join("data")).unwrap().proton.name, "Proton - Experimental");
     }
 
     #[test]

@@ -20,7 +20,7 @@ How to browse the game files and change them with the desktop app. For installin
 
 ![The game folder](../screenshots/game-folder.png)
 
-- **Menu bar**: File, Game, View and Help. The filter box sits in the middle; **Install package…**, the most common action, is at the right end, with **Prefix tweaks…** beside it (the game's Wine prefix, for ScriptHookVDotNet mods; see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). [Menus at a glance](#menus-at-a-glance) lists what each menu holds.
+- **Menu bar**: File, Game, Tools, View and Help. The filter box sits in the middle. At the right end, **Install package…** is the one place for `.oiv` packages and add-on packs (`dlc.rpf`), with **Prefix tweaks…** beside it (the game's Wine prefix, for ScriptHookVDotNet mods; see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). Neither has a menu entry. [Menus at a glance](#menus-at-a-glance) lists what each menu holds.
 - **Location bar**: back, forward and up buttons, then the path as clickable parts. Inside the mods copy of an archive, the path shows **MODS**, and **Show original** at the right end shows the game's own archive instead (marked **ORIGINAL**; **Show mods copy** goes back). This lasts until you leave that archive.
 - **Side tree**: the game folder. Click a name to open it, its arrow to expand it. **Expand all** and **Collapse all** are above it. **View → Side tree** hides it when you want the room for the file list.
 - **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it.
@@ -160,9 +160,10 @@ The **View** menu:
 
 | Menu | Entries |
 | :--- | :--- |
-| **File** | Open archive… · Install package (.oiv)… · Install add-on pack (dlc.rpf)… · Export mods as an OIV package… · Quit |
-| **Game** | The installed games (pick one) · Choose the game folder… · Mods in game… · Snapshots of the mods folder… · Prefix tweaks… · Last crash… · Find the crashing mod… |
+| **File** | Open archive… · Export mods as an OIV package… · Quit |
+| **Game** | The installed games (pick one) · Choose the game folder… |
+| **Tools** | Mods in game… · Snapshots of the mods folder… · Crash detection… · Script Hook V… |
 | **View** | Theme · Text and icon size · Density · Folders and files (grouping) · Coloured icons · Side tree · Show all files in the side tree · Remember open folders · Show original files · Expand all / Collapse all folders · Refresh (F5) |
 | **Help** | Getting started · Keyboard and mouse shortcuts · Online documentation · Report a problem · About |
 
-What each one does: [mods.md](mods.md) for installing, converting and exporting; [troubleshooting.md](troubleshooting.md) for Mods in game, snapshots and the crash tools.
+What each one does: [mods.md](mods.md) for installing, converting and exporting; [troubleshooting.md](troubleshooting.md) for the Tools menu.

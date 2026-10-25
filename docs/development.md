@@ -87,7 +87,7 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 
 - `cargo clippy --all-targets -- -D warnings` is clean, and `cargo test` passes, also with an empty home folder (see [Tests](#tests));
 - the Rust code is formatted by hand, in one style (long lines, method chains on one line) that `rustfmt` does not reproduce: do not run `cargo fmt` over the tree, and match the code around your change;
-- a change that users see comes with its test (the GUI tests are small and fast) and an update of the page of [docs/](README.md) that describes it.
+- a change that users see comes with its test (the GUI tests are small and fast) and an update of the page of [docs/](.) that describes it.
 
 ## Packaging
 
