@@ -246,34 +246,33 @@ impl ArchiveEditor {
         let parts = split(path)?;
         let (last, dirs) = parts.split_last().unwrap();
         let dir = self.dir_mut(dirs, create)?.ok_or_else(|| Error::NotFound(path.to_string()))?;
-        let node = match dir.children.remove(last) {
+        // The file stays in place until it has been read as an archive.
+        let node = match dir.children.get(last) {
             Some(Node::File(f)) => {
-                let file = match f.data {
-                    Data::Stored { file, offset, len } => (file, offset, len),
-                    Data::Bytes(bytes) => {
-                        let mut tmp = tempfile::tempfile()?;
-                        tmp.write_all(&bytes)?;
-                        let len = bytes.len() as u64;
-                        (Arc::new(tmp), 0, len)
-                    }
-                };
-                let is_plain = matches!(f.kind, EntryKind::Binary { size: 0, encrypted: false, .. });
-                if !is_plain {
+                if !matches!(f.kind, EntryKind::Binary { size: 0, encrypted: false, .. }) {
                     return Err(Error::NotAnArchive(last.clone()));
                 }
-                let archive = Archive::parse(file.0, last.clone(), file.1, file.2, keys)?;
-                Node::Archive(Box::new(Self::from_archive(&archive)))
+                let (file, offset, len) = match &f.data {
+                    Data::Stored { file, offset, len } => (file.clone(), *offset, *len),
+                    Data::Bytes(bytes) => {
+                        let mut tmp = tempfile::tempfile()?;
+                        tmp.write_all(bytes)?;
+                        (Arc::new(tmp), 0, bytes.len() as u64)
+                    }
+                };
+                let archive = Archive::parse(file, last.clone(), offset, len, keys)?;
+                Some(Node::Archive(Box::new(Self::from_archive(&archive))))
             }
-            Some(node @ Node::Archive(_)) => node,
-            Some(other) => {
-                dir.children.insert(last.clone(), other);
-                return Err(Error::NotAnArchive(last.clone()));
-            }
-            None if create => Node::Archive(Box::new(Self::new(last))),
+            Some(Node::Archive(_)) => None,
+            Some(_) => return Err(Error::NotAnArchive(last.clone())),
+            None if create => Some(Node::Archive(Box::new(Self::new(last)))),
             None => return Err(Error::NotFound(path.to_string())),
         };
-        match dir.children.entry(last.clone()).or_insert(node) {
-            Node::Archive(a) => Ok(a),
+        if let Some(node) = node {
+            dir.children.insert(last.clone(), node);
+        }
+        match dir.children.get_mut(last) {
+            Some(Node::Archive(a)) => Ok(a),
             _ => unreachable!(),
         }
     }

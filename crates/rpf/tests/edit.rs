@@ -253,3 +253,21 @@ fn names_that_are_paths_are_refused() {
         assert!(matches!(Archive::open(&path, None), Err(paleto_rpf::Error::Corrupt(_))), "{}", String::from_utf8_lossy(bad));
     }
 }
+
+#[test]
+fn a_file_that_is_not_an_archive_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    let mut ed = ArchiveEditor::new("a.rpf");
+    ed.add_file("bad.rpf", b"not an archive".to_vec()).unwrap();
+    ed.add_file("res.rpf", resource(100)).unwrap();
+    // Added in this session (bytes in memory), then read back from the saved file.
+    for round in 0..2 {
+        assert!(ed.archive("bad.rpf", false, None).is_err(), "round {round}");
+        assert!(matches!(ed.archive("res.rpf", true, None), Err(paleto_rpf::Error::NotAnArchive(_))), "round {round}");
+        ed.save(&path).unwrap();
+        assert_eq!(read(&path, "bad.rpf"), b"not an archive");
+        assert_eq!(read(&path, "res.rpf"), resource(100));
+        ed = ArchiveEditor::open(&path, None).unwrap();
+    }
+}
