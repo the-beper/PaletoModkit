@@ -3767,6 +3767,7 @@ dependencies = [
  "paleto-core",
  "paleto-formats",
  "paleto-rpf",
+ "tempfile",
 ]
 
 [[package]]

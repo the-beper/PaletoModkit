@@ -19,14 +19,14 @@ Paths can point inside archives, nested ones included:
 x64e.rpf/levels/gta5/vehicles.rpf/adder.yft
 ```
 
-The game folder is the one given with `--game`, or `$PALETO_GAME`, or the game folder that holds the current directory or the given path. So inside the game folder, paths can be relative to it:
+The game folder is the one given with `--game`, or `$PALETO_GAME`, or the game folder that holds the given path or the current directory. So inside the game folder, paths can be relative to it:
 
 ```bash
 cd ~/.local/share/Steam/steamapps/common/Grand\ Theft\ Auto\ V\ Enhanced
 paleto ls update/update.rpf/common/data
 ```
 
-**Editing commands never change the original game files**: archives in the game folder are copied to its `mods/` folder first and edited there (`paleto` says `editing mods copy …`). Archives outside the game folder are edited in place.
+**Editing commands never change the original game files**: archives and loose game data files (under `update/` or `x64/`) in the game folder are copied to its `mods/` folder first and edited there (`paleto` says `editing mods copy …`); other loose files, such as plugin configs, are edited where they are. An archive of another game folder (one that holds it, or a Steam install) goes to that folder's `mods/`, and is refused when `--game` names a different one. Archives outside every game folder are edited in place.
 
 The first command that needs the encryption keys prepares them (see [installation.md](installation.md#first-run-the-encryption-keys)); `paleto setup` does it on purpose.
 

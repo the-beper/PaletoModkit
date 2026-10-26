@@ -486,8 +486,9 @@ fn main() -> Result<()> {
             edits.extend(adds.iter().map(|(name, file)| Edit::Add { name, file, format }));
 
             if Path::new(&path).is_file() {
-                std::fs::write(&path, edit_textures(&std::fs::read(&path)?, &edits)?)?;
-                println!("saved {path}");
+                let file = editable_file(&path, cli.game.as_deref())?;
+                std::fs::write(&file, edit_textures(&std::fs::read(&file)?, &edits)?)?;
+                println!("saved {}", file.display());
             } else {
                 let target = editable(&path, cli.game.as_deref())?;
                 let keys = load_keys(cli.game.as_deref(), &target.disk)?;
@@ -1032,8 +1033,9 @@ fn read_any(path: &str, game: Option<&Path>) -> Result<Vec<u8>> {
 /// Saves a file on disk, or into the mods folder copy of its archive.
 fn write_any(path: &str, game: Option<&Path>, data: Vec<u8>) -> Result<()> {
     if Path::new(path).is_file() {
-        std::fs::write(path, data)?;
-        println!("saved {path}");
+        let file = editable_file(path, game)?;
+        std::fs::write(&file, data)?;
+        println!("saved {}", file.display());
         return Ok(());
     }
     let target = editable(path, game)?;
@@ -1132,16 +1134,48 @@ fn descend(archive: Archive, idx: usize, keys: Option<&Keys>) -> Result<Archive>
 /// The archive path, redirected to the mods folder for original game files.
 fn editable(path: &str, game: Option<&Path>) -> Result<ArchivePath> {
     let target = ArchivePath::parse(path).with_context(|| format!("{path}: no archive in this path"))?;
-    // As written, so a game folder reached through links is still found.
-    let game = find_game(game, Some(&std::path::absolute(&target.disk)?)).ok();
-    let editable = target.editable(game.as_ref())?;
+    let owner = owner(&target.disk, game)?.map(|(game, _)| game);
+    let editable = target.editable(owner.as_ref())?;
     if editable.disk != target.disk {
         println!("editing mods copy {}", editable.disk.display());
     }
     Ok(editable)
 }
 
-/// The game folder: explicit, or found above the current directory or `near`.
+/// A loose file to write: an original game data file is copied to the mods
+/// folder first, and the copy is written.
+fn editable_file(path: &str, game: Option<&Path>) -> Result<PathBuf> {
+    if let Some((game, rel)) = owner(Path::new(path), game)?
+        && !rel.starts_with("mods")
+        && game.target(&rel.to_string_lossy()).starts_with(game.mods_dir())
+    {
+        let copy = game.mods_copy(&rel.to_string_lossy())?.with_context(|| format!("{path} not found"))?;
+        println!("editing mods copy {}", copy.display());
+        return Ok(copy);
+    }
+    Ok(PathBuf::from(path))
+}
+
+/// The game folder `path` is in, with the path inside it: the chosen one, one
+/// that holds it (as written or through links), or a Steam install. An
+/// original of another game folder than the one `--game` names is refused.
+fn owner(path: &Path, game: Option<&Path>) -> Result<Option<(Game, PathBuf)>> {
+    // As written, so a game folder reached through links is still found.
+    let abs = std::path::absolute(path)?;
+    let chosen = find_game(game, Some(&abs)).ok();
+    let above = |p: &Path| p.ancestors().find_map(|d| Game::open(d).ok());
+    let real = std::fs::canonicalize(&abs).ok();
+    let candidates = chosen.clone().into_iter().chain(above(&abs)).chain(real.as_deref().and_then(above)).chain(paleto_core::game::detect_installs());
+    let found = candidates.into_iter().find_map(|g| Some((vfs::in_game(&abs, &g)?, g)));
+    if let (Some(dir), Some((rel, owner))) = (game, &found)
+        && !rel.starts_with("mods")
+        && chosen.as_ref().is_none_or(|c| c.root != owner.root)
+    {
+        bail!("{} is in the game folder {}, not in {}", path.display(), owner.root.display(), dir.display());
+    }
+    Ok(found.map(|(rel, game)| (game, rel)))
+}
+
 /// "3 min", "2 h", "5 days".
 fn age(secs: u64) -> String {
     match secs {
@@ -1152,12 +1186,13 @@ fn age(secs: u64) -> String {
     }
 }
 
+/// The game folder: explicit, or found above `near` or the current directory.
 fn find_game(explicit: Option<&Path>, near: Option<&Path>) -> Result<Game> {
     if let Some(dir) = explicit {
         return Ok(Game::open(dir)?);
     }
     let cwd = std::env::current_dir()?;
-    let starts = [Some(cwd.as_path()), near].into_iter().flatten();
+    let starts = [near, Some(cwd.as_path())].into_iter().flatten();
     for start in starts {
         if let Some(game) = start.ancestors().find_map(|d| Game::open(d).ok()) {
             return Ok(game);
@@ -1182,5 +1217,55 @@ fn load_keys(game: Option<&Path>, archive: &Path) -> Result<Option<Keys>> {
     match find_game(game, Some(&abs)) {
         Ok(game) => Ok(Some(game.keys()?)),
         Err(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An archive of one install is never edited in place because another
+    /// install was chosen with --game. (The current directory, the other way
+    /// to choose one, cannot be changed safely in a test.)
+    #[test]
+    fn originals_of_another_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        for root in [&a, &b] {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+        }
+        let mut ed = ArchiveEditor::new("x.rpf");
+        ed.add_file("f.txt", b"x".to_vec()).unwrap();
+        ed.save(&b.join("x.rpf")).unwrap();
+        let original = std::fs::read(b.join("x.rpf")).unwrap();
+        let path = format!("{}/f.txt", b.join("x.rpf").display());
+
+        assert!(editable(&path, Some(&a)).is_err());
+        assert_eq!(editable(&path, Some(&b)).unwrap().disk, b.join("mods/x.rpf"));
+        std::fs::remove_dir_all(b.join("mods")).unwrap();
+        assert_eq!(editable(&path, None).unwrap().disk, b.join("mods/x.rpf"));
+        assert_eq!(find_game(None, Some(&b.join("x.rpf"))).unwrap().root, b);
+        // Its mods copy is not an original: editing it is fine whatever --game says.
+        assert_eq!(editable(&format!("{}/mods/x.rpf/f.txt", b.display()), Some(&a)).unwrap().disk, b.join("mods/x.rpf"));
+        // Through a link, from outside every game folder.
+        std::os::unix::fs::symlink(b.join("x.rpf"), dir.path().join("link.rpf")).unwrap();
+        let linked = format!("{}/f.txt", dir.path().join("link.rpf").display());
+        assert!(editable(&linked, Some(&a)).is_err());
+        assert_eq!(editable(&linked, None).unwrap().disk, b.join("mods/x.rpf"));
+        assert_eq!(std::fs::read(b.join("x.rpf")).unwrap(), original);
+
+        // Loose game data files go to the mods folder too; others stay where they are.
+        std::fs::create_dir_all(b.join("x64")).unwrap();
+        std::fs::write(b.join("x64/t.ytd"), b"original").unwrap();
+        std::fs::write(b.join("plugin.ini"), b"original").unwrap();
+        let loose = b.join("x64/t.ytd").display().to_string();
+        assert!(write_any(&loose, Some(&a), b"new".to_vec()).is_err());
+        write_any(&loose, None, b"new".to_vec()).unwrap();
+        assert_eq!(std::fs::read(b.join("x64/t.ytd")).unwrap(), b"original");
+        assert_eq!(std::fs::read(b.join("mods/x64/t.ytd")).unwrap(), b"new");
+        write_any(&b.join("plugin.ini").display().to_string(), None, b"new".to_vec()).unwrap();
+        assert_eq!(std::fs::read(b.join("plugin.ini")).unwrap(), b"new");
+        assert!(!a.join("mods").exists());
     }
 }
