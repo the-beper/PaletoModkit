@@ -30,8 +30,11 @@ impl Resource {
         let version = u32_at(data, 4);
         let system_size = page_size(u32_at(data, 8));
         let graphics_size = page_size(u32_at(data, 12));
-        let mut all = Vec::with_capacity(system_size + graphics_size);
-        DeflateDecoder::new(&data[16..]).read_to_end(&mut all)?;
+        // The sizes come from the file (up to gigabytes): never more than they
+        // say, and memory taken as the data proves it, beyond a first guess.
+        let total = system_size + graphics_size;
+        let mut all = Vec::with_capacity(total.min(data.len() * 8));
+        DeflateDecoder::new(&data[16..]).take(total as u64).read_to_end(&mut all)?;
         let split = system_size.min(all.len());
         let graphics = all.split_off(split);
         Ok(Resource { version, system: all, graphics })
@@ -48,7 +51,7 @@ impl Resource {
         if start > segment.len() {
             return Err(Error::Format(format!("pointer {ptr:#x} out of range")));
         }
-        Ok(&segment[start..segment.len().min(start + len)])
+        Ok(&segment[start..segment.len().min(start.saturating_add(len))])
     }
 
     /// A fixed-size block at a virtual address.
@@ -92,4 +95,30 @@ pub(crate) fn u32_at(b: &[u8], at: usize) -> u32 {
 
 pub(crate) fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    fn resource(system_flags: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = [MAGIC, 13, system_flags, 0].iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
+        let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        deflate.write_all(payload).unwrap();
+        out.extend(deflate.finish().unwrap());
+        out
+    }
+
+    /// Page sizes from the header are believed only as far as the data goes.
+    #[test]
+    fn sizes_from_the_header() {
+        // Pages said to take about 100 GB, holding 1 KB.
+        let res = Resource::parse(&resource(u32::MAX, &[7; 1024])).unwrap();
+        assert_eq!(res.system, [7; 1024]);
+        // One page of 512 bytes, from data that inflates to 10 MB.
+        let res = Resource::parse(&resource(0x0800_0000, &vec![0; 10 << 20])).unwrap();
+        assert_eq!((res.system.len(), res.graphics.len()), (512, 0));
+    }
 }
