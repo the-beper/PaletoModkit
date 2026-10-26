@@ -7,8 +7,12 @@
 //!
 //! A top-level archive is saved in place: new data goes into free gaps or at the
 //! end, never over anything the old table of contents still points to, and the
-//! table of contents is written last. An interrupted save therefore leaves the
-//! old archive readable. Edited nested archives are rebuilt compactly.
+//! table of contents is written last, once the data is on disk. An edited
+//! nested archive is saved the same way within its own space when it fits in
+//! the space after it (its own table of contents then changes before the
+//! outer one), and rebuilt like new data otherwise. An interrupted save
+//! therefore leaves the old archive readable, nested archives possibly
+//! already showing their new content.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -333,8 +337,9 @@ impl ArchiveEditor {
     ///
     /// In place, data already in `target` stays where it is and new data only
     /// goes into space the old archive does not use. `limit` caps the size;
-    /// exceeding it gives [`Error::NoSpace`] before anything of this archive
-    /// itself is written.
+    /// exceeding it gives [`Error::NoSpace`] before the data or the table of
+    /// contents of this archive are written (nested archives inside it may
+    /// already have been saved in place).
     fn write(&mut self, target: &Arc<File>, base: u64, in_place: bool, limit: Option<u64>, tmp_dir: &Path) -> Result<u64, Error> {
         let toc_blocks = {
             let (entries, _) = self.flatten();
@@ -349,36 +354,22 @@ impl ArchiveEditor {
         if in_place {
             used.extend(self.reserved.iter().map(|&(s, e)| ((s - base) / BLOCK, (e - base).div_ceil(BLOCK))));
         }
-        // Space that must never be overwritten: the new table of contents and
-        // nested archives already written in place.
-        let mut protected = vec![(0, toc_blocks)];
-
         let mut nested = Vec::new();
-        let mut files = Vec::new();
         let mut stack = vec![&mut self.root];
         while let Some(dir) = stack.pop() {
             for node in dir.children.values_mut() {
                 match node {
                     Node::Dir(d) => stack.push(d),
                     Node::Archive(_) => nested.push(node),
-                    Node::File(f) => files.push(f),
+                    Node::File(_) => {}
                 }
             }
         }
 
-        // Other nested archives still to be edited keep their current place.
-        for node in &nested {
-            if let Node::Archive(child) = &**node
-                && let Some(src) = child.source.as_ref().filter(|s| in_place && Arc::ptr_eq(&s.file, target) && s.base >= base) {
-                    let start = (src.base - base) / BLOCK;
-                    protected.push((start, start + src.len.div_ceil(BLOCK)));
-                }
-        }
-
-        // Edited nested archives are edited in place when they can grow into
-        // the space after them, if need be by moving the files stored there
-        // (as OpenIV does); otherwise they are rebuilt into a temp file and
-        // placed like new data.
+        // Edited nested archives are edited in place when they fit in the
+        // space after them; otherwise they are rebuilt into a temp file and
+        // placed like new data. Files stored after them are never moved: until
+        // the table of contents is written, the old one still points to them.
         for node in nested {
             let Node::Archive(child) = node else { unreachable!() };
             let mut written = None;
@@ -389,37 +380,9 @@ impl ArchiveEditor {
                 let start = (child_base - base) / BLOCK;
                 let old_end = start + old_len.div_ceil(BLOCK);
                 let next = used.iter().map(|r| r.0).filter(|&s| s >= old_end).min().or(limit_blocks);
-                let mut result = child.write(&file, child_base, true, next.map(|n| (n - start) * BLOCK), tmp_dir);
-                if let Err(Error::NoSpace { needed }) = result {
-                    let need_end = start + needed.div_ceil(BLOCK);
-                    let overlaps = |r: &(u64, u64)| r.0 < need_end && r.1 > old_end;
-                    let blockers: Vec<usize> = (0..files.len())
-                        .filter(|&i| match &files[i].data {
-                            Data::Stored { file: f, offset, len } if Arc::ptr_eq(f, target) && *offset >= base => {
-                                let b = (offset - base) / BLOCK;
-                                overlaps(&(b, b + len.div_ceil(BLOCK)))
-                            }
-                            _ => false,
-                        })
-                        .collect();
-                    let moved: u64 = blockers.iter().map(|&i| files[i].data.len()).sum();
-                    let fits = limit_blocks.is_none_or(|l| need_end <= l) && !protected.iter().any(overlaps);
-                    if fits && moved < old_len {
-                        for &i in &blockers {
-                            let tmp = Arc::new(tempfile::tempfile_in(tmp_dir)?);
-                            copy_data(&files[i].data, &tmp, 0)?;
-                            let len = files[i].data.len();
-                            files[i].data = Data::Stored { file: tmp, offset: 0, len };
-                        }
-                        used.retain(|r| !overlaps(r));
-                        result = child.write(&file, child_base, true, Some((need_end - start) * BLOCK), tmp_dir);
-                    }
-                }
-                match result {
+                match child.write(&file, child_base, true, next.map(|n| (n - start) * BLOCK), tmp_dir) {
                     Ok(len) => {
-                        let range = (start, start + len.div_ceil(BLOCK));
-                        used.push(range);
-                        protected.push(range);
+                        used.push((start, start + len.div_ceil(BLOCK)));
                         written = Some((file, child_base, len));
                     }
                     Err(Error::NoSpace { .. }) => {}
@@ -488,6 +451,10 @@ impl ArchiveEditor {
             encrypt_aes(key, &mut toc[entries_end..names_end]);
         }
         toc.resize((toc_blocks * BLOCK) as usize, 0);
+        // The data must be on disk before a table of contents that points to it.
+        if in_place {
+            target.sync_data()?;
+        }
         target.write_all_at(&toc, base)?;
         Ok(end * BLOCK)
     }

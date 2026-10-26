@@ -131,20 +131,38 @@ fn with_nested(dir: &Path, nested: &str, other: &str) -> std::path::PathBuf {
     path
 }
 
+/// The archive at `path` as a save cut short before its table of contents
+/// would leave it: the table of contents of `before` over the new data.
+fn cut_before_toc(path: &Path, before: &[u8]) -> std::path::PathBuf {
+    let word = |i: usize| u32::from_le_bytes(before[i..i + 4].try_into().unwrap()) as usize;
+    let old_toc = (16 + 16 * word(4) + word(8)).div_ceil(512) * 512;
+    let mut cut = std::fs::read(path).unwrap();
+    cut[..old_toc].copy_from_slice(&before[..old_toc]);
+    let cut_path = path.with_extension("cut.rpf");
+    std::fs::write(&cut_path, cut).unwrap();
+    cut_path
+}
+
 #[test]
 fn nested_edited_in_place_when_it_fits() {
     let dir = tempfile::tempdir().unwrap();
     // "z_inner.rpf" sorts after "a.bin", so it is stored last with room to grow.
     let path = with_nested(dir.path(), "z_inner.rpf", "a.bin");
-    let before = std::fs::metadata(&path).unwrap().len();
+    let before = std::fs::read(&path).unwrap();
     let mut ed = ArchiveEditor::open(&path, None).unwrap();
     ed.archive("z_inner.rpf", false, None).unwrap().add_file("small.txt", b"hi".to_vec()).unwrap();
     ed.save(&path).unwrap();
-    let growth = std::fs::metadata(&path).unwrap().len() - before;
+    let growth = std::fs::metadata(&path).unwrap().len() - before.len() as u64;
     assert!(growth <= 2048, "grew by {growth}");
     assert_eq!(read(&path, "z_inner.rpf/small.txt"), b"hi");
     assert!(read(&path, "z_inner.rpf/big.bin") == noise(100_000, 2));
     assert!(read(&path, "a.bin") == noise(100_000, 1));
+    // Cut short before the outer table of contents: the nested archive already
+    // shows its new content, and everything reads.
+    let cut = cut_before_toc(&path, &before);
+    assert_eq!(read(&cut, "z_inner.rpf/small.txt"), b"hi");
+    assert!(read(&cut, "z_inner.rpf/big.bin") == noise(100_000, 2));
+    assert!(read(&cut, "a.bin") == noise(100_000, 1));
 }
 
 #[test]
@@ -161,7 +179,7 @@ fn nested_rebuilt_when_blocked() {
 }
 
 #[test]
-fn nested_grows_by_moving_small_neighbours() {
+fn nested_growth_never_overwrites_its_neighbours() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("outer.rpf");
     let mut ed = ArchiveEditor::new("outer.rpf");
@@ -170,18 +188,24 @@ fn nested_grows_by_moving_small_neighbours() {
     ed.add_file("b_small.bin", noise(5_000, 1)).unwrap();
     ed.archive("c_other.rpf", true, None).unwrap().add_file("x.bin", noise(20_000, 4)).unwrap();
     ed.save(&path).unwrap();
-    let before = std::fs::metadata(&path).unwrap().len();
+    let before = std::fs::read(&path).unwrap();
 
     let mut ed = ArchiveEditor::open(&path, None).unwrap();
-    // Growing a_inner needs the space of b_small and of the untouched c_other.
+    // Growing a_inner would need the space of b_small and of c_other: it is rebuilt instead.
     ed.archive("a_inner.rpf", false, None).unwrap().add_file("more.bin", noise(10_000, 3)).unwrap();
     ed.save(&path).unwrap();
-    let growth = std::fs::metadata(&path).unwrap().len() - before;
-    assert!(growth < 100_000, "grew by {growth}: the big nested archive was rebuilt");
+    let growth = std::fs::metadata(&path).unwrap().len() - before.len() as u64;
+    assert!(growth > 300_000, "grew by {growth}: not rebuilt");
     assert!(read(&path, "a_inner.rpf/more.bin") == noise(10_000, 3));
     assert!(read(&path, "a_inner.rpf/big.bin") == noise(300_000, 2));
     assert!(read(&path, "b_small.bin") == noise(5_000, 1));
     assert!(read(&path, "c_other.rpf/x.bin") == noise(20_000, 4));
+
+    // A save cut short before its table of contents still reads as the old archive.
+    let cut_path = cut_before_toc(&path, &before);
+    assert!(read(&cut_path, "a_inner.rpf/big.bin") == noise(300_000, 2));
+    assert!(read(&cut_path, "b_small.bin") == noise(5_000, 1));
+    assert!(read(&cut_path, "c_other.rpf/x.bin") == noise(20_000, 4));
 }
 
 #[test]
