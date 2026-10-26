@@ -32,6 +32,8 @@ pub enum Error {
     NotADirectory(String),
     #[error("{0} already exists")]
     AlreadyExists(String),
+    #[error("{0} is in the archive twice (names differ only in case, or a file and a folder share it)")]
+    DuplicateName(String),
     #[error("invalid path: {0}")]
     InvalidPath(String),
     #[error("{0} is too large for an RPF7 archive")]

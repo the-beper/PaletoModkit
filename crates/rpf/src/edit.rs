@@ -109,11 +109,11 @@ impl ArchiveEditor {
         let size = file.metadata()?.len();
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let archive = Archive::parse(Arc::new(file), name, 0, size, keys)?;
-        Ok(Self::from_archive(&archive, keys))
+        Self::from_archive(&archive, keys)
     }
 
     /// `keys` are the ones the archive was read with (an AES archive needs them).
-    fn from_archive(archive: &Archive, keys: Option<&Keys>) -> Self {
+    fn from_archive(archive: &Archive, keys: Option<&Keys>) -> Result<Self, Error> {
         let mut editor = Self::new(&archive.name);
         editor.aes = keys.filter(|_| archive.encryption == Encryption::Aes).map(|k| k.aes);
         editor.source = Some(Source { file: archive.file.clone(), base: archive.base, len: archive.size });
@@ -124,19 +124,27 @@ impl ArchiveEditor {
                 let entry = &archive.entries[i];
                 let mut path = prefix.clone();
                 path.push(entry.name.to_ascii_lowercase());
+                // Two folders of one name are merged; anything else would be lost on save.
+                let duplicate = |e: Error| match e {
+                    Error::AlreadyExists(_) | Error::NotADirectory(_) => Error::DuplicateName(path.join("/")),
+                    e => e,
+                };
                 if entry.is_dir() {
-                    editor.insert(&path, Node::Dir(Dir::default())).ok();
+                    editor.insert(&path, Node::Dir(Dir::default())).map_err(duplicate)?;
                     stack.push((i, path));
                     continue;
+                }
+                if editor.node(&path).is_some() {
+                    return Err(Error::DuplicateName(path.join("/")));
                 }
                 let offset = archive.base + entry.offset().unwrap() as u64 * BLOCK;
                 let len = entry.stored_len();
                 editor.reserved.push((offset, offset + len));
                 let data = Data::Stored { file: archive.file.clone(), offset, len };
-                editor.insert(&path, Node::File(FileNode { kind: entry.kind.clone(), data })).ok();
+                editor.insert(&path, Node::File(FileNode { kind: entry.kind.clone(), data })).map_err(duplicate)?;
             }
         }
-        editor
+        Ok(editor)
     }
 
     pub fn name(&self) -> &str {
@@ -273,7 +281,7 @@ impl ArchiveEditor {
                     }
                 };
                 let archive = Archive::parse(file, last.clone(), offset, len, keys)?;
-                Some(Node::Archive(Box::new(Self::from_archive(&archive, keys))))
+                Some(Node::Archive(Box::new(Self::from_archive(&archive, keys)?)))
             }
             Some(Node::Archive(_)) => None,
             Some(_) => return Err(Error::NotAnArchive(last.clone())),
@@ -532,11 +540,15 @@ impl ArchiveEditor {
         Ok(Some(dir))
     }
 
+    /// Puts `node` at `parts`: a folder joins one already there, a file
+    /// replaces a file. A file never replaces a folder, nor a folder a file.
     fn insert(&mut self, parts: &[String], node: Node) -> Result<(), Error> {
         let (last, dirs) = parts.split_last().unwrap();
         let dir = self.dir_mut(dirs, true)?.unwrap();
-        if matches!(node, Node::Dir(_)) && dir.children.contains_key(last) {
-            return Ok(());
+        match (dir.children.get(last), &node) {
+            (Some(Node::Dir(_)), Node::Dir(_)) => return Ok(()),
+            (Some(Node::Dir(_)), _) | (Some(_), Node::Dir(_)) => return Err(Error::AlreadyExists(parts.join("/"))),
+            _ => {}
         }
         dir.children.insert(last.clone(), node);
         Ok(())

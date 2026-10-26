@@ -395,3 +395,40 @@ fn aes_archives_stay_readable() {
     let inner = outer.open_child(outer.find("x.rpf").unwrap(), Some(&keys)).unwrap();
     assert_eq!((read(&inner, "a.awc"), read(&inner, "b.txt")), (content, b"b".to_vec()));
 }
+
+#[test]
+fn clashing_names_are_never_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    // Names that differ only in case, and a file named like a folder: such an
+    // archive reads, but is not edited (saving would lose one of them).
+    // The file named like the folder comes after it in the archive, then before it.
+    for (patch, to) in [(b"\0bb.txt\0".as_slice(), b"\0AA.txt\0".as_slice()), (b"\0ee\0", b"\0dd\0"), (b"\0cc\0", b"\0dd\0")] {
+        let mut ed = ArchiveEditor::new("a.rpf");
+        for (name, data) in [("aa.txt", "a"), ("bb.txt", "b"), ("cc", "c"), ("dd/xx", "x"), ("ee", "e")] {
+            ed.add_file(name, data.as_bytes().to_vec()).unwrap();
+        }
+        ed.save(&path).unwrap();
+        let mut data = std::fs::read(&path).unwrap();
+        let at = data.windows(patch.len()).position(|w| w == patch).unwrap();
+        data[at..at + to.len()].copy_from_slice(to);
+        std::fs::write(&path, data).unwrap();
+        assert!(Archive::open(&path, None).is_ok());
+        assert!(matches!(ArchiveEditor::open(&path, None), Err(paleto_rpf::Error::DuplicateName(_))), "{}", String::from_utf8_lossy(to));
+    }
+
+    // A file never replaces a folder, nor a folder a file.
+    let mut ed = ArchiveEditor::new("a.rpf");
+    ed.add_file("dd/xx", b"x".to_vec()).unwrap();
+    ed.add_file("ee", b"e".to_vec()).unwrap();
+    assert!(matches!(ed.add_file("DD", b"d".to_vec()), Err(paleto_rpf::Error::AlreadyExists(_))));
+    assert!(matches!(ed.create_dir("ee"), Err(paleto_rpf::Error::NotADirectory(_))));
+    assert_eq!(ed.read("dd/xx", None).unwrap(), b"x");
+    assert_eq!(ed.read("ee", None).unwrap(), b"e");
+    ed.add_file("ee", b"new".to_vec()).unwrap();
+    assert_eq!(ed.read("ee", None).unwrap(), b"new");
+    // A nested archive open for editing is still replaced by a file.
+    ed.archive("x.rpf", true, None).unwrap().add_file("a", b"a".to_vec()).unwrap();
+    ed.add_file("x.rpf", b"plain".to_vec()).unwrap();
+    assert_eq!(ed.read("x.rpf", None).unwrap(), b"plain");
+}
