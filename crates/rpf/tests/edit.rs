@@ -471,3 +471,59 @@ fn clashing_names_are_never_dropped() {
     ed.add_file("x.rpf", b"plain".to_vec()).unwrap();
     assert_eq!(ed.read("x.rpf", None).unwrap(), b"plain");
 }
+
+/// Damaged archives give an error, never a hang, a panic or a huge allocation.
+#[test]
+fn malformed_archives_fail_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    let mut ed = ArchiveEditor::new("a.rpf");
+    ed.add_file("a.txt", vec![b'z'; 100_000]).unwrap(); // compressed
+    ed.add_file("b.awc", noise(1000, 1)).unwrap(); // stored as is
+    ed.add_file("d/x", b"x".to_vec()).unwrap();
+    ed.save(&path).unwrap();
+    let clean = std::fs::read(&path).unwrap();
+    // Entries in order: root, a.txt, b.awc, d, d/x; 16 bytes each after the header.
+    let at = |i: usize, word: usize| 16 + 16 * i + 4 * word;
+    let patched = |patches: &[(usize, u32)]| {
+        let mut data = clean.clone();
+        for &(offset, value) in patches {
+            data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&path, data).unwrap();
+        Archive::open(&path, None)
+    };
+    fn corrupt<T>(r: Result<T, paleto_rpf::Error>) -> bool {
+        matches!(r, Err(paleto_rpf::Error::Corrupt(_)))
+    }
+
+    assert!(corrupt(patched(&[(at(0, 2), 0)])), "root inside itself");
+    assert!(corrupt(patched(&[(at(3, 2), 0)])), "folder holding the root");
+    assert!(corrupt(patched(&[(4, 0x0FFF_FFFF)])), "huge entry count");
+    assert!(corrupt(patched(&[(8, 0xFFFF_FFF0)])), "huge names length");
+    // The root also holding d/x (entries 1 to 4): reached twice.
+    assert!(corrupt(patched(&[(at(0, 3), 4)])), "entry in two folders");
+    assert!(corrupt(patched(&[(at(3, 3), 9)])), "folder past the last entry");
+
+    let read = |archive: Result<Archive, paleto_rpf::Error>, name: &str| {
+        let archive = archive.unwrap();
+        archive.read(archive.find(name).unwrap(), None)
+    };
+    // b.awc (stored as is): its size, then its place, far past the end.
+    assert!(corrupt(read(patched(&[(at(2, 2), 0xFFFF_FFF0)]), "b.awc")));
+    let lo = u32::from_le_bytes(clean[at(2, 1)..at(2, 1) + 4].try_into().unwrap());
+    assert!(corrupt(read(patched(&[(at(2, 1), lo | 0x7FFF_0000)]), "b.awc")));
+    // a.txt says it inflates to 10 bytes: no more is made.
+    assert_eq!(read(patched(&[(at(1, 2), 10)]), "a.txt").unwrap(), vec![b'z'; 10]);
+    assert_eq!(read(patched(&[]), "a.txt").unwrap(), vec![b'z'; 100_000]);
+
+    // A nested archive whose data is the archive holding it would nest forever.
+    let mut ed = ArchiveEditor::new("a.rpf");
+    ed.archive("x.rpf", true, None).unwrap().add_file("f", b"f".to_vec()).unwrap();
+    ed.save(&path).unwrap();
+    let mut data = std::fs::read(&path).unwrap();
+    let lo = u64::from_le_bytes(data[at(1, 0)..at(1, 0) + 8].try_into().unwrap());
+    data[at(1, 0)..at(1, 0) + 8].copy_from_slice(&(lo & 0xFF_FFFF_FFFF).to_le_bytes()); // offset 0
+    std::fs::write(&path, data).unwrap();
+    assert!(corrupt(Archive::open(&path, None)));
+}

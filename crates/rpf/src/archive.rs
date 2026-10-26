@@ -113,6 +113,9 @@ pub struct Archive {
     pub entries: Vec<Entry>,
     /// Bytes taken by the header, entries and names.
     pub(crate) toc_len: u64,
+    /// Length of the file holding the archive: sizes read from the archive
+    /// are checked against it before anything is allocated for them.
+    file_len: u64,
 }
 
 impl Archive {
@@ -133,6 +136,10 @@ impl Archive {
         }
         let (count, names_len) = (word(1) as usize, word(2) as usize);
         let encryption = Encryption::from_u32(word(3));
+        let file_len = file.metadata()?.len();
+        if base + 16 + count as u64 * 16 + names_len as u64 > file_len {
+            return Err(Error::Corrupt("table of contents past the end of the file"));
+        }
 
         let mut toc = vec![0u8; count * 16];
         let mut names = vec![0u8; names_len];
@@ -196,9 +203,35 @@ impl Archive {
         if !entries.first().is_some_and(Entry::is_dir) {
             return Err(Error::Corrupt("root is not a directory"));
         }
-
         let toc_len = 16 + (count * 16 + names_len) as u64;
-        Ok(Archive { file, name, base, size, encryption, entries, toc_len })
+        // A folder lists its children after itself and is their only parent:
+        // no folder is inside itself, and every entry is reached once.
+        let mut claimed = vec![false; entries.len()];
+        for (i, entry) in entries.iter().enumerate() {
+            match entry.kind {
+                EntryKind::Directory { first, count } if count > 0 => {
+                    let (first, end) = (first as usize, first as usize + count as usize);
+                    if first <= i || end > entries.len() {
+                        return Err(Error::Corrupt("folder inside itself or past the last entry"));
+                    }
+                    if claimed[first..end].contains(&true) {
+                        return Err(Error::Corrupt("entry in two folders"));
+                    }
+                    claimed[first..end].fill(true);
+                }
+                // A nested archive lies after the table of contents and within
+                // this archive: each level is smaller, so nesting ends.
+                EntryKind::Binary { offset, .. } if entry.is_archive() => {
+                    let start = offset as u64 * BLOCK;
+                    if start < toc_len || start + entry.stored_len() > size {
+                        return Err(Error::Corrupt("nested archive outside its archive"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Archive { file, name, base, size, encryption, entries, toc_len, file_len })
     }
 
     /// Indices of the direct children of directory `dir` (0 is the root).
@@ -269,6 +302,9 @@ impl Archive {
     }
 
     fn read_raw(&self, block: u32, skip: u64, len: usize) -> Result<Vec<u8>, Error> {
+        if self.base + block as u64 * BLOCK + skip + len as u64 > self.file_len {
+            return Err(Error::Corrupt("file data past the end of the file"));
+        }
         let mut buf = vec![0u8; len];
         self.file.read_exact_at(&mut buf, self.base + block as u64 * BLOCK + skip)?;
         Ok(buf)
@@ -296,8 +332,10 @@ pub(crate) fn decode(entry: &Entry, mut raw: Vec<u8>, aes: bool, keys: Option<&K
             if size == 0 {
                 return Ok(raw);
             }
-            let mut out = Vec::with_capacity(uncompressed_size as usize);
-            DeflateDecoder::new(&raw[..]).read_to_end(&mut out)?;
+            // The size comes from the archive: never more than it says, and
+            // memory taken as the data proves it, beyond a first guess.
+            let mut out = Vec::with_capacity((uncompressed_size as usize).min(raw.len() * 8));
+            DeflateDecoder::new(&raw[..]).take(uncompressed_size as u64).read_to_end(&mut out)?;
             Ok(out)
         }
         EntryKind::Resource { size, system_flags, graphics_flags, .. } => {
