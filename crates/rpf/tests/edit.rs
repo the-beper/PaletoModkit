@@ -271,3 +271,62 @@ fn a_file_that_is_not_an_archive_is_kept() {
         ed = ArchiveEditor::open(&path, None).unwrap();
     }
 }
+
+/// Keys good enough for AES archives made by the tests.
+fn test_keys() -> paleto_rpf::Keys {
+    paleto_rpf::Keys { aes: [7; 32], ng_keys: vec![[0; 68]; 101], ng_tables: Box::new([[[0; 256]; 16]; 17]), lut: [0; 256], awc: None }
+}
+
+/// An AES archive holding `content` as an AES-encrypted `a.awc`, as the game has them.
+fn aes_archive(dir: &Path, keys: &paleto_rpf::Keys, content: &[u8]) -> Vec<u8> {
+    use paleto_rpf::crypto::encrypt_aes;
+    let path = dir.join("aes.rpf");
+    let mut ed = ArchiveEditor::new("aes.rpf");
+    ed.add_file("a.awc", content.to_vec()).unwrap();
+    ed.save(&path).unwrap();
+    let mut data = std::fs::read(&path).unwrap();
+    let word = |data: &[u8], i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+    let (toc_end, names_len) = (16 + 16 * word(&data, 4), word(&data, 8));
+    // The second 16-byte entry (after the root folder): offset in blocks in
+    // bits 40-63 of its first word, the encrypted flag in its last word.
+    let entry = 32;
+    data[entry + 12..entry + 16].copy_from_slice(&1u32.to_le_bytes());
+    let offset = ((u64::from_le_bytes(data[entry..entry + 8].try_into().unwrap()) >> 40) & 0xFF_FFFF) as usize * 512;
+    encrypt_aes(&keys.aes, &mut data[offset..offset + content.len()]);
+    data[12..16].copy_from_slice(&0x0FFF_FFF9u32.to_le_bytes());
+    encrypt_aes(&keys.aes, &mut data[16..toc_end]);
+    encrypt_aes(&keys.aes, &mut data[toc_end..toc_end + names_len]);
+    data
+}
+
+#[test]
+fn aes_archives_stay_readable() {
+    let keys = test_keys();
+    let dir = tempfile::tempdir().unwrap();
+    let content: Vec<u8> = (0..64).collect();
+    let path = dir.path().join("a.rpf");
+    std::fs::write(&path, aes_archive(dir.path(), &keys, &content)).unwrap();
+
+    let read = |archive: &Archive, name: &str| {
+        assert_eq!(archive.encryption, Encryption::Aes);
+        archive.read(archive.find(name).unwrap(), Some(&keys)).unwrap()
+    };
+    assert_eq!(read(&Archive::open(&path, Some(&keys)).unwrap(), "a.awc"), content);
+    let mut ed = ArchiveEditor::open(&path, Some(&keys)).unwrap();
+    ed.add_file("b.txt", b"b".to_vec()).unwrap();
+    ed.save(&path).unwrap();
+    let archive = Archive::open(&path, Some(&keys)).unwrap();
+    assert_eq!((read(&archive, "a.awc"), read(&archive, "b.txt")), (content.clone(), b"b".to_vec()));
+
+    // Nested in a plain archive, and edited there.
+    let parent = dir.path().join("parent.rpf");
+    let mut ed = ArchiveEditor::new("parent.rpf");
+    ed.add_file("x.rpf", aes_archive(dir.path(), &keys, &content)).unwrap();
+    ed.save(&parent).unwrap();
+    let mut ed = ArchiveEditor::open(&parent, Some(&keys)).unwrap();
+    ed.archive("x.rpf", false, Some(&keys)).unwrap().add_file("b.txt", b"b".to_vec()).unwrap();
+    ed.save(&parent).unwrap();
+    let outer = Archive::open(&parent, Some(&keys)).unwrap();
+    let inner = outer.open_child(outer.find("x.rpf").unwrap(), Some(&keys)).unwrap();
+    assert_eq!((read(&inner, "a.awc"), read(&inner, "b.txt")), (content, b"b".to_vec()));
+}

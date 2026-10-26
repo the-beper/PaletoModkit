@@ -22,6 +22,7 @@ pub(crate) const RSC7_MAGIC: u32 = 0x3743_5352; // "RSC7"
 pub(crate) const BLOCK: u64 = 512;
 pub(crate) const DIR_IDENT: u32 = 0x7FFF_FF00;
 pub(crate) const OPEN: u32 = 0x4E45_504F;
+pub(crate) const AES: u32 = 0x0FFF_FFF9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encryption {
@@ -37,7 +38,7 @@ impl Encryption {
         match v {
             0 => Self::None,
             OPEN => Self::Open,
-            0x0FFF_FFF9 => Self::Aes,
+            AES => Self::Aes,
             // 0x0FEFFFFF; anything else is treated as NG too, like the game does.
             _ => Self::Ng,
         }

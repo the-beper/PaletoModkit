@@ -1,7 +1,9 @@
 //! Editing RPF7 archives: add, replace and delete files, edit nested archives.
 //!
-//! Saved archives always get a plain ("OPEN") table of contents, like OpenIV
-//! writes them. Files that are not touched keep their bytes, encryption included.
+//! Saved archives get a plain ("OPEN") table of contents, like OpenIV writes
+//! them, except AES archives: their table of contents is encrypted again, so
+//! their AES-encrypted files still read as such. Files that are not touched
+//! keep their bytes, encryption included.
 //!
 //! A top-level archive is saved in place: new data goes into free gaps or at the
 //! end, never over anything the old table of contents still points to, and the
@@ -18,7 +20,8 @@ use std::sync::Arc;
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
 
-use crate::archive::{BLOCK, DIR_IDENT, MAGIC, OPEN, RSC7_MAGIC, decode};
+use crate::archive::{AES, BLOCK, DIR_IDENT, MAGIC, OPEN, RSC7_MAGIC, decode};
+use crate::crypto::encrypt_aes;
 use crate::{Archive, Encryption, Entry, EntryKind, Error, Keys};
 
 /// Extensions the game expects to be stored without compression.
@@ -33,7 +36,8 @@ pub struct ArchiveEditor {
     /// Absolute byte ranges of the original archive that must stay untouched
     /// until the new table of contents is written.
     reserved: Vec<(u64, u64)>,
-    aes: bool,
+    /// The key of an AES archive, to write its table of contents with.
+    aes: Option<[u8; 32]>,
     defragment: bool,
 }
 
@@ -94,7 +98,7 @@ impl ArchiveEditor {
             root: Dir::default(),
             source: None,
             reserved: Vec::new(),
-            aes: false,
+            aes: None,
             defragment: false,
         }
     }
@@ -105,12 +109,13 @@ impl ArchiveEditor {
         let size = file.metadata()?.len();
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let archive = Archive::parse(Arc::new(file), name, 0, size, keys)?;
-        Ok(Self::from_archive(&archive))
+        Ok(Self::from_archive(&archive, keys))
     }
 
-    fn from_archive(archive: &Archive) -> Self {
+    /// `keys` are the ones the archive was read with (an AES archive needs them).
+    fn from_archive(archive: &Archive, keys: Option<&Keys>) -> Self {
         let mut editor = Self::new(&archive.name);
-        editor.aes = archive.encryption == Encryption::Aes;
+        editor.aes = keys.filter(|_| archive.encryption == Encryption::Aes).map(|k| k.aes);
         editor.source = Some(Source { file: archive.file.clone(), base: archive.base, len: archive.size });
         editor.reserved.push((archive.base, archive.base + archive.toc_len));
         let mut stack = vec![(0usize, Vec::<String>::new())];
@@ -170,7 +175,7 @@ impl ArchiveEditor {
             _ => return Err(Error::InvalidPath(new_name.to_string())),
         };
         let (last, dirs) = parts.split_last().unwrap();
-        let aes = self.aes;
+        let aes = self.aes.is_some();
         let dir = self.dir_mut(dirs, false)?.ok_or_else(|| Error::NotFound(path.to_string()))?;
         if !dir.children.contains_key(last) {
             return Err(Error::NotFound(path.to_string()));
@@ -215,7 +220,7 @@ impl ArchiveEditor {
         match self.node(&parts) {
             Some(Node::File(f)) => {
                 let entry = Entry { name: parts.last().unwrap().clone(), kind: f.kind.clone() };
-                decode(&entry, f.data.read()?, self.aes, keys)
+                decode(&entry, f.data.read()?, self.aes.is_some(), keys)
             }
             Some(Node::Archive(_)) => Err(Error::Unsupported("reading an archive that is being edited")),
             _ => Err(Error::NotFound(path.to_string())),
@@ -261,7 +266,7 @@ impl ArchiveEditor {
                     }
                 };
                 let archive = Archive::parse(file, last.clone(), offset, len, keys)?;
-                Some(Node::Archive(Box::new(Self::from_archive(&archive))))
+                Some(Node::Archive(Box::new(Self::from_archive(&archive, keys))))
             }
             Some(Node::Archive(_)) => None,
             Some(_) => return Err(Error::NotAnArchive(last.clone())),
@@ -445,13 +450,20 @@ impl ArchiveEditor {
         }
 
         let mut toc = Vec::with_capacity((toc_blocks * BLOCK) as usize);
-        for w in [MAGIC, entries.len() as u32, names.len() as u32, OPEN] {
+        let encryption = if self.aes.is_some() { AES } else { OPEN };
+        for w in [MAGIC, entries.len() as u32, names.len() as u32, encryption] {
             toc.extend_from_slice(&w.to_le_bytes());
         }
         for (e, &off) in entries.iter().zip(&name_offsets) {
             toc.extend_from_slice(&encode_entry(e, off));
         }
         toc.extend_from_slice(&names);
+        if let Some(key) = &self.aes {
+            // Entries and names separately, as they are read.
+            let (entries_end, names_end) = (16 + 16 * entries.len(), 16 + 16 * entries.len() + names.len());
+            encrypt_aes(key, &mut toc[16..entries_end]);
+            encrypt_aes(key, &mut toc[entries_end..names_end]);
+        }
         toc.resize((toc_blocks * BLOCK) as usize, 0);
         target.write_all_at(&toc, base)?;
         Ok(end * BLOCK)

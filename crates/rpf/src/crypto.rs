@@ -1,7 +1,7 @@
 //! RPF decryption: Rockstar's custom "NG" cipher and AES-256-ECB.
 
 use aes::Aes256;
-use aes::cipher::{BlockCipherDecrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 
 use crate::keys::{Keys, NG_KEY_COUNT, NgKey, NgTables};
 
@@ -67,5 +67,13 @@ pub fn decrypt_aes(key: &[u8; 32], data: &mut [u8]) {
     let cipher = Aes256::new(&(*key).into());
     for block in data.as_chunks_mut::<16>().0 {
         cipher.decrypt_block(block.into());
+    }
+}
+
+/// The reverse of [`decrypt_aes`]: whole 16-byte blocks, a trailing partial block left as is.
+pub fn encrypt_aes(key: &[u8; 32], data: &mut [u8]) {
+    let cipher = Aes256::new(&(*key).into());
+    for block in data.as_chunks_mut::<16>().0 {
+        cipher.encrypt_block(block.into());
     }
 }
