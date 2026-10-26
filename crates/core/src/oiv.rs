@@ -417,25 +417,36 @@ fn parse_commands(node: roxmltree::Node, src: &str) -> Result<Vec<Command>, Erro
         };
         let flag = |name: &str| n.attribute(name).is_some_and(|v| v.eq_ignore_ascii_case("true"));
         let text = || n.text().unwrap_or("").trim().to_string();
+        let path = |name: &str| attr(name).and_then(safe_path);
         let cmd = match n.tag_name().name() {
-            "add" => Command::Add { source: attr("source")?, target: text() },
-            "delete" => Command::Delete(text()),
+            "add" => Command::Add { source: attr("source")?, target: safe_path(text())? },
+            "delete" => Command::Delete(safe_path(text())?),
             "archive" => {
                 let kind = n.attribute("type").unwrap_or("RPF7");
                 if !kind.eq_ignore_ascii_case("rpf7") {
                     return Err(Error::Package(format!("unsupported archive type {kind}")));
                 }
-                Command::Archive { path: attr("path")?, create: flag("createIfNotExist"), body: parse_commands(n, src)? }
+                Command::Archive { path: path("path")?, create: flag("createIfNotExist"), body: parse_commands(n, src)? }
             }
-            "defragmentation" => Command::Defragment(attr("archive")?),
-            "text" => Command::Text { path: attr("path")?, create: flag("createIfNotExist"), ops: text_ops(n)? },
-            "xml" => Command::Xml { path: attr("path")?, ops: xml_ops(n, src)? },
-            "pso" => Command::Pso { path: attr("path")?, ops: xml_ops(n, src)?, source: src[n.range()].to_string() },
+            "defragmentation" => Command::Defragment(path("archive")?),
+            "text" => Command::Text { path: path("path")?, create: flag("createIfNotExist"), ops: text_ops(n)? },
+            "xml" => Command::Xml { path: path("path")?, ops: xml_ops(n, src)? },
+            "pso" => Command::Pso { path: path("path")?, ops: xml_ops(n, src)?, source: src[n.range()].to_string() },
             other => return Err(Error::Package(format!("unknown command <{other}>"))),
         };
         out.push(cmd);
     }
     Ok(out)
+}
+
+/// A target path from the package, refused if it could leave the game folder
+/// or the archive (`..`, a drive letter) or names nothing.
+fn safe_path(path: String) -> Result<String, Error> {
+    let mut parts = path.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".").peekable();
+    if parts.peek().is_none() || parts.any(|p| p == ".." || p.contains(':')) {
+        return Err(Error::Package(format!("unsafe path {path:?}")));
+    }
+    Ok(path)
 }
 
 fn text_ops(node: roxmltree::Node) -> Result<Vec<TextOp>, Error> {
@@ -567,6 +578,27 @@ mod tests {
             m.learn_names("CPaletoTest value model zentorno");
         }
         assert_eq!(got.to_xml(), expected.to_xml());
+    }
+
+    #[test]
+    fn refuses_paths_outside_the_game() {
+        for cmd in [
+            r#"<add source="x">..\..\evil.asi</add>"#,
+            r#"<add source="x">C:\Windows\evil.dll</add>"#,
+            r#"<delete>scripts/../../evil</delete>"#,
+            r#"<archive path=".."><add source="x">a</add></archive>"#,
+            r#"<archive path="x64e.rpf"><add source="x">..\a</add></archive>"#,
+            r#"<text path="./"><add>x</add></text>"#,
+            r#"<defragmentation archive="" />"#,
+        ] {
+            let src = format!("<content>{cmd}</content>");
+            let doc = roxmltree::Document::parse(&src).unwrap();
+            let err = parse_commands(doc.root_element(), &src).unwrap_err();
+            assert!(err.to_string().contains("unsafe path"), "{cmd}: {err}");
+        }
+        let src = r#"<content><add source="x">\scripts\.\a..b.asi</add></content>"#;
+        let doc = roxmltree::Document::parse(src).unwrap();
+        assert!(parse_commands(doc.root_element(), src).is_ok());
     }
 
     #[test]
