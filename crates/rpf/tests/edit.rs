@@ -272,9 +272,74 @@ fn a_file_that_is_not_an_archive_is_kept() {
     }
 }
 
-/// Keys good enough for AES archives made by the tests.
+/// Keys for archives made by the tests. The NG tables only move bytes, so with
+/// them NG decryption is a fixed shuffle of each block XOR a pattern made by
+/// the key, which [`encrypt_ng`] undoes.
 fn test_keys() -> paleto_rpf::Keys {
-    paleto_rpf::Keys { aes: [7; 32], ng_keys: vec![[0; 68]; 101], ng_tables: Box::new([[[0; 256]; 16]; 17]), lut: [0; 256], awc: None }
+    let mut tables = Box::new([[[0u32; 256]; 16]; 17]);
+    for round in tables.iter_mut() {
+        for (i, table) in round.iter_mut().enumerate() {
+            for (b, v) in table.iter_mut().enumerate() {
+                *v = (b as u32) << (8 * (i % 4));
+            }
+        }
+    }
+    let ng_keys = (0..101u32).map(|k| std::array::from_fn(|w| k.wrapping_mul(0x9E37_79B9) ^ w as u32)).collect();
+    paleto_rpf::Keys { aes: [7; 32], ng_keys, ng_tables: tables, lut: std::array::from_fn(|b| b as u8), awc: None }
+}
+
+/// The reverse of `decrypt_ng` with the tables of [`test_keys`].
+fn encrypt_ng(keys: &paleto_rpf::Keys, key: &paleto_rpf::keys::NgKey, data: &mut [u8]) {
+    use paleto_rpf::crypto::decrypt_ng;
+    let mut shuffle: [u8; 16] = std::array::from_fn(|i| i as u8 + 1);
+    decrypt_ng(&keys.ng_tables, &[0; 68], &mut shuffle);
+    let mut pattern = [0u8; 16];
+    decrypt_ng(&keys.ng_tables, key, &mut pattern);
+    for block in data.as_chunks_mut::<16>().0 {
+        let plain = *block;
+        for j in 0..16 {
+            block[shuffle[j] as usize - 1] = plain[j] ^ pattern[j];
+        }
+    }
+}
+
+#[test]
+fn renamed_ng_archive_stays_readable() {
+    use paleto_rpf::crypto::ng_key;
+    let keys = test_keys();
+    let dir = tempfile::tempdir().unwrap();
+    let inner = dir.path().join("inner.rpf");
+    let mut ed = ArchiveEditor::new("inner.rpf");
+    ed.add_file("f.txt", b"hello".to_vec()).unwrap();
+    ed.save(&inner).unwrap();
+    // Its table of contents encrypted with the NG key of its name and size.
+    let mut data = std::fs::read(&inner).unwrap();
+    let word = |data: &[u8], i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+    // Header: magic, entry count, names length, encryption.
+    let (toc_end, names_len) = (16 + 16 * word(&data, 4), word(&data, 8));
+    let key = ng_key(&keys, "inner.rpf", data.len() as u32);
+    data[12..16].copy_from_slice(&0x0FEF_FFFFu32.to_le_bytes());
+    encrypt_ng(&keys, key, &mut data[16..toc_end]);
+    encrypt_ng(&keys, key, &mut data[toc_end..toc_end + names_len]);
+
+    let path = dir.path().join("parent.rpf");
+    let mut ed = ArchiveEditor::new("parent.rpf");
+    ed.add_file("inner.rpf", data).unwrap();
+    ed.save(&path).unwrap();
+    let read = |name: &str| {
+        let outer = Archive::open(&path, Some(&keys)).unwrap();
+        let inner = outer.open_child(outer.find(name).unwrap(), Some(&keys)).unwrap();
+        inner.read(inner.find("f.txt").unwrap(), Some(&keys)).unwrap()
+    };
+    assert_eq!(read("inner.rpf"), b"hello");
+
+    let mut ed = ArchiveEditor::open(&path, Some(&keys)).unwrap();
+    // Without keys it cannot be written again: refused, and left as it was.
+    assert!(matches!(ed.rename("inner.rpf", "renamed.rpf", None), Err(paleto_rpf::Error::KeysRequired)));
+    assert!(ed.exists("inner.rpf") && !ed.exists("renamed.rpf"));
+    ed.rename("inner.rpf", "renamed.rpf", Some(&keys)).unwrap();
+    ed.save(&path).unwrap();
+    assert_eq!(read("renamed.rpf"), b"hello");
 }
 
 /// An AES archive holding `content` as an AES-encrypted `a.awc`, as the game has them.

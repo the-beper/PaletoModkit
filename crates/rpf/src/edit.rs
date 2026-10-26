@@ -167,7 +167,8 @@ impl ArchiveEditor {
     /// Renames a file or folder inside its folder.
     ///
     /// NG encryption is keyed by the file name, so NG-encrypted files are
-    /// decrypted (which needs `keys`) and stored unencrypted under the new name.
+    /// decrypted (which needs `keys`) and stored unencrypted under the new name,
+    /// and a nested archive with an NG table of contents is written again.
     pub fn rename(&mut self, path: &str, new_name: &str, keys: Option<&Keys>) -> Result<(), Error> {
         let parts = split(path)?;
         let new_name = match split(new_name)?.as_slice() {
@@ -177,15 +178,21 @@ impl ArchiveEditor {
         let (last, dirs) = parts.split_last().unwrap();
         let aes = self.aes.is_some();
         let dir = self.dir_mut(dirs, false)?.ok_or_else(|| Error::NotFound(path.to_string()))?;
-        if !dir.children.contains_key(last) {
-            return Err(Error::NotFound(path.to_string()));
-        }
+        let ng_archive = match dir.children.get(last) {
+            None => return Err(Error::NotFound(path.to_string())),
+            Some(Node::File(f)) => f.is_ng_archive()?,
+            Some(_) => false,
+        };
         if *last == new_name {
             return Ok(());
         }
         if dir.children.contains_key(&new_name) {
             return Err(Error::AlreadyExists(new_name));
         }
+        if ng_archive {
+            self.archive(path, false, keys)?;
+        }
+        let dir = self.dir_mut(dirs, false)?.ok_or_else(|| Error::NotFound(path.to_string()))?;
         let reencoded = match &dir.children[last] {
             Node::File(f) if matches!(f.kind, EntryKind::Resource { .. }) && (is_script(last) || is_script(&new_name)) => {
                 // Scripts are encrypted by name too, and resources carry no
@@ -537,6 +544,21 @@ impl ArchiveEditor {
 }
 
 impl FileNode {
+    /// Whether this is a nested archive whose table of contents is NG-encrypted.
+    fn is_ng_archive(&self) -> Result<bool, Error> {
+        if !matches!(self.kind, EntryKind::Binary { size: 0, encrypted: false, .. }) {
+            return Ok(false);
+        }
+        let mut head = [0u8; 16];
+        match &self.data {
+            Data::Stored { file, offset, len } if *len >= 16 => file.read_exact_at(&mut head, *offset)?,
+            Data::Bytes(bytes) if bytes.len() >= 16 => head.copy_from_slice(&bytes[..16]),
+            _ => return Ok(false),
+        }
+        let word = |i: usize| u32::from_le_bytes(head[i * 4..i * 4 + 4].try_into().unwrap());
+        Ok(word(0) == MAGIC && Encryption::from_u32(word(3)) == Encryption::Ng)
+    }
+
     fn from_file(name: &str, mut data: Vec<u8>) -> Result<Self, Error> {
         if data.len() >= 16 && data[..4] == RSC7_MAGIC.to_le_bytes() {
             let word = |i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap());

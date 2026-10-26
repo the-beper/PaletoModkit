@@ -34,7 +34,7 @@ pub enum Encryption {
 }
 
 impl Encryption {
-    fn from_u32(v: u32) -> Self {
+    pub(crate) fn from_u32(v: u32) -> Self {
         match v {
             0 => Self::None,
             OPEN => Self::Open,
