@@ -40,10 +40,11 @@ impl Sound {
 
     /// A WAV file (16-bit mono PCM).
     pub fn to_wav(&self) -> Vec<u8> {
-        let data_len = self.samples.len() as u32 * 2;
-        let mut out = Vec::with_capacity(44 + data_len as usize);
+        // A WAV file says its size in 32 bits.
+        let data_len = u32::try_from(self.samples.len() * 2).unwrap_or(u32::MAX);
+        let mut out = Vec::with_capacity(44 + self.samples.len() * 2);
         out.extend_from_slice(b"RIFF");
-        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(&data_len.saturating_add(36).to_le_bytes());
         out.extend_from_slice(b"WAVEfmt ");
         out.extend_from_slice(&16u32.to_le_bytes());
         out.extend_from_slice(&1u16.to_le_bytes()); // PCM
@@ -113,6 +114,11 @@ fn read_container(data: &[u8], key: Option<&[u32; 4]>) -> Result<Container, Erro
     };
     let flags = r(6, 2)? as u16;
     let count = r(8, 4)? as usize;
+    // Each stream takes at least 4 bytes of the header (6 with flag 1).
+    let per_stream = if flags & 1 != 0 { 6 } else { 4 };
+    if data.len() < 16 || count > (data.len() - 16) / per_stream {
+        return Err(Error::Format("audio container is truncated".into()));
+    }
     let mut at = 16 + if flags & 1 != 0 { count * 2 } else { 0 };
     let mut ids = Vec::with_capacity(count);
     for _ in 0..count {
@@ -154,8 +160,10 @@ pub fn parse(data: &[u8], key: Option<&[u32; 4]>) -> Result<Vec<Sound>, Error> {
             return Err(Error::Format("audio stream format is truncated".into()));
         }
         let (block_count, block_size, channels) = (le(&format, 0) as usize, le(&format, 4) as usize, le(&format, 8) as usize);
-        let channels: Vec<ChannelFormat> = (0..channels)
-            .filter(|i| format.len() >= 12 + (i + 1) * 16)
+        if block_size == 0 && block_count > 0 {
+            return Err(Error::Format("audio blocks of no size".into()));
+        }
+        let channels: Vec<ChannelFormat> = (0..channels.min((format.len() - 12) / 16))
             .map(|i| {
                 let c = &format[12 + i * 16..];
                 ChannelFormat { id: le(c, 0), samples: le(c, 4), rate: u16::from_le_bytes([c[10], c[11]]) as u32, codec: c[12] }
@@ -330,6 +338,9 @@ fn replace_sound(container: Container, key: Option<&[u32; 4]>, id: u32, audio: &
 fn channel_formats(format: &[u8]) -> Result<(usize, usize, Vec<ChannelFormat>), Error> {
     let le = |at: usize| format.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or_else(|| Error::Format("audio stream format is truncated".into()));
     let (block_count, block_size, count) = (le(0)? as usize, le(4)? as usize, le(8)? as usize);
+    if block_size == 0 && block_count > 0 {
+        return Err(Error::Format("audio blocks of no size".into()));
+    }
     let channels = (0..count)
         .map(|i| {
             let at = 12 + i * 16;
@@ -597,7 +608,8 @@ fn read_wav(wav: &[u8]) -> Result<Audio, Error> {
         tag = u16_at(24); // WAVE_FORMAT_EXTENSIBLE: the sub-format
     }
     let size = bits as usize / 8;
-    if channels == 0 || size == 0 {
+    // Below 1 kHz a rate is a damaged header, and would make resampling explode.
+    if channels == 0 || size == 0 || rate < 1000 {
         return Err(bad("invalid format"));
     }
     let sample = |b: &[u8]| -> Option<f32> {
@@ -721,7 +733,7 @@ impl<'a> StreamLayout<'a> {
             // XXTEA mixes the whole block: decrypt it all for its first word.
             let mut block = body[..block_size.min(body.len()) / 4 * 4].to_vec();
             decrypt(&mut block, key);
-            first = block[..16].to_vec();
+            first = block.get(..16).map(<[u8]>::to_vec).unwrap_or_default();
         }
         let unset_start = first.get(..4).is_some_and(|w| w == [0xFF; 4]);
         StreamLayout { block_size, key, pad_last: body.len() == block_count * block_size, unset_start }
@@ -824,7 +836,7 @@ fn write_tracks(tracks: &[Track], channels: &[ChannelFormat], layout: &StreamLay
             .min()
             .unwrap_or(0)
             .min(total - first);
-        let mut block = Vec::with_capacity(layout.block_size);
+        let mut block = Vec::new();
         let (mut offsets, mut data) = (Vec::new(), Vec::new());
         // ADPCM channels' start frame: nominal but in the last block (the space
         // shared out, the first channels taking what is left over), there the
@@ -919,7 +931,8 @@ const STEP_TABLE: [i32; 89] = [
 /// IMA ADPCM in 2048-byte frames: a 4-byte header (step index, predictor),
 /// then two samples per byte, low nibble first.
 fn decode_adpcm(data: &[u8], samples: usize) -> Vec<i16> {
-    let mut out = Vec::with_capacity(samples);
+    // `samples` comes from the file: two samples per byte at most.
+    let mut out = Vec::with_capacity(samples.min(data.len() * 2));
     for frame in data.chunks(2048) {
         if frame.len() < 4 || out.len() >= samples {
             break;
@@ -1211,5 +1224,60 @@ mod tests {
     #[test]
     fn encrypted_without_key() {
         assert!(parse(&[1, 2, 3, 4, 5, 6, 7, 8], None).unwrap_err().to_string().contains("audio key"));
+    }
+
+    /// A container with one stream of the given chunks, unencrypted.
+    fn one_stream(flags: u16, chunks: &[(u8, &[u8])]) -> Vec<u8> {
+        let header_len = 16 + 4 + chunks.len() * 8;
+        let mut out = b"ADAT".to_vec();
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&(header_len as u32).to_le_bytes());
+        out.extend_from_slice(&(((chunks.len() as u32) << 29) | 0x1234).to_le_bytes());
+        let mut at = header_len;
+        for (kind, data) in chunks {
+            out.extend_from_slice(&(((*kind as u64) << 56) | ((data.len() as u64) << 28) | at as u64).to_le_bytes());
+            at += data.len();
+        }
+        for (_, data) in chunks {
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
+    /// Damaged containers give an error, never a hang, a panic or a huge allocation.
+    #[test]
+    fn damaged_containers() {
+        // Four billion streams said to be in a header of 16 bytes.
+        let mut huge = b"ADAT".to_vec();
+        huge.extend_from_slice(&[0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
+        assert!(parse(&huge, None).is_err());
+        // A header cut short, given to replace.
+        assert!(replace(&huge[..12], None, 0x1234, &[]).is_err());
+
+        // A stream format asking for four billion blocks of no size.
+        let mut format = [u32::MAX, 0, 0].iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
+        let file = one_stream(4, &[(STREAM_FORMAT, &format), (DATA, &[0; 64])]);
+        assert!(parse(&file, None).is_err());
+        assert!(replace(&file, None, 0x1234, &[]).is_err());
+
+        // Encrypted blocks shorter than 16 bytes, in an MP3 stream.
+        format = [1u32, 8, 1].iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut channel = [0u8; 16];
+        channel[12] = MP3;
+        format.extend_from_slice(&channel);
+        let file = one_stream(4 | 8, &[(STREAM_FORMAT, &format), (DATA, &[0; 64])]);
+        assert!(parse(&file, Some(&[1, 2, 3, 4])).is_err());
+
+        // An ADPCM sound saying it holds four billion samples, in one frame.
+        let mut format = vec![0u8; 20];
+        format[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        format[19] = ADPCM;
+        let sounds = parse(&one_stream(0, &[(FORMAT, &format), (DATA, &[0; 2048])]), None).unwrap();
+        assert_eq!(sounds[0].samples.len(), 4088);
+
+        // A WAV at 0 Hz.
+        assert!(read_wav(&wav_channels(0, 1, &[0; 8])).is_err());
     }
 }
