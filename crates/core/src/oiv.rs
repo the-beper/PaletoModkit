@@ -254,7 +254,12 @@ impl Installer<'_> {
                 let dest = self.game.target(target);
                 self.archives.remove(&dest);
                 std::fs::create_dir_all(dest.parent().unwrap())?;
-                std::fs::write(&dest, data)?;
+                // A copy in the mods folder may be a link to an original: replace it, never write through it.
+                if dest.starts_with(self.game.mods_dir()) {
+                    crate::game::replace_file(&dest, |tmp| std::fs::write(tmp, data))?;
+                } else {
+                    std::fs::write(&dest, data)?;
+                }
                 self.log.push(format!("add {}", dest.display()));
             }
             Command::Delete(target) => {

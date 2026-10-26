@@ -56,7 +56,7 @@ Inside an archive, the toolbar, the right-click menu and drag and drop:
 - **New folder…** (Ctrl+Shift+N), **Rename…** (F2), **Delete** (Delete key).
 - **Extract…**: copies the selection, folders included, to a folder you pick.
 
-**Original game files are never modified.** The first change to an original archive copies it to the `mods/` folder (at the same place: `update/update.rpf` becomes `mods/update/update.rpf`) and changes the copy. On btrfs and XFS the copy is a reflink: instant, and taking no extra space until it differs. Archives you opened from outside the game folder are edited in place.
+**Original game files are never modified.** The first change to an original archive copies it to the `mods/` folder (at the same place: `update/update.rpf` becomes `mods/update/update.rpf`) and changes the copy. On btrfs and XFS the copy is a reflink: instant, and taking no extra space until it differs. A copy in `mods/` that is only a link (symbolic or hard) is made a file of its own before it changes, so the change never reaches the file it pointed to. Archives you opened from outside the game folder are edited in place.
 
 Names inside archives are stored in lower case, as the game expects.
 

@@ -88,7 +88,7 @@ pub fn install_pack(game: &Game, keys: Option<&Keys>, dlc: &Path, name: &str, to
     };
     let dest = pack_path(game, &name);
     std::fs::create_dir_all(dest.parent().unwrap())?;
-    std::fs::write(&dest, data)?;
+    crate::game::replace_file(&dest, |tmp| std::fs::write(tmp, data))?;
     log.push(format!("installed {}", dest.display()));
 
     let (rel, inner) = DLC_LIST;
