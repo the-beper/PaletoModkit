@@ -250,8 +250,12 @@ impl Installer<'_> {
     fn run_root(&mut self, cmd: &Command) -> Result<(), Error> {
         match cmd {
             Command::Add { source, target } => {
-                let data = self.source(source)?;
                 let dest = self.game.target(target);
+                if is_exe(&dest) {
+                    self.log.push(format!("warning: refusing to replace {}", dest.display()));
+                    return Ok(());
+                }
+                let data = self.source(source)?;
                 self.archives.remove(&dest);
                 std::fs::create_dir_all(dest.parent().unwrap())?;
                 // A copy in the mods folder may be a link to an original: replace it, never write through it.
@@ -265,7 +269,7 @@ impl Installer<'_> {
             Command::Delete(target) => {
                 // Game data is only ever deleted from the mods folder.
                 let dest = self.game.target(target);
-                if dest.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
+                if is_exe(&dest) {
                     self.log.push(format!("warning: refusing to delete {}", dest.display()));
                 } else if dest.is_file() {
                     std::fs::remove_file(&dest)?;
@@ -444,6 +448,11 @@ fn parse_commands(node: roxmltree::Node, src: &str) -> Result<Vec<Command>, Erro
     Ok(out)
 }
 
+/// Programs (the game's own, its launcher) are never replaced or deleted.
+fn is_exe(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+}
+
 /// A target path from the package, refused if it could leave the game folder
 /// or the archive (`..`, a drive letter) or names nothing.
 fn safe_path(path: String) -> Result<String, Error> {
@@ -604,6 +613,34 @@ mod tests {
         let src = r#"<content><add source="x">\scripts\.\a..b.asi</add></content>"#;
         let doc = roxmltree::Document::parse(src).unwrap();
         assert!(parse_commands(doc.root_element(), src).is_ok());
+    }
+
+    #[test]
+    fn programs_are_left_alone() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content>
+            <add source="x">gta5.EXE</add>
+            <add source="x">PlayGTAV.exe</add>
+            <add source="x">dinput8.dll</add>
+            <delete>GTA5.exe</delete>
+        </content></package>"#;
+        let oiv = dir.path().join("x.oiv");
+        let mut zip = zip::ZipWriter::new(File::create(&oiv).unwrap());
+        for (name, data) in [("assembly.xml", assembly.as_bytes()), ("content/x", b"new")] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let log = Package::open(&oiv).unwrap().install_with(&Game::open(&root).unwrap(), None).unwrap();
+        assert_eq!(std::fs::read(root.join("GTA5.exe")).unwrap(), b"game");
+        assert!(!root.join("PlayGTAV.exe").exists());
+        assert_eq!(std::fs::read(root.join("dinput8.dll")).unwrap(), b"new");
+        assert_eq!(log.iter().filter(|l| l.starts_with("warning: refusing")).count(), 3, "{log:?}");
     }
 
     #[test]

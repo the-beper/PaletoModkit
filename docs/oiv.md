@@ -4,7 +4,7 @@ An `.oiv` file is a zip archive with an `assembly.xml` that describes the change
 
 ## Where changes go
 
-Paths in a package are relative to the game folder. Game data (archives, `update/`, `x64/`) goes to the `mods/` folder: an original archive is copied there the first time a package changes it. Everything else, such as `.asi` plugins, `.dll` files, `scripts/` and configuration files, goes to the game folder itself, where the game and its plugins look for it. A package with a path that could reach outside the game folder (`..`, a drive letter such as `C:`) is refused before anything is installed.
+Paths in a package are relative to the game folder. Game data (archives, `update/`, `x64/`) goes to the `mods/` folder: an original archive is copied there the first time a package changes it. Everything else, such as `.asi` plugins, `.dll` files, `scripts/` and configuration files, goes to the game folder itself, where the game and its plugins look for it. Programs (`.exe` files, such as the game itself) are never replaced or deleted: the installation logs a warning and goes on. A package with a path that could reach outside the game folder (`..`, a drive letter such as `C:`) is refused before anything is installed.
 
 Before touching any file, the installer checks that every file the package adds is in it, so a broken package fails before it changes anything.
 
