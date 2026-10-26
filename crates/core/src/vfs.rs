@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
-use crate::{Error, Game};
+use crate::{Edition, Error, Game};
 
 /// An archive file on disk plus a path inside it, which may cross nested archives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +247,15 @@ pub fn in_game(path: &Path, game: &Game) -> Option<PathBuf> {
     })
 }
 
+/// Whether `path` is (or holds) original game data: an archive, `update/`,
+/// `x64/` or a game executable, in the game folder outside `mods/`.
+pub fn is_original_data(path: &Path, game: &Game) -> bool {
+    let Some(rel) = in_game(path, game) else { return false };
+    let name = rel.to_string_lossy();
+    let exe = [Edition::Legacy, Edition::Enhanced].iter().any(|e| name.eq_ignore_ascii_case(e.exe_name()));
+    !rel.starts_with("mods") && (crate::game::is_game_data(&name) || exe)
+}
+
 /// The absolute path, with "." and ".." resolved as written (links are kept).
 fn lexical(path: &Path) -> Option<PathBuf> {
     let mut out = PathBuf::new();
@@ -328,5 +337,37 @@ mod tests {
         assert_eq!(std::fs::read(elsewhere.join("update.rpf")).unwrap(), original, "original untouched");
         assert_eq!(in_game(&root.join("x/../update/update.rpf"), &game), Some(PathBuf::from("update/update.rpf")));
         assert_eq!(in_game(&dir.path().join("other drive"), &game), None);
+    }
+
+    #[test]
+    fn original_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("mods/update")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+        let game = Game::open(&root).unwrap();
+        for (rel, original) in [
+            ("update", true),
+            ("Update/x64/dlcpacks/mpbeach", true),
+            ("x64a.rpf", true),
+            ("x64", true),
+            ("gta5.exe", true),
+            ("GTA5_Enhanced.exe", true),
+            ("mods", false),
+            ("mods/update", false),
+            ("mods/x64a.rpf", false),
+            ("scripts", false),
+            ("ScriptHookV.dll", false),
+            ("dinput8.dll", false),
+        ] {
+            assert_eq!(is_original_data(&root.join(rel), &game), original, "{rel}");
+        }
+        assert!(!is_original_data(&dir.path().join("x64a.rpf"), &game));
+        // A game folder whose x64 is on another drive, reached either way.
+        let elsewhere = dir.path().join("other drive/x64");
+        std::fs::create_dir_all(elsewhere.join("audio")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("x64")).unwrap();
+        assert!(is_original_data(&root.join("x64/audio"), &game));
+        assert!(is_original_data(&elsewhere.join("audio"), &game));
     }
 }

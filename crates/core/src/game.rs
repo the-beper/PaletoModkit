@@ -216,7 +216,7 @@ fn sha256_hex(data: &[u8]) -> String {
     Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn is_game_data(rel: &str) -> bool {
+pub(crate) fn is_game_data(rel: &str) -> bool {
     let rel = rel.replace('\\', "/").to_ascii_lowercase();
     let first = rel.trim_start_matches('/').split('/').next().unwrap_or("");
     first == "update" || first == "x64" || rel.ends_with(".rpf")

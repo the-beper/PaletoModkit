@@ -1781,9 +1781,17 @@ impl App {
                 self.spawn_add(ctx, location, add.paths, tool);
             }
             Action::AskDelete(names) => self.confirm_delete = Some(names),
-            Action::AskRename(name) => self.name_dialog = Some(NameDialog { renaming: Some(name.clone()), name, focus: true }),
+            Action::AskRename(name) => {
+                if self.refuse_original(std::slice::from_ref(&name)) {
+                    return;
+                }
+                self.name_dialog = Some(NameDialog { renaming: Some(name.clone()), name, focus: true });
+            }
             Action::AskNewFolder => self.name_dialog = Some(NameDialog { renaming: None, name: "new folder".into(), focus: true }),
             Action::Rename { from, to } => {
+                if self.refuse_original(std::slice::from_ref(&from)) {
+                    return;
+                }
                 if self.preview.as_ref().is_some_and(|p| p.name == from) {
                     self.preview = None;
                 }
@@ -1826,6 +1834,9 @@ impl App {
             }
             Action::Delete => {
                 let Some(names) = self.confirm_delete.take() else { return };
+                if self.refuse_original(&names) {
+                    return;
+                }
                 if self.preview.as_ref().is_some_and(|p| names.contains(&p.name)) {
                     self.preview = None;
                 }
@@ -3218,6 +3229,20 @@ impl App {
         }
     }
 
+    /// The first of `names` in the open disk folder that is original game
+    /// data, which is never renamed or deleted on disk.
+    fn original_data<'a>(&self, names: &'a [String]) -> Option<&'a String> {
+        let (dir, game) = (self.disk_folder()?, self.game.as_ref()?);
+        names.iter().find(|n| vfs::is_original_data(&dir.join(n), game))
+    }
+
+    /// Refuses, with a message, to change original game data on disk.
+    fn refuse_original(&mut self, names: &[String]) -> bool {
+        let Some(name) = self.original_data(names) else { return false };
+        self.status = Status::Error(format!("{name} is an original game file: it is not renamed or deleted (its copy in the mods folder can be)"));
+        true
+    }
+
     fn archive_folder(&self) -> Option<&ArchivePath> {
         match &self.browser.as_ref()?.location {
             Location::Archive(a) => Some(a),
@@ -3768,6 +3793,7 @@ impl App {
     fn delete_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(names) = &self.confirm_delete else { return };
         let dir = self.disk_folder();
+        let original = self.original_data(names).cloned();
         // Files of the game itself, outside the mods folder.
         let game_files = match (&dir, &self.game) {
             (Some(dir), Some(game)) => dir.starts_with(&game.root) && !dir.starts_with(game.mods_dir()) && !(dir == &game.root && names.iter().all(|n| n == "mods")),
@@ -3785,9 +3811,15 @@ impl App {
             }
             ui.add_space(4.0);
             if dir.is_some() {
-                let what = if names.len() == 1 { "It is" } else { "They are" };
-                ui.label(RichText::new(format!("{what} deleted from the disk for good, folders with all they hold.")).color(theme::warning(dark)));
-                if game_files {
+                if original.is_none() {
+                    let what = if names.len() == 1 { "It is" } else { "They are" };
+                    ui.label(RichText::new(format!("{what} deleted from the disk for good, folders with all they hold.")).color(theme::warning(dark)));
+                }
+                if let Some(name) = &original {
+                    ui.label(
+                        RichText::new(format!("{name} is an original game file: it is not deleted. Its copy in the mods folder can be.")).color(theme::error(dark)),
+                    );
+                } else if game_files {
                     ui.label(
                         RichText::new("These are game files: the game may not start until Steam downloads them again (Verify integrity of game files).")
                             .color(theme::error(dark)),
@@ -3798,7 +3830,7 @@ impl App {
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.add(crate::widgets::danger(ui, "Delete")).clicked() {
+                if ui.add_enabled(original.is_none(), crate::widgets::danger(ui, "Delete")).clicked() {
                     actions.push(Action::Delete);
                 }
                 ui.button("Cancel").clicked()

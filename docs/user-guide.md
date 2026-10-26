@@ -64,7 +64,7 @@ On the Enhanced edition, files made for Legacy are noticed when you add them, an
 
 ## Files and folders outside archives
 
-In the game folder itself, **New folder…**, **Rename…** and **Delete** work on the files on disk. Deleting there is permanent (there is no trash): the confirmation says so, and warns in red when the files are game files outside `mods/`, which Steam would have to download again (**Verify integrity of game files**). Adding and extracting only work inside archives.
+In the game folder itself, **New folder…**, **Rename…** and **Delete** work on the files on disk. Original game data (archives, `update/`, `x64/` and the game executables) is never renamed or deleted there; its copy in `mods/` can be. Deleting other files is permanent (there is no trash): the confirmation says so, and warns in red when the files are outside `mods/`, which Steam may have to download again (**Verify integrity of game files**). Adding and extracting only work inside archives.
 
 On disk, a rename that only changes upper and lower case is allowed. A name already used in the folder, in any case, is not: the game does not tell them apart.
 

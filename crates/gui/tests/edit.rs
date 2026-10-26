@@ -185,4 +185,24 @@ fn rename_and_delete_on_disk() {
     settle(&mut harness);
     assert_eq!(harness.state().names(), ["New Stuff"]);
     assert!(!folder.join("old").exists() && !folder.join("Notes.txt").exists());
+
+    // In the game folder, original game data is neither deleted nor renamed;
+    // other files (plugins, scripts) are.
+    std::fs::create_dir_all(root.join("update")).unwrap();
+    std::fs::write(root.join("x64a.rpf"), b"rpf").unwrap();
+    std::fs::write(root.join("plugin.asi"), b"asi").unwrap();
+    harness.state_mut().go(Location::Folder(root.clone()));
+    harness.run_steps(2);
+    harness.state_mut().delete_now(&["plugin.asi", "x64a.rpf"], &ctx);
+    settle(&mut harness);
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("x64a.rpf is an original game file")));
+    assert!(root.join("x64a.rpf").is_file() && root.join("plugin.asi").is_file());
+    harness.get_by_label("update").click();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::F2);
+    harness.run_steps(2);
+    assert_eq!(harness.state().name_dialog(), None);
+    harness.state_mut().delete_now(&["plugin.asi"], &ctx);
+    settle(&mut harness);
+    assert!(!root.join("plugin.asi").exists() && root.join("update").is_dir());
 }
