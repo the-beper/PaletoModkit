@@ -185,7 +185,12 @@ impl Archive {
             };
             let name = names.get(name_offset..).ok_or(Error::Corrupt("name offset"))?;
             let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-            entries.push(Entry { name: String::from_utf8_lossy(&name[..end]).into_owned(), kind });
+            let name = String::from_utf8_lossy(&name[..end]).into_owned();
+            // A name that is a path would let an extract write outside its folder.
+            if name.contains(['/', '\\']) || name == "." || name == ".." {
+                return Err(Error::Corrupt("entry name is a path"));
+            }
+            entries.push(Entry { name, kind });
         }
         if !entries.first().is_some_and(Entry::is_dir) {
             return Err(Error::Corrupt("root is not a directory"));

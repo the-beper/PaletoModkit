@@ -522,8 +522,8 @@ fn main() -> Result<()> {
                 let srgb = if tex.srgb { " sRGB" } else { "" };
                 println!("{:>5}x{:<5} {:>2} mips  {:<11} {}", tex.width, tex.height, tex.levels, format!("{}{srgb}", tex.format.name()), tex.name);
                 if let Some(dir) = &output {
-                    let (ext, data) = if png { ("png", tex.to_png()?) } else { ("dds", tex.to_dds()) };
-                    write_file(&dir.join(format!("{}.{ext}", tex.name)), &data)?;
+                    let data = if png { tex.to_png()? } else { tex.to_dds() };
+                    write_file(&dir.join(tex.file_name(png)), &data)?;
                 }
             }
             let edition = if ytd.enhanced { "Enhanced" } else { "Legacy" };

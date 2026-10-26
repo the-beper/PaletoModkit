@@ -334,6 +334,13 @@ impl Header {
 }
 
 impl Texture {
+    /// File name for the texture exported as PNG or DDS. Path separators in
+    /// the name become `_`, so the file stays in the folder it is written to.
+    pub fn file_name(&self, png: bool) -> String {
+        let name = if self.name.is_empty() { "texture" } else { self.name.as_str() };
+        format!("{}.{}", name.replace(['/', '\\'], "_"), if png { "png" } else { "dds" })
+    }
+
     /// Data and size of a mip level.
     pub fn level(&self, level: u32) -> Option<(&[u8], u32, u32)> {
         if level >= self.levels {

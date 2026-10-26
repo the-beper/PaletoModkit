@@ -240,9 +240,3 @@ pub fn write(tex: &Texture, png: bool, path: &Path) -> Result<(), String> {
     let data = if png { tex.to_png().map_err(|e| e.to_string())? } else { tex.to_dds() };
     std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
 }
-
-/// File name for an exported texture.
-pub fn file_name(tex: &Texture, png: bool) -> String {
-    let name = if tex.name.is_empty() { "texture" } else { tex.name.as_str() };
-    format!("{name}.{}", if png { "png" } else { "dds" })
-}

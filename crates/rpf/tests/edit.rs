@@ -236,3 +236,20 @@ fn scripts_are_not_renamed() {
     assert!(matches!(ed.rename("other.ytd", "x.ysc", None), Err(paleto_rpf::Error::Unsupported(_))));
     assert!(ed.exists("main.ysc") && ed.exists("other.ytd"));
 }
+
+#[test]
+fn names_that_are_paths_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    let mut ed = ArchiveEditor::new("a.rpf");
+    ed.add_file("zz", b"x".to_vec()).unwrap();
+    ed.save(&path).unwrap();
+    let clean = std::fs::read(&path).unwrap();
+    let at = clean.windows(3).position(|w| w == b"zz\0").unwrap();
+    for bad in [b"..", b".\0", b"z/", b"\\z"] {
+        let mut data = clean.clone();
+        data[at..at + 2].copy_from_slice(bad);
+        std::fs::write(&path, data).unwrap();
+        assert!(matches!(Archive::open(&path, None), Err(paleto_rpf::Error::Corrupt(_))), "{}", String::from_utf8_lossy(bad));
+    }
+}

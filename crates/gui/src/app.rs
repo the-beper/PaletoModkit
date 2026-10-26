@@ -1609,7 +1609,7 @@ impl App {
                 let (dict, selected) = (view.dict.clone(), view.selected);
                 let (indices, png, dest) = match export {
                     Export::Selected { png } => {
-                        let name = textures::file_name(&dict.textures[selected], png);
+                        let name = dict.textures[selected].file_name(png);
                         let ext = if png { "png" } else { "dds" };
                         let picked = dest.or_else(|| {
                             let dialog = rfd::FileDialog::new().set_title("Export texture").set_file_name(&name);
@@ -1630,7 +1630,7 @@ impl App {
                             let tex = &dict.textures[i];
                             let path = match &dest {
                                 ExportDest::File(path) => path.clone(),
-                                ExportDest::Folder(dir) => dir.join(textures::file_name(tex, png)),
+                                ExportDest::Folder(dir) => dir.join(tex.file_name(png)),
                             };
                             textures::write(tex, png, &path)?;
                         }

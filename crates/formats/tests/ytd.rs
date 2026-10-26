@@ -232,3 +232,11 @@ fn joaat(name: &str) -> u32 {
     h ^= h >> 11;
     h.wrapping_add(h << 15)
 }
+
+#[test]
+fn export_names_stay_in_their_folder() {
+    let tex = |name: &str| paleto_formats::Texture { name: name.into(), width: 4, height: 4, levels: 1, format: Format::Bgra8, srgb: false, data: vec![0; 64] };
+    assert_eq!(tex("../../evil").file_name(true), ".._.._evil.png");
+    assert_eq!(tex("a\\b").file_name(false), "a_b.dds");
+    assert_eq!(tex("").file_name(false), "texture.dds");
+}
