@@ -317,18 +317,21 @@ fn switch_inside(game: &Game, keys: Option<&Keys>, top: &str, items: &[Part], ki
         let ed = crate::convert::inner(&mut editor, &nested, keys)?;
         if off {
             std::fs::create_dir_all(aside.parent().unwrap())?;
+            // What is kept aside is written once the archive took the change
+            // (scripts, for one, can be refused), so a failure leaves no trace.
             match kind {
                 Kind::Deleted => {
-                    std::fs::write(&marker, b"")?;
                     ed.add_file(&file, read_in(&original, keys, &nested, &file)?)?;
+                    std::fs::write(&marker, b"")?;
                 }
                 Kind::Added => {
                     std::fs::write(&aside, ed.read(&file, keys)?)?;
                     ed.delete(&file)?;
                 }
                 _ => {
-                    std::fs::write(&aside, ed.read(&file, keys)?)?;
+                    let changed = ed.read(&file, keys)?;
                     ed.add_file(&file, read_in(&original, keys, &nested, &file)?)?;
+                    std::fs::write(&aside, changed)?;
                 }
             }
         } else if marker.is_file() {

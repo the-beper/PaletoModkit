@@ -58,7 +58,7 @@ Inside an archive, the toolbar, the right-click menu and drag and drop:
 
 **Original game files are never modified.** The first change to an original archive copies it to the `mods/` folder (at the same place: `update/update.rpf` becomes `mods/update/update.rpf`) and changes the copy. On btrfs and XFS the copy is a reflink: instant, and taking no extra space until it differs. A copy in `mods/` that is only a link (symbolic or hard) is made a file of its own before it changes, so the change never reaches the file it pointed to. Archives you opened from outside the game folder are edited in place.
 
-Names inside archives are stored in lower case, as the game expects.
+Names inside archives are stored in lower case, as the game expects. Scripts (`.ysc`) are stored encrypted, as the game reads them; Paleto Modkit can only write the AES encryption, so it adds scripts to AES-encrypted archives only and refuses them elsewhere.
 
 On the Enhanced edition, files made for Legacy are noticed when you add them, and can be converted on the way; see [mods.md](mods.md#legacy-files-on-the-enhanced-edition).
 

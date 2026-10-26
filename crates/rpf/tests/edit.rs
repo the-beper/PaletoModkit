@@ -228,13 +228,28 @@ fn rename_and_create_folders() {
 }
 
 #[test]
-fn scripts_are_not_renamed() {
+fn scripts() {
+    // Not in a plain archive: they would have to be NG-encrypted.
     let mut ed = ArchiveEditor::new("a.rpf");
+    assert!(matches!(ed.add_file("main.ysc", resource(100)), Err(paleto_rpf::Error::Unsupported(_))));
+    assert!(!ed.exists("main.ysc"));
+
+    // In an AES archive, encrypted with its key: they read back as added.
+    let keys = test_keys();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    std::fs::write(&path, aes_archive(dir.path(), &keys, b"x")).unwrap();
+    let mut ed = ArchiveEditor::open(&path, Some(&keys)).unwrap();
     ed.add_file("main.ysc", resource(100)).unwrap();
     ed.add_file("other.ytd", resource(100)).unwrap();
+    assert_eq!(ed.read("main.ysc", Some(&keys)).unwrap(), resource(100));
+    // Scripts are encrypted by name, and resources carry no flag saying so: never renamed.
     assert!(matches!(ed.rename("main.ysc", "x.ysc", None), Err(paleto_rpf::Error::Unsupported(_))));
     assert!(matches!(ed.rename("other.ytd", "x.ysc", None), Err(paleto_rpf::Error::Unsupported(_))));
     assert!(ed.exists("main.ysc") && ed.exists("other.ytd"));
+    ed.save(&path).unwrap();
+    let archive = Archive::open(&path, Some(&keys)).unwrap();
+    assert_eq!(archive.read(archive.find("main.ysc").unwrap(), Some(&keys)).unwrap(), resource(100));
 }
 
 #[test]

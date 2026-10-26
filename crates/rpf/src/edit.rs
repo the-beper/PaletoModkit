@@ -153,9 +153,17 @@ impl ArchiveEditor {
 
     /// Adds or replaces a file. `data` is the standalone file: resources
     /// (RSC7) are detected from their header.
-    pub fn add_file(&mut self, path: &str, data: Vec<u8>) -> Result<(), Error> {
+    ///
+    /// Scripts (`.ysc` resources) are always stored encrypted, and only AES
+    /// encryption can be written: they are refused in other archives.
+    pub fn add_file(&mut self, path: &str, mut data: Vec<u8>) -> Result<(), Error> {
         let parts = split(path)?;
-        let node = FileNode::from_file(parts.last().unwrap(), data)?;
+        let name = parts.last().unwrap();
+        if is_script(name) && data.len() >= 16 && data[..4] == RSC7_MAGIC.to_le_bytes() {
+            let key = self.aes.ok_or(Error::Unsupported("adding .ysc scripts to an archive that is not AES-encrypted"))?;
+            encrypt_aes(&key, &mut data[16..]);
+        }
+        let node = FileNode::from_file(name, data)?;
         self.insert(&parts, Node::File(node))
     }
 
