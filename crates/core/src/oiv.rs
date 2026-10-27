@@ -200,10 +200,13 @@ impl Package {
     /// [`Package::install`], with keys only needed for encrypted archives.
     pub(crate) fn install_with(&mut self, game: &Game, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
         self.check(&self.content.clone())?;
-        let mut inst = Installer { game, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new() };
-        for cmd in &self.content.clone() {
-            inst.run_root(cmd)?;
+        let mut inst = Installer { game, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
+        if let Err(e) = self.content.clone().iter().try_for_each(|cmd| inst.run_root(cmd)) {
+            // Archives are only saved at the end: putting the loose files back undoes it all.
+            inst.undo.roll_back();
+            return Err(Error::Package(format!("{e} (nothing was installed)")));
         }
+        inst.undo.finish();
         for (path, editor) in std::mem::take(&mut inst.archives) {
             editor.save(&path)?;
             inst.log.push(format!("saved {}", path.display()));
@@ -234,6 +237,60 @@ struct Installer<'a> {
     /// Top-level archives being edited, by path in the mods folder.
     archives: BTreeMap<PathBuf, ArchiveEditor>,
     log: Vec<String>,
+    undo: Undo,
+}
+
+/// What an install changed on disk so far, to put back if it fails halfway.
+/// Files are only ever replaced by a rename (never rewritten in place), so a
+/// hard link keeps the old content. A failure while the archives are saved, at
+/// the very end, is not undone.
+#[derive(Default)]
+struct Undo {
+    seen: std::collections::HashSet<PathBuf>,
+    /// Files that did not exist.
+    made: Vec<PathBuf>,
+    /// Files replaced or deleted, and the link that keeps their old content.
+    kept: Vec<(PathBuf, PathBuf)>,
+}
+
+impl Undo {
+    /// Remembers a file before its first change.
+    fn keep(&mut self, path: &Path) -> Result<(), Error> {
+        if !self.seen.insert(path.to_path_buf()) {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let saved = path.with_file_name(format!(".{name}.paleto-undo"));
+                let _ = std::fs::remove_file(&saved);
+                // Some filesystems (exFAT) have no hard links: a copy then.
+                if std::fs::hard_link(path, &saved).is_err() {
+                    std::fs::copy(path, &saved)?;
+                }
+                self.kept.push((path.to_path_buf(), saved));
+            }
+            Err(_) => self.made.push(path.to_path_buf()),
+        }
+        Ok(())
+    }
+
+    fn roll_back(&mut self) {
+        for path in self.made.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+        for (path, saved) in self.kept.drain(..) {
+            let _ = std::fs::rename(saved, path);
+        }
+    }
+
+    fn finish(&mut self) {
+        self.made.clear();
+        for (_, saved) in self.kept.drain(..) {
+            let _ = std::fs::remove_file(saved);
+        }
+    }
 }
 
 impl Installer<'_> {
@@ -258,12 +315,9 @@ impl Installer<'_> {
                 let data = self.source(source)?;
                 self.archives.remove(&dest);
                 std::fs::create_dir_all(dest.parent().unwrap())?;
+                self.undo.keep(&dest)?;
                 // A copy in the mods folder may be a link to an original: replace it, never write through it.
-                if dest.starts_with(self.game.mods_dir()) {
-                    crate::game::replace_file(&dest, |tmp| std::fs::write(tmp, data))?;
-                } else {
-                    std::fs::write(&dest, data)?;
-                }
+                crate::game::replace_file(&dest, |tmp| std::fs::write(tmp, data))?;
                 self.log.push(format!("add {}", dest.display()));
             }
             Command::Delete(target) => {
@@ -272,6 +326,7 @@ impl Installer<'_> {
                 if is_exe(&dest) {
                     self.log.push(format!("warning: refusing to delete {}", dest.display()));
                 } else if dest.is_file() {
+                    self.undo.keep(&dest)?;
                     std::fs::remove_file(&dest)?;
                     self.log.push(format!("delete {}", dest.display()));
                 }
@@ -285,13 +340,14 @@ impl Installer<'_> {
             }
             Command::Text { path, create, ops } => {
                 let dest = self.loose_file(path)?;
-                let text = match std::fs::read(&dest) {
-                    Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-                    Err(_) if *create => String::new(),
+                let (text, latin1) = match std::fs::read(&dest) {
+                    Ok(b) => decode_text(b),
+                    Err(_) if *create => (String::new(), false),
                     Err(_) => return Err(Error::Package(format!("{path} not found"))),
                 };
+                let out = self.encode_text(path, &text::apply(&text, ops), latin1);
                 std::fs::create_dir_all(dest.parent().unwrap())?;
-                std::fs::write(&dest, text::apply(&text, ops))?;
+                self.write_loose(&dest, out)?;
                 self.log.push(format!("edit {}", dest.display()));
             }
             Command::Xml { path, ops } => {
@@ -299,7 +355,7 @@ impl Installer<'_> {
                 let data = std::fs::read(&dest).map_err(|_| Error::Package(format!("{path} not found")))?;
                 let (out, warnings) = xml::apply(&data, ops)?;
                 self.warn(path, warnings);
-                std::fs::write(&dest, out)?;
+                self.write_loose(&dest, out)?;
                 self.log.push(format!("edit {}", dest.display()));
             }
             Command::Defragment(path) => {
@@ -310,7 +366,7 @@ impl Installer<'_> {
                 let dest = self.loose_file(path)?;
                 let data = std::fs::read(&dest).map_err(|_| Error::Package(format!("{path} not found")))?;
                 let out = self.edit_meta(path, &data, ops, source)?;
-                std::fs::write(&dest, out)?;
+                self.write_loose(&dest, out)?;
                 self.log.push(format!("edit {}", dest.display()));
             }
         }
@@ -342,12 +398,13 @@ impl Installer<'_> {
                 body.iter().try_for_each(|c| self.run_in(inner, c, &at))?;
             }
             Command::Text { path, create, ops } => {
-                let text = match editor.read(path, keys) {
-                    Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-                    Err(paleto_rpf::Error::NotFound(_)) if *create => String::new(),
+                let (text, latin1) = match editor.read(path, keys) {
+                    Ok(b) => decode_text(b),
+                    Err(paleto_rpf::Error::NotFound(_)) if *create => (String::new(), false),
                     Err(e) => return Err(e.into()),
                 };
-                editor.add_file(path, text::apply(&text, ops).into_bytes())?;
+                let out = self.encode_text(&format!("{at}\\{path}"), &text::apply(&text, ops), latin1);
+                editor.add_file(path, out)?;
                 self.log.push(format!("edit {at}\\{path}"));
             }
             Command::Xml { path, ops } => {
@@ -373,8 +430,14 @@ impl Installer<'_> {
         if self.archives.contains_key(&disk) {
             return Ok(disk);
         }
+        // A copy made from the original goes again if the install fails. An
+        // archive already there is only saved at the end: nothing to keep.
+        if std::fs::symlink_metadata(&disk).is_err() {
+            self.undo.keep(&disk)?;
+        }
         let disk = match self.game.mods_copy(path)? {
             Some(p) => p,
+            // Saved by a rename: a dangling link there is replaced, never written through.
             None if create => disk,
             None => return Err(Error::Package(format!("archive {path} not found"))),
         };
@@ -391,12 +454,32 @@ impl Installer<'_> {
     }
 
     /// A loose file to edit: game data is copied to the mods folder first.
-    fn loose_file(&self, path: &str) -> Result<PathBuf, Error> {
+    fn loose_file(&mut self, path: &str) -> Result<PathBuf, Error> {
         let dest = self.game.target(path);
+        self.undo.keep(&dest)?;
         if dest.starts_with(self.game.mods_dir()) {
             self.game.mods_copy(path)?;
         }
         Ok(dest)
+    }
+
+    /// Writes a loose file by replacing it: never through a link, and the
+    /// old content stays for [`Undo`].
+    fn write_loose(&mut self, dest: &Path, data: Vec<u8>) -> Result<(), Error> {
+        self.undo.keep(dest)?;
+        crate::game::replace_file(dest, |tmp| std::fs::write(tmp, data))?;
+        Ok(())
+    }
+
+    /// A text edited by `<text>`, in the encoding it was read in.
+    fn encode_text(&mut self, path: &str, text: &str, latin1: bool) -> Vec<u8> {
+        if !latin1 {
+            return text.as_bytes().to_vec();
+        }
+        if text.chars().any(|c| c as u32 > 0xFF) {
+            self.log.push(format!("warning: {path}: characters the file's encoding cannot hold were written as ?"));
+        }
+        text.chars().map(|c| u8::try_from(c as u32).unwrap_or(b'?')).collect()
     }
 
     fn warn(&mut self, path: &str, warnings: Vec<String>) {
@@ -449,6 +532,16 @@ fn parse_commands(node: roxmltree::Node, src: &str) -> Result<Vec<Command>, Erro
 }
 
 /// Programs (the game's own, its launcher) are never replaced or deleted.
+/// A text file's content, and whether it was not UTF-8: then it is read as
+/// Latin-1, which keeps every byte, so the lines a `<text>` command leaves
+/// alone are written back unchanged.
+fn decode_text(bytes: Vec<u8>) -> (String, bool) {
+    match String::from_utf8(bytes) {
+        Ok(text) => (text, false),
+        Err(e) => (e.into_bytes().iter().map(|&b| char::from(b)).collect(), true),
+    }
+}
+
 fn is_exe(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
 }
@@ -644,6 +737,84 @@ mod tests {
         assert!(!root.join("PlayGTAV.exe").exists());
         assert_eq!(std::fs::read(root.join("dinput8.dll")).unwrap(), b"new");
         assert_eq!(log.iter().filter(|l| l.starts_with("warning: refusing")).count(), 3, "{log:?}");
+    }
+
+    /// A package with these commands and `content/` files.
+    fn package(dir: &Path, commands: &str, files: &[(&str, &[u8])]) -> PathBuf {
+        use std::io::Write;
+        let assembly = format!(r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content>{commands}</content></package>"#);
+        let oiv = dir.join("x.oiv");
+        let mut zip = zip::ZipWriter::new(File::create(&oiv).unwrap());
+        for (name, data) in [("assembly.xml", assembly.as_bytes())].into_iter().chain(files.iter().copied()) {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+        oiv
+    }
+
+    #[test]
+    fn a_failed_install_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::create_dir_all(root.join("update")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        std::fs::write(root.join("scripts/old.asi"), b"old").unwrap();
+        std::fs::write(root.join("scripts/gone.asi"), b"gone").unwrap();
+        std::fs::write(root.join("update/list.txt"), b"a\n").unwrap();
+        let mut original = ArchiveEditor::new("update.rpf");
+        original.add_file("a.txt", b"a".to_vec()).unwrap();
+        original.save(&root.join("update/update.rpf")).unwrap();
+        // Everything works until the last command, whose file is missing.
+        let oiv = package(dir.path(), r#"
+            <archive path="update\update.rpf"><add source="x">b.txt</add></archive>
+            <add source="x">scripts\old.asi</add>
+            <add source="x">scripts\new.asi</add>
+            <delete>scripts\gone.asi</delete>
+            <text path="update\list.txt"><add>b</add></text>
+            <xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")]);
+
+        let err = Package::open(&oiv).unwrap().install_with(&Game::open(&root).unwrap(), None).unwrap_err();
+        assert!(err.to_string().contains("nothing was installed"), "{err}");
+        assert_eq!(std::fs::read(root.join("scripts/old.asi")).unwrap(), b"old");
+        assert_eq!(std::fs::read(root.join("scripts/gone.asi")).unwrap(), b"gone");
+        assert!(!root.join("scripts/new.asi").exists());
+        assert!(!root.join("mods/update/list.txt").exists() && !root.join("mods/update/update.rpf").exists());
+        assert_eq!(std::fs::read(root.join("update/list.txt")).unwrap(), b"a\n");
+        let left: Vec<_> = std::fs::read_dir(root.join("scripts")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+    }
+
+    #[test]
+    fn text_edits_keep_the_files_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        // Latin-1, as Windows tools often write it: not UTF-8.
+        std::fs::write(root.join("scripts/settings.ini"), b"name=caf\xE9\r\n").unwrap();
+        let oiv = package(dir.path(), r#"<text path="scripts\settings.ini"><add>speed=1 €</add></text>"#, &[]);
+        let log = Package::open(&oiv).unwrap().install_with(&Game::open(&root).unwrap(), None).unwrap();
+        assert_eq!(std::fs::read(root.join("scripts/settings.ini")).unwrap(), b"name=caf\xE9\r\nspeed=1 ?\r\n");
+        assert!(log.iter().any(|l| l.starts_with("warning:") && l.contains("written as ?")), "{log:?}");
+    }
+
+    #[test]
+    fn a_new_archive_never_goes_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("mods/x64")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        // A link left in the mods folder, pointing at nothing (yet).
+        let outside = dir.path().join("outside.rpf");
+        std::os::unix::fs::symlink(&outside, root.join("mods/x64/new.rpf")).unwrap();
+        let oiv = package(dir.path(), r#"<archive path="x64\new.rpf" createIfNotExist="True"><add source="x">a.txt</add></archive>"#, &[("content/x", b"a")]);
+        Package::open(&oiv).unwrap().install_with(&Game::open(&root).unwrap(), None).unwrap();
+        assert!(!outside.exists());
+        let made = root.join("mods/x64/new.rpf");
+        assert!(std::fs::symlink_metadata(&made).unwrap().is_file());
+        assert_eq!(ArchiveEditor::open(&made, None).unwrap().read("a.txt", None).unwrap(), b"a");
     }
 
     #[test]

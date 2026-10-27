@@ -6,7 +6,7 @@ An `.oiv` file is a zip archive with an `assembly.xml` that describes the change
 
 Paths in a package are relative to the game folder. Game data (archives, `update/`, `x64/`) goes to the `mods/` folder: an original archive is copied there the first time a package changes it. Everything else, such as `.asi` plugins, `.dll` files, `scripts/` and configuration files, goes to the game folder itself, where the game and its plugins look for it. Programs (`.exe` files, such as the game itself) are never replaced or deleted: the installation logs a warning and goes on. A package with a path that could reach outside the game folder (`..`, a drive letter such as `C:`) is refused before anything is installed.
 
-Before touching any file, the installer checks that every file the package adds is in it, so a broken package fails before it changes anything.
+Before touching any file, the installer checks that every file the package adds is in it, so a broken package fails before it changes anything. An action that fails later (a file to edit that is missing, XML that does not parse) undoes what the package changed so far, and nothing is installed. Archives are saved at the very end; a failure while saving them (a full disk) is not undone.
 
 ## Supported actions
 
@@ -18,7 +18,7 @@ Paleto Modkit follows OpenIV's package format 2.x (`<package version="2.x" targe
 | `<delete>target</delete>` | Deletes a file or folder. |
 | `<archive path="…" createIfNotExist="…" type="RPF7">` | Runs the actions inside it in that archive; archives nest. With `createIfNotExist`, a missing archive is created. Only RPF7 archives exist in GTA V. |
 | `<defragmentation archive="…"/>` | Rewrites an archive without the space left by replaced files. |
-| `<text path="…" createIfNotExist="…">` | Line-based edits of a text file: `<add>` (at the end), `<insert where="Before\|After" line="…">`, `<replace line="…">`, `<delete>`. Lines are matched with `condition="Equal\|StartWith\|Mask"`. |
+| `<text path="…" createIfNotExist="…">` | Line-based edits of a text file: `<add>` (at the end), `<insert where="Before\|After" line="…">`, `<replace line="…">`, `<delete>`. Lines are matched with `condition="Equal\|StartWith\|Mask"`. A file that is not UTF-8 is read and written back as Latin-1, so the lines left alone keep their bytes; added characters it cannot hold become `?`, with a warning. |
 | `<xml path="…">` | XPath edits of an XML file: `<add xpath="…" append="First\|Last\|Before\|After">`, `<replace xpath="…">`, `<remove xpath="…"/>`. |
 | `<pso path="…">` | The same XPath edits on binary metadata (PSO and resource META files such as `.ymt`), through the same conversion to XML as the app's editor; the file is converted back afterwards. |
 
