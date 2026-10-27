@@ -249,3 +249,31 @@ fn render(mesh: &Mesh, textures: &[Picture], [w, h]: [usize; 2], yaw: f32, pitch
     }
     image(color)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mesh(positions: Vec<V3>) -> Mesh {
+        let n = positions.len() as u32;
+        Mesh { uvs: vec![[0.0; 2]; positions.len()], indices: (0..n).collect(), positions, parts: Vec::new() }
+    }
+
+    #[test]
+    fn empty_and_degenerate_meshes_render() {
+        let huge = f32::MAX / 2.0;
+        let meshes = [
+            Mesh::default(),
+            mesh(vec![[1.0, 2.0, 3.0]; 3]),
+            mesh(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+            mesh(vec![[f32::NAN; 3], [f32::INFINITY, 0.0, 0.0], [0.0, f32::NEG_INFINITY, 0.0]]),
+            mesh(vec![[-huge, -huge, -huge], [huge, 0.0, 0.0], [0.0, huge, huge]]),
+        ];
+        for m in &meshes {
+            for zoom in [0.2, 20.0] {
+                let image = render(m, &[], [32, 16], START_YAW, 1.5, zoom, true);
+                assert_eq!(image.size, [32, 16]);
+            }
+        }
+    }
+}

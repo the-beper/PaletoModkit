@@ -109,14 +109,14 @@ New textures from PNG pictures become BC1, or BC3 when they have transparency. `
 ## Models
 
 ```bash
-# Export a model as CodeWalker XML (for Sollumz or CodeWalker), with its textures as DDS files
-paleto model x64e.rpf/levels/gta5/props/prop_x.rpf/prop_x.ydr -o prop_x/
+# Export a model (.ydr, .ydd, .yft) or collision (.ybn) as CodeWalker XML (for Sollumz or CodeWalker)
+paleto model x64e.rpf/levels/gta5/props/prop_x.rpf/prop_x.ydr -o out/
 
 # Also take textures from a dictionary
 paleto model car.ydd -o car/ --dictionary car.ytd
 ```
 
-This writes `prop_x.ydr.xml` and one DDS file per texture the model names. Collision, joints and lights are not exported, and only the five common textures of Enhanced shaders are.
+This writes `out/prop_x.ydr.xml`, and one DDS file per texture the model names in `out/prop_x/`, where CodeWalker looks for them. Shaders of the Enhanced edition are written with the Legacy parameter names, as CodeWalker does.
 
 ## Installing mods
 
@@ -217,6 +217,6 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `text PATH [-o FILE] [--import FILE]` | Text tables as lines |
 | `audio PATH [-o DIR] [--replace ID=FILE…]` | Sounds of an audio container |
 | `textures PATH [options]` | Textures of a dictionary |
-| `model PATH -o DIR [--dictionary YTD…]` | A model as CodeWalker XML with its textures |
+| `model PATH -o DIR [--dictionary YTD…]` | A model or collision as CodeWalker XML with its textures |
 
 Every command takes `--game FOLDER`. `paleto help COMMAND` shows all of its options.

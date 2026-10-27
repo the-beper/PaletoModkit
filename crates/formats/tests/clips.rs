@@ -9,6 +9,11 @@ use paleto_formats::clips;
 const SYS: u64 = 0x5000_0000;
 
 fn build() -> Vec<u8> {
+    pack(&system(), 1 << 26)
+}
+
+/// The system pages of [`build`], to damage before packing them.
+fn system() -> Vec<u8> {
     let mut system = vec![0u8; 0x400];
     let mut put = |at: usize, bytes: &[u8]| system[at..at + bytes.len()].copy_from_slice(bytes);
     let ptr = |at: u64| (SYS + at).to_le_bytes();
@@ -52,13 +57,17 @@ fn build() -> Vec<u8> {
     put(0x384, &1.0f32.to_le_bytes());
     put(0x388, &1.0f32.to_le_bytes());
     put(0x390, &ptr(0x200));
+    system
+}
 
+/// A resource of `system`, whose size `pages` (the page flags) describe.
+fn pack(system: &[u8], pages: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    for w in [0x3743_5352u32, 46, (46 >> 4) << 28 | 1 << 26, (46 & 0xF) << 28] {
+    for w in [0x3743_5352u32, 46, (46 >> 4) << 28 | pages, (46 & 0xF) << 28] {
         out.extend_from_slice(&w.to_le_bytes());
     }
     let mut z = DeflateEncoder::new(out, Compression::default());
-    z.write_all(&system).unwrap();
+    z.write_all(system).unwrap();
     z.finish().unwrap()
 }
 
@@ -85,4 +94,63 @@ fn damaged_files_are_errors() {
     let data = build();
     assert!(clips::to_text(&data[..10]).is_err());
     assert!(clips::to_text(b"not a resource at all").is_err());
+}
+
+fn put(system: &mut [u8], at: usize, bytes: &[u8]) {
+    system[at..at + bytes.len()].copy_from_slice(bytes);
+}
+
+#[test]
+fn map_entries_sharing_one_large_animation_are_bounded() {
+    // 65535 buckets, each holding the same entry: one animation with 65535 tracks.
+    let size = 0x100000; // one page of 0x200 << 11
+    let mut s = vec![0u8; size];
+    let ptr = |at: usize| (SYS + at as u64).to_le_bytes();
+    put(&mut s, 0x18, &ptr(0x100));
+    put(&mut s, 0x100 + 0x18, &ptr(0x1000));
+    put(&mut s, 0x100 + 0x20, &u16::MAX.to_le_bytes());
+    for k in 0..u16::MAX as usize {
+        put(&mut s, 0x1000 + k * 8, &ptr(0x200));
+    }
+    put(&mut s, 0x200 + 8, &ptr(0x300));
+    put(&mut s, 0x300 + 0x50, &ptr(0x90000));
+    put(&mut s, 0x300 + 0x58, &u16::MAX.to_le_bytes());
+    let start = std::time::Instant::now();
+    assert!(clips::parse(&pack(&s, (1 << 27) | 11)).is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(20), "took {:?}", start.elapsed());
+
+    // An entry that is its own next: the entry limit ends the loop.
+    let mut s = system();
+    put(&mut s, 0x1A0 + 0x10, &(SYS + 0x1A0).to_le_bytes());
+    assert!(clips::parse(&pack(&s, 1 << 26)).is_err());
+}
+
+#[test]
+fn wild_pointers_and_truncated_files_are_errors() {
+    let wild = [u64::MAX, u64::MAX - 7, SYS + 0x0FFF_FFFF, SYS + 0x3FF, 0x6000_0000, 0x7000_0000, 1];
+    // The maps, their buckets and entries, an animation and its tracks, a clip and its name and members.
+    for at in [0x18, 0x28, 0x118, 0x160, 0x1A8, 0x140, 0x1C8, 0x1E8, 0x250, 0x278, 0x350] {
+        for p in wild {
+            let mut s = system();
+            put(&mut s, at, &p.to_le_bytes());
+            let parsed = clips::parse(&pack(&s, 1 << 26));
+            // A name at the very end of a page reads as empty.
+            if at == 0x278 && matches!(p, 0x5000_03FF | 0x6000_0000) {
+                assert_eq!(parsed.unwrap().clips[0].name, "");
+            } else {
+                assert!(parsed.is_err(), "{at:#x} = {p:#x}");
+            }
+        }
+    }
+    // Counts beyond the file.
+    for (at, count) in [(0x30, u16::MAX), (0x120, u16::MAX), (0x258, u16::MAX), (0x358, u16::MAX)] {
+        let mut s = system();
+        put(&mut s, at, &count.to_le_bytes());
+        assert!(clips::parse(&pack(&s, 1 << 26)).is_err(), "{at:#x} = {count}");
+    }
+    // Every truncation of a valid file.
+    let data = build();
+    for n in 0..data.len() {
+        let _ = clips::to_text(&data[..n]);
+    }
 }

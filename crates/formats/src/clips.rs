@@ -93,15 +93,24 @@ pub fn parse(data: &[u8]) -> Result<ClipDictionary, Error> {
             dict.animations.push(a);
         }
     }
+    let mut members = 0;
     for (hash, ptr) in hash_map(&res, u64_at(root, 0x28), u16_at(root, 0x30))? {
-        dict.clips.push(clip(&res, hash, ptr)?);
+        let c = clip(&res, hash, ptr)?;
+        // Damaged entries may all point at one group with many members.
+        if let ClipKind::Group { members: m } = &c.kind {
+            members += m.len();
+            if members > MAX_TRACKS {
+                return Err(Error::Format("clip dictionary with too many group members".into()));
+            }
+        }
+        dict.clips.push(c);
     }
     dict.clips.sort_by_key(|c| c.hash);
     dict.animations.sort_by_key(|a| a.hash);
     Ok(dict)
 }
 
-/// Tracks of all animations at most.
+/// Tracks of all animations, and members of all clip groups, at most.
 const MAX_TRACKS: usize = 4_000_000;
 
 /// Entries (key, value pointer) of a chained hash map: `capacity` bucket

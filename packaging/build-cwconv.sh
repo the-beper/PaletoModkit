@@ -2,12 +2,15 @@
 # Builds paleto-cwconv (the Legacy -> Enhanced converter, CodeWalker based)
 # into target/cwconv/, self-contained: the .NET runtime is bundled, so users
 # do not need .NET installed.
-#   OUT=dir  build somewhere else
+#   OUT=dir         build somewhere else
+#   PROJECT=cwxml   build tools/cwxml (paleto-cwxml, a development check that
+#                   is not shipped) into target/cwxml/ instead
 # Uses the .NET 10 SDK when installed, otherwise its container (podman).
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=${OUT:-$ROOT/target/cwconv}
+PROJECT=${PROJECT:-cwconv}
+OUT=${OUT:-$ROOT/target/$PROJECT}
 cd "$ROOT"
 # podman reads a relative -v source as a volume name.
 mkdir -p "$OUT" && OUT=$(cd "$OUT" && pwd)
@@ -16,7 +19,7 @@ if [ ! -f third_party/codewalker/CodeWalker.Core/CodeWalker.Core.csproj ]; then
 fi
 ARGS="-c Release -r linux-x64 --self-contained true -p:DebugType=none"
 if command -v dotnet >/dev/null 2>&1; then
-    dotnet publish tools/cwconv/paleto-cwconv.csproj $ARGS -o "$OUT"
+    dotnet publish tools/$PROJECT/paleto-$PROJECT.csproj $ARGS -o "$OUT"
 else
     mkdir -p "$OUT"
     # The build writes obj/ and bin/ next to the sources: build a copy.
@@ -24,8 +27,8 @@ else
         mcr.microsoft.com/dotnet/sdk:10.0 sh -c "
             set -e
             mkdir -p /b/tools /b/third_party
-            cp -r /src/tools/cwconv /b/tools/
+            cp -r /src/tools/$PROJECT /b/tools/
             cp -r /src/third_party/codewalker /b/third_party/
-            dotnet publish /b/tools/cwconv/paleto-cwconv.csproj $ARGS -o /out"
+            dotnet publish /b/tools/$PROJECT/paleto-$PROJECT.csproj $ARGS -o /out"
 fi
-echo "built $OUT/paleto-cwconv"
+echo "built $OUT/paleto-$PROJECT"

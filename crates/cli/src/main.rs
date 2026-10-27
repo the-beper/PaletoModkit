@@ -244,11 +244,11 @@ enum Command {
         #[arg(long, value_name = "ID=FILE", conflicts_with = "output")]
         replace: Vec<String>,
     },
-    /// Export a model (.ydr or .ydd) as CodeWalker XML, with its textures as DDS files.
+    /// Export a model (.ydr, .ydd, .yft) or collision (.ybn) as CodeWalker XML, with its textures as DDS files.
     Model {
-        /// A .ydr or .ydd file, on disk or inside an archive.
+        /// A .ydr, .ydd, .yft or .ybn file, on disk or inside an archive.
         path: String,
-        /// The folder to write into: the XML as <name>.<ext>.xml, and the DDS files.
+        /// The folder to write into: the XML as <name>.<ext>.xml, and the DDS files in <name>/.
         #[arg(short, long)]
         output: PathBuf,
         /// A texture dictionary the model's textures may be in (repeatable).
@@ -538,9 +538,11 @@ fn main() -> Result<()> {
             let export = xml_export::export(&data, ext, stem, &dictionaries).with_context(|| format!("reading {path}"))?;
             write_file(&output.join(format!("{file}.xml")), export.xml.as_bytes())?;
             println!("wrote {}", output.join(format!("{file}.xml")).display());
+            // The textures go in a folder named after the model, where CodeWalker looks for them.
             for (name, dds) in &export.textures {
-                write_file(&output.join(name), dds)?;
-                println!("wrote {}", output.join(name).display());
+                let dest = output.join(stem).join(name);
+                write_file(&dest, dds)?;
+                println!("wrote {}", dest.display());
             }
         }
         Command::Textures { path, output, png, .. } => {

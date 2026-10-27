@@ -254,6 +254,12 @@ impl TextureDictionary {
 
     /// A dictionary at an address of a resource (embedded in models too).
     pub(crate) fn read(res: &Resource, ptr: u64, enhanced: bool) -> Result<Self, Error> {
+        let (textures, unsupported) = Self::read_located(res, ptr, enhanced)?;
+        Ok(TextureDictionary { enhanced, textures: textures.into_iter().map(|(_, t)| t).collect(), unsupported })
+    }
+
+    /// The textures with the address of each header, and the count of those left out.
+    pub(crate) fn read_located(res: &Resource, ptr: u64, enhanced: bool) -> Result<(Vec<(u64, Texture)>, usize), Error> {
         let root = res.block(ptr, 64)?;
         let (list, count) = (u64_at(root, 0x30), u16_at(root, 0x38) as usize);
         // Placeholder dictionaries have no texture list at all.
@@ -263,13 +269,20 @@ impl TextureDictionary {
             // One texture in a format we cannot read does not hide the others
             // (`Unsupported` comes only from the format lookup of the readers).
             match if enhanced { read_enhanced(res, ptr) } else { read_legacy(res, ptr) } {
-                Ok(texture) => textures.push(texture),
+                Ok(texture) => textures.push((ptr, texture)),
                 Err(Error::Unsupported(_)) => unsupported += 1,
                 Err(e) => return Err(e),
             }
         }
-        Ok(TextureDictionary { enhanced, textures, unsupported })
+        Ok((textures, unsupported))
     }
+}
+
+/// A texture header's `Unknown_32h`, usage data (usage in the low 5 bits, usage flags above)
+/// and extra flags, as CodeWalker reads them: an Enhanced header has only the usage, at 0x40.
+pub(crate) fn usage_fields(res: &Resource, ptr: u64, enhanced: bool) -> Result<(u16, u32, u32), Error> {
+    let b = res.block(ptr, 0x50)?;
+    Ok(if enhanced { (0, u32_at(b, 0x40) & 0x1F, 0) } else { (u16_at(b, 0x32), u32_at(b, 0x40), u32_at(b, 0x48)) })
 }
 
 fn read_legacy(res: &Resource, ptr: u64) -> Result<Texture, Error> {

@@ -108,7 +108,7 @@ New textures from PNG pictures become BC1, or BC3 when they have transparency. T
 
 Selecting a model (`.ydr`, `.yft`, `.ydd`) shows it in 3D, with its textures: its own, the ones vehicles share (`vehshare.ytd`) and the parent dictionaries the game links them to, DLC packs and tuning parts included. Drag to turn it, scroll to zoom, and **Reset view** to start over. Vehicle parts and wheels are shown in place.
 
-**⬇ Export as XML…** (for `.ydr` and `.ydd`) asks for a folder and writes the model as CodeWalker XML (`name.ydr.xml`, which Sollumz and CodeWalker import) and its textures as DDS files. Collision, joints and lights are not written. The command line does the same: [cli.md](cli.md#models).
+**⬇ Export as XML…** (models and collision: `.ydr`, `.ydd`, `.yft`, `.ybn`) asks for a folder and writes the file as CodeWalker XML (`name.ydr.xml`, which Sollumz and CodeWalker import), with its textures as DDS files in a `name/` folder next to it, where CodeWalker looks for them. The command line does the same: [cli.md](cli.md#models).
 
 The same viewer shows collision (`.ybn`) and navigation meshes (`.ynv`) as plain surfaces, without textures. A clip dictionary (`.ycd`) shows a read-only summary: each clip's name or hash, kind, start, end and rate, and each animation's frames, duration and bone tracks.
 

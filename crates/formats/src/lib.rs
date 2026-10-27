@@ -3,6 +3,7 @@
 pub mod awc;
 mod bc7;
 pub mod bounds;
+pub mod bounds_xml;
 pub mod clips;
 mod dds;
 mod decode;

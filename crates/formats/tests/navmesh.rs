@@ -11,6 +11,11 @@ const SYS: u64 = 0x5000_0000;
 /// Sector bounds (100, 200, 10) to (250, 350, 30); vertices at the corners of the quad
 /// (0, 0), (1, 0), (1, 1), (0, 1) in sector units and one more at (2, 0.5) beyond it.
 fn build() -> Vec<u8> {
+    pack(&system())
+}
+
+/// The system pages of [`build`], to damage before packing them.
+fn system() -> Vec<u8> {
     let mut system = vec![0u8; 0x1000];
     let mut put = |at: usize, bytes: &[u8]| system[at..at + bytes.len()].copy_from_slice(bytes);
     // Root: lists at 0x200 (vertices), 0x280 (indices), 0x300 (polygons); sector at 0x380.
@@ -53,7 +58,10 @@ fn build() -> Vec<u8> {
     put(0x502, &(4u16 << 5).to_le_bytes());
     put(0x542, &(3u16 << 5).to_le_bytes());
     put(0x544, &4u16.to_le_bytes());
+    system
+}
 
+fn pack(system: &[u8]) -> Vec<u8> {
     let version = 2u32;
     let pages = 1 << 24; // 8 pages of 0x200 bytes
     let mut out = Vec::new();
@@ -61,7 +69,7 @@ fn build() -> Vec<u8> {
         out.extend_from_slice(&u32::to_le_bytes(w));
     }
     let mut z = DeflateEncoder::new(out, Compression::default());
-    z.write_all(&system).unwrap();
+    z.write_all(system).unwrap();
     z.finish().unwrap()
 }
 
@@ -84,4 +92,62 @@ fn polygons_become_triangle_fans() {
 #[test]
 fn files_that_are_not_navmeshes_are_refused() {
     assert!(navmesh::parse(b"not a resource at all").is_err());
+}
+
+fn put(system: &mut [u8], at: usize, bytes: &[u8]) {
+    system[at..at + bytes.len()].copy_from_slice(bytes);
+}
+
+#[test]
+fn list_parts_beyond_the_total_are_refused() {
+    // Both parts of the vertex list point at the first block, with the whole count each.
+    let mut s = system();
+    for k in 0..2 {
+        put(&mut s, 0x240 + k * 16, &(SYS + 0x400).to_le_bytes());
+        put(&mut s, 0x248 + k * 16, &5u32.to_le_bytes());
+    }
+    assert!(navmesh::parse(&pack(&s)).is_err());
+    // One part far larger than the total, and than the file.
+    let mut s = system();
+    put(&mut s, 0x248, &u32::MAX.to_le_bytes());
+    assert!(navmesh::parse(&pack(&s)).is_err());
+    // More parts than any file has, and a total that is never reached.
+    for (at, value) in [(0x220, u32::MAX), (0x220, 4097), (0x208, u32::MAX), (0x208, 0)] {
+        let mut s = system();
+        put(&mut s, at, &value.to_le_bytes());
+        assert!(navmesh::parse(&pack(&s)).is_err(), "{at:#x} = {value}");
+    }
+}
+
+#[test]
+fn wild_pointers_and_truncated_files_are_errors() {
+    let wild = [u64::MAX, u64::MAX - 0xF, SYS + 0x0FFF_FFFF, SYS + 0xFFF, 0x6000_0000, 0x7000_0000, 0];
+    // The root's lists and sector, a list's parts table, and one part's data.
+    for at in [0x70, 0x80, 0x118, 0x120, 0x210, 0x240, 0x2d0, 0x350] {
+        for ptr in wild {
+            let mut s = system();
+            put(&mut s, at, &ptr.to_le_bytes());
+            assert!(navmesh::parse(&pack(&s)).is_err(), "{at:#x} = {ptr:#x}");
+        }
+    }
+    // Sector bounds that are NaN, infinite or inverted.
+    for (at, v) in [(0x380, f32::NAN), (0x394, f32::INFINITY), (0x390, 0.0)] {
+        let mut s = system();
+        put(&mut s, at, &v.to_le_bytes());
+        assert!(navmesh::parse(&pack(&s)).is_err(), "{at:#x} = {v}");
+    }
+    // Polygons whose indices run past the list or name vertices it lacks: left out.
+    let mut s = system();
+    put(&mut s, 0x502, &(0x7FFu16 << 5).to_le_bytes());
+    put(&mut s, 0x544, &u16::MAX.to_le_bytes());
+    assert!(navmesh::parse(&pack(&s)).is_err());
+    let mut s = system();
+    put(&mut s, 0x4a2, &u16::MAX.to_le_bytes());
+    let drawables = navmesh::parse(&pack(&s)).unwrap();
+    assert_eq!(drawables[0].lods[0].1.indices, [0, 1, 2, 0, 2, 3]);
+    // Every truncation of a valid file.
+    let data = build();
+    for n in 0..data.len() {
+        let _ = navmesh::parse(&data[..n]);
+    }
 }

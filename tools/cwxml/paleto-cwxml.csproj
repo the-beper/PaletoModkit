@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>paleto-cwxml</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Trim only the .NET libraries: CodeWalker's own code is kept whole, since
+         its resource reader creates types by reflection. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+    <Nullable>disable</Nullable>
+    <!-- CodeWalker.Core builds with many warnings of its own. -->
+    <NoWarn>$(NoWarn);CS0168;CS0169;CS0219;CS0414;CS0649;CS0659;CS0661;CS0162;CS8981</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../third_party/codewalker/CodeWalker.Core/CodeWalker.Core.csproj" />
+  </ItemGroup>
+
+</Project>

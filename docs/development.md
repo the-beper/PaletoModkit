@@ -77,6 +77,9 @@ cargo run --release -p paleto-rpf --example scan -- <game folder> <keys.bin>    
 cargo run --release -p paleto-formats --example scan_formats -- <game folder> [kinds…]      # metadata, text, audio, models round trips
 cargo run --release -p paleto-formats --example scan_ytd -- <game folder> <keys.bin> [--rebuild] # every texture dictionary
 cargo run --release -p paleto-rpf --example compare -- <keys.bin> <a.rpf> <b.rpf> [c.rpf]   # what differs between archives
+
+PROJECT=cwxml ./packaging/build-cwconv.sh   # target/cwxml/paleto-cwxml (tools/cwxml, not shipped), for roundtrip_xml
+cargo run --release -p paleto-formats --example roundtrip_xml -- <game folder> <N> [kinds…] [--keep] # every Nth model's XML export, imported by CodeWalker and compared
 ```
 
 The keys are in `~/.local/share/paleto/keys.bin` once the app or `paleto setup` has prepared them. Each example's header describes it. `roundtrip` edits a copy of an archive in a work folder you give it.

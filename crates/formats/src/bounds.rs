@@ -75,11 +75,10 @@ fn add_bound(res: &Resource, ptr: u64, m: &Matrix, depth: usize, mesh: &mut Mesh
     let kind = h[0x10];
     match kind {
         0 | 1 | 3 | 13 => {
-            *seen += 1;
             let (max, min) = (vec3(h, 0x20), vec3(h, 0x30));
             let center = vec3(h, 0x40);
             let half: V3 = std::array::from_fn(|i| (max[i] - min[i]) / 2.0);
-            match kind {
+            let added = finite(mesh, |mesh| match kind {
                 0 => add_sphere(mesh, m, vec3(h, 0x50), f32::from_bits(u32_at(h, 0x14))),
                 3 => add_box(mesh, m, center, half),
                 // Capsules and cylinders stand along Z; the radius is the narrower half-extent.
@@ -88,7 +87,8 @@ fn add_bound(res: &Resource, ptr: u64, m: &Matrix, depth: usize, mesh: &mut Mesh
                     let reach = if kind == 1 { half[2] - r } else { half[2] };
                     add_tube(mesh, m, [center[0], center[1], center[2] - reach], [center[0], center[1], center[2] + reach], r, kind == 1);
                 }
-            }
+            });
+            *seen += added as usize;
         }
         4 | 8 => {
             if let Some(n) = add_geometry(res, ptr, m, mesh) {
@@ -123,28 +123,41 @@ fn add_geometry(res: &Resource, ptr: u64, m: &Matrix, mesh: &mut Mesh) -> Option
     for poly in polys.as_chunks::<16>().0 {
         // Triangles and boxes list vertices from byte 4; spheres, capsules and cylinders have their radius there.
         let point = |at: usize| points.get(u16_at(poly, at) as usize & 0x7FFF).copied();
-        match poly[0] & 7 {
+        let added = match poly[0] & 7 {
             0 => {
                 let (Some(a), Some(b), Some(c)) = (point(4), point(6), point(8)) else { continue };
-                add_triangle(mesh, m, a, b, c);
+                finite(mesh, |mesh| add_triangle(mesh, m, a, b, c))
             }
             1 => {
                 let Some(c) = point(2) else { continue };
-                add_sphere(mesh, m, c, f32::from_bits(u32_at(poly, 4)));
+                finite(mesh, |mesh| add_sphere(mesh, m, c, f32::from_bits(u32_at(poly, 4))))
             }
             2 | 4 => {
                 let (Some(a), Some(b)) = (point(2), point(8)) else { continue };
-                add_tube(mesh, m, a, b, f32::from_bits(u32_at(poly, 4)), poly[0] & 7 == 2);
+                finite(mesh, |mesh| add_tube(mesh, m, a, b, f32::from_bits(u32_at(poly, 4)), poly[0] & 7 == 2))
             }
             3 => {
                 let (Some(o), Some(p1), Some(p2), Some(p3)) = (point(4), point(6), point(8), point(10)) else { continue };
-                add_tetra_box(mesh, m, [o, p1, p2, p3]);
+                finite(mesh, |mesh| add_tetra_box(mesh, m, [o, p1, p2, p3]))
             }
             _ => continue,
-        }
-        n += 1;
+        };
+        n += added as usize;
     }
     (n > 0).then_some(n)
+}
+
+/// Adds one primitive with `add`, or nothing when a damaged value (a radius, an extent,
+/// a vertex, a transformation) makes any of its points NaN or infinite.
+fn finite(mesh: &mut Mesh, add: impl FnOnce(&mut Mesh)) -> bool {
+    let (positions, indices) = (mesh.positions.len(), mesh.indices.len());
+    add(mesh);
+    if mesh.positions[positions..].iter().flatten().all(|v| v.is_finite()) {
+        return true;
+    }
+    mesh.positions.truncate(positions);
+    mesh.indices.truncate(indices);
+    false
 }
 
 fn add_triangle(mesh: &mut Mesh, m: &Matrix, a: V3, b: V3, c: V3) {

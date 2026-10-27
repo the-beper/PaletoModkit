@@ -1829,10 +1829,15 @@ impl App {
                         let (stem, ext) = file.rsplit_once('.').ok_or_else(|| format!("{file}: not a model"))?;
                         let export = paleto_formats::xml_export::export(&source.data, ext, stem, &source.dictionaries).map_err(|e| format!("{file}: {e}"))?;
                         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-                        let write = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).map_err(|e| format!("{}: {e}", dir.join(name).display()));
-                        write(&format!("{file}.xml"), export.xml.as_bytes())?;
+                        let write = |path: PathBuf, data: &[u8]| std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()));
+                        write(dir.join(format!("{file}.xml")), export.xml.as_bytes())?;
+                        // The textures go in a folder named after the model, where CodeWalker looks for them.
+                        let textures = dir.join(stem);
+                        if !export.textures.is_empty() {
+                            std::fs::create_dir_all(&textures).map_err(|e| format!("{}: {e}", textures.display()))?;
+                        }
                         for (name, dds) in &export.textures {
-                            write(name, dds)?;
+                            write(textures.join(name), dds)?;
                         }
                         Ok(format!("exported {file}.xml and {} textures to {}", export.textures.len(), dir.display()))
                     };
@@ -4588,12 +4593,14 @@ fn load_preview(req: PreviewRequest) -> Loaded {
         Ok(data) if matches!(ext.as_str(), "ydr" | "yft" | "ydd") => {
             let dictionaries = sibling_textures(&req);
             match paleto_formats::drawable::parse(&data, &ext, &dictionaries) {
-                // Exporting as XML covers drawables and dictionaries, not fragments.
-                Ok(drawables) => (Content::Model(drawables, (ext != "yft").then(|| Arc::new(ModelSource { data, dictionaries }))), None),
+                Ok(drawables) => (Content::Model(drawables, Some(Arc::new(ModelSource { data, dictionaries }))), None),
                 Err(e) => fail(e),
             }
         }
-        Ok(data) if ext == "ybn" => paleto_formats::bounds::parse(&data).map_or_else(fail, |drawables| (Content::Model(drawables, None), None)),
+        Ok(data) if ext == "ybn" => match paleto_formats::bounds::parse(&data) {
+            Ok(drawables) => (Content::Model(drawables, Some(Arc::new(ModelSource { data, dictionaries: Vec::new() }))), None),
+            Err(e) => fail(e),
+        },
         Ok(data) if ext == "ynv" => paleto_formats::navmesh::parse(&data).map_or_else(fail, |drawables| (Content::Model(drawables, None), None)),
         Ok(data) if ext == "ycd" => match paleto_formats::clips::to_text(&data) {
             Ok(summary) => {
