@@ -113,7 +113,8 @@ impl ModelView {
         };
         if self.shown.as_ref().map(|s| s.0) != Some(key) {
             let textures: &[Picture] = if self.textured { &self.drawables[self.selected].textures } else { &[] };
-            let image = render(self.mesh().unwrap(), textures, size, self.yaw, self.pitch, self.zoom, key.dark);
+            let Some(mesh) = self.mesh() else { return };
+            let image = render(mesh, textures, size, self.yaw, self.pitch, self.zoom, key.dark);
             let handle = ui.ctx().load_texture("model-preview", image, egui::TextureOptions::LINEAR);
             self.shown = Some((key, handle));
         }

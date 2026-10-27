@@ -23,9 +23,9 @@ How to browse the game files and change them with the desktop app. For installin
 - **Menu bar**: File, Game, Tools, View and Help. The filter box sits in the middle. At the right end, **Install package…** is the one place for `.oiv` packages and add-on packs (`dlc.rpf`), with **Prefix tweaks…** beside it (the game's Wine prefix, for ScriptHookVDotNet mods; see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). Neither has a menu entry. [Menus at a glance](#menus-at-a-glance) lists what each menu holds.
 - **Location bar**: back, forward and up buttons, then the path as clickable parts. Inside the mods copy of an archive, the path shows **MODS**, and **Show original** at the right end shows the game's own archive instead (marked **ORIGINAL**; **Show mods copy** goes back). This lasts until you leave that archive.
 - **Side tree**: the game folder. Click a name to open it, its arrow to expand it. **Expand all** and **Collapse all** are above it. **View → Side tree** hides it when you want the room for the file list.
-- **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it.
+- **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it, and again to reverse the order.
 - **Preview panel**: opens on the right when you select a file: text, XML, textures, models or sounds.
-- **Status bar**: what is running and the result of the last operation on the left. On the right: how many items the folder holds and what is selected (with its size), the files of the mods folder made for Legacy on the Enhanced edition (until they are converted; click the count to see them), and the edition (the game folder on hover).
+- **Status bar**: what is running and the result of the last operation on the left. One operation runs at a time: another one waits until it is done, and closing the window while one runs asks for a second close, since it would stop halfway. On the right: how many items the folder holds and what is selected (with its size), the files of the mods folder made for Legacy on the Enhanced edition (until they are converted; click the count to see them), and the edition (the game folder on hover).
 
 Paleto Modkit finds the games installed in your Steam libraries. **Game → Choose the game folder…** picks any other install (the folder holding `GTA5.exe` or `GTA5_Enhanced.exe`). Both editions are supported; the status bar says which one is open.
 
@@ -35,7 +35,7 @@ Paleto Modkit finds the games installed in your Steam libraries. **Game → Choo
 | :--- | :--- |
 | **Orange name with ↪** | **Modded**: a game archive or file with a copy in the `mods/` folder, which the game loads instead. Opening the archive shows that copy (the path shows **MODS**), so you see what the game actually loads. |
 | **Orange name** | Inside a mods copy: a file that differs from the game's, or is not in it; hover over it to see which. |
-| **Plain name** | **Original**: an untouched game file. **Show original** in the location bar shows one archive's original; **View → Show original files** shows the originals everywhere, ignoring the mods folder. |
+| **Plain name** | **Original**: an untouched game file. **Show original** in the location bar shows one archive's original; **View → Show original files (ignore mods folder)** shows the originals everywhere, ignoring the mods folder. |
 | **Icon colour** | **File type**: folders, archives, textures, models, maps, audio, executables and text each have their own colour. **View → Coloured icons** turns them off. |
 
 ## Browsing
@@ -91,7 +91,7 @@ Text tables (`.gxt2`) open as `0xHASH = text` lines, one per string, and are con
 
 ## Textures
 
-Selecting a texture dictionary (`.ytd`) shows its textures, with their format, size and mipmaps. Textures in a format Paleto Modkit cannot read are left out, and the header says how many; such a dictionary cannot be changed. **Alpha** shows their transparency over a checkerboard.
+Selecting a texture dictionary (`.ytd`) shows its textures, with their format, size and mipmaps. Textures in a format Paleto Modkit cannot read are left out, and the header says how many; such a dictionary cannot be changed. **Alpha** shows their transparency over a checkerboard. ↑/↓ move through the list, Home/End jump to the first or last texture.
 
 ![Texture dictionary viewer](../screenshots/texture-viewer.png)
 
@@ -125,10 +125,11 @@ Selecting an audio container (`.awc`) lists its sounds.
 | :--- | :--- |
 | Typing | Filter the open folder |
 | ↑ / ↓ | Move the selection |
-| Enter, double-click | Open a folder or archive, preview a file |
+| Enter, double-click | Open a folder or archive, preview a file (with several selected, the one last clicked without Shift) |
 | Backspace | Go up one level |
 | Alt+← / Alt+→, mouse side buttons | Back / forward |
 | Ctrl+click, Shift+click | Select several items |
+| Ctrl+Shift+click | Add a range to the selection |
 | Delete | Delete the selection |
 | F2 | Rename the selected item |
 | Ctrl+Shift+N | New folder |

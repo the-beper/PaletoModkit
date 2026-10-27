@@ -134,6 +134,11 @@ pub struct App {
     /// Select this item once the running edit has reloaded the folder.
     select_after: Option<String>,
     task: Option<Task<Outcome>>,
+    /// The previewed text being saved (file name, text): marked saved once
+    /// the save succeeds, so a failed save keeps the edits unsaved.
+    saving: Option<(String, String)>,
+    /// The window was asked to close while a task ran: a second request closes it.
+    close_while_busy: bool,
     /// Runs when the current task finishes (e.g. navigating after a save).
     after_task: Option<Action>,
     /// An action waiting for the user to save or discard the edited file.
@@ -362,6 +367,43 @@ pub enum Info {
     About,
 }
 
+impl Action {
+    /// Whether running it starts the background task, of which there is one at a time.
+    fn starts_task(&self) -> bool {
+        matches!(
+            self,
+            Action::Install
+                | Action::EditTextures(_)
+                | Action::ReplaceSound(..)
+                | Action::ExportSounds(..)
+                | Action::ExportTextures(..)
+                | Action::SavePreview
+                | Action::Extract(_)
+                | Action::Add(_)
+                | Action::AddLegacy { .. }
+                | Action::InstallAddonPacks
+                | Action::DeleteCopies(_)
+                | Action::UndoConversion(_)
+                | Action::Rename { .. }
+                | Action::CreateFolder(_)
+                | Action::Delete
+                | Action::ToggleMod(..)
+                | Action::ScriptHookUpdate(_)
+                | Action::WriteExport(..)
+                | Action::TurnOff(_)
+                | Action::HuntStart
+                | Action::HuntAnswer(_)
+                | Action::HuntStop
+                | Action::HuntInside(_)
+                | Action::SaveSnapshot(_)
+                | Action::RestoreSnapshot(..)
+                | Action::DeleteSnapshot(_)
+                | Action::AddDlcPacks(_)
+                | Action::ConvertMods(_)
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Unsaved {
     Save,
@@ -518,6 +560,8 @@ impl App {
             followed: None,
             select_after: None,
             task: None,
+            saving: None,
+            close_while_busy: false,
             after_task: None,
             pending: None,
             allow_close: false,
@@ -1117,7 +1161,7 @@ impl App {
                     EntryKind::Directory { .. } => RowKind::Folder,
                     EntryKind::Binary { .. } if e.is_archive() => RowKind::Archive,
                     EntryKind::Binary { .. } => RowKind::File,
-                    EntryKind::Resource { .. } => RowKind::Resource(e.resource_version().unwrap()),
+                    EntryKind::Resource { .. } => RowKind::Resource(e.resource_version().unwrap_or_default()),
                 };
                 Row { name: e.name.clone(), kind, size: e.size(), modded: false, added: false }
             })
@@ -1247,12 +1291,25 @@ impl App {
             Action::Forward => !self.forward.is_empty(),
             Action::Delete => self.confirm_delete.as_ref().is_some_and(|names| names.contains(&p.name)),
             Action::Rename { from, .. } => *from == p.name,
+            // Files of the mods folder move or go: the preview is closed.
+            Action::DeleteCopies(_)
+            | Action::ToggleMod(..)
+            | Action::HuntStart
+            | Action::HuntAnswer(_)
+            | Action::HuntStop
+            | Action::HuntInside(_)
+            | Action::RestoreSnapshot(..) => true,
             _ => false,
         }
     }
 
     /// Runs an action, first asking about unsaved edits it would throw away.
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        // Refused before asking about unsaved edits: discarding them would be for nothing.
+        if action.starts_task() && self.busy() {
+            self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+            return;
+        }
         if self.preview_dirty() && self.discards_preview(&action) {
             self.pending = Some(action);
             return;
@@ -1261,6 +1318,11 @@ impl App {
     }
 
     fn run(&mut self, action: Action, ctx: &egui::Context) {
+        // A second operation would replace the running one halfway.
+        if action.starts_task() && self.busy() {
+            self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+            return;
+        }
         match action {
             Action::Quit => {
                 self.allow_close = true;
@@ -1269,6 +1331,11 @@ impl App {
             Action::Unsaved(choice) => {
                 let pending = self.pending.take();
                 match choice {
+                    Unsaved::Save if self.busy() => {
+                        // The save would be refused, and the pending action run unsaved.
+                        self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+                        self.pending = pending;
+                    }
                     Unsaved::Save => {
                         self.run(Action::SavePreview, ctx);
                         // Continue once the file is written.
@@ -1383,6 +1450,10 @@ impl App {
                 self.go(self.within(b, location));
             }
             Action::Preview(name) => {
+                // The file being edited is already shown: reading it again would lose the edits.
+                if self.preview_dirty() && self.previewing() == Some(name.as_str()) {
+                    return;
+                }
                 let Some(b) = &self.browser else { return };
                 // Only what the file list does not say: its type and size are there.
                 let mut info = String::new();
@@ -1651,9 +1722,9 @@ impl App {
                 }
             }
             Action::SavePreview => {
-                let Some(p) = &mut self.preview else { return };
+                let Some(p) = &self.preview else { return };
                 let PreviewSource::Archive(path) = &p.source else { return };
-                let Some((text, saved)) = &mut p.text else { return };
+                let Some((text, _)) = &p.text else { return };
                 // Converted text (XML, text tables) is checked before anything is saved.
                 let data = match p.codec.encode(text) {
                     Ok(data) => data,
@@ -1663,8 +1734,8 @@ impl App {
                         return;
                     }
                 };
-                *saved = text.clone();
                 let (path, name) = (path.clone(), p.name.clone());
+                self.saving = Some((name.clone(), text.clone()));
                 self.spawn_edit("Saving", ctx, path.parent().unwrap(), move |editor, folder| {
                     editor.add_file(&vfs::join_inner(folder, &name), data)?;
                     Ok(format!("saved {name}"))
@@ -1892,10 +1963,6 @@ impl App {
                 };
             }
             Action::ToggleMod(part, enabled) => {
-                if self.busy() {
-                    self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
-                    return;
-                }
                 let Some(game) = self.game.clone() else { return };
                 // Files are about to move: an open preview may point at one.
                 self.preview = None;
@@ -2279,6 +2346,11 @@ impl App {
             match outcome {
                 Outcome::Done { message, reload } => {
                     self.status = Status::Info(message);
+                    if let Some((name, text)) = self.saving.take()
+                        && let Some((_, saved)) = self.preview.as_mut().filter(|p| p.name == name).and_then(|p| p.text.as_mut())
+                    {
+                        *saved = text;
+                    }
                     // The task may have added or converted Legacy files.
                     if self.legacy_scan.is_none() {
                         self.start_legacy_scan(ctx);
@@ -2340,6 +2412,7 @@ impl App {
                 }
                 Outcome::Failed(e) => {
                     self.status = Status::Error(e);
+                    self.saving = None;
                     self.select_after = None;
                     self.refresh_preview = None;
                     // Do not carry on (e.g. quit) after a failed save.
@@ -2541,7 +2614,7 @@ impl App {
                     let install = egui::Button::new(RichText::new(label).color(selection.stroke.color)).fill(selection.bg_fill);
                     // Short on a narrow window, where it saves room.
                     let width = if narrow { 0.0 } else { right_width(ui) };
-                    if crate::widgets::bar_button(ui, install, width).on_hover_text("Install an OpenIV package (.oiv) into the mods folder").clicked() {
+                    if crate::widgets::bar_button(ui, install, width).on_hover_text("Install an OpenIV package (.oiv) or an add-on pack (dlc.rpf) into the mods folder").clicked() {
                         actions.push(Action::PickPackage);
                     }
                 }
@@ -2861,7 +2934,16 @@ impl App {
                 }
             }
             if enter {
-                let target = if b.selected.len() == 1 { b.selected.first().cloned() } else { visible.first().map(|&i| b.rows[i].name.clone()) };
+                // The selection's row (among several, its anchor if selected, else the first); with none, the first match of the filter.
+                let target = match b.selected.len() {
+                    0 => visible.first().map(|&i| b.rows[i].name.clone()),
+                    1 => b.selected.first().cloned(),
+                    _ => pos
+                        .and_then(|p| visible.get(p))
+                        .map(|&i| b.rows[i].name.clone())
+                        .filter(|name| b.selected.contains(name))
+                        .or_else(|| visible.iter().map(|&i| &b.rows[i].name).find(|name| b.selected.contains(*name)).cloned()),
+                };
                 if let Some(name) = target {
                     actions.push(Action::Enter(name));
                 }
@@ -3857,13 +3939,24 @@ impl eframe::App for App {
             actions.push(action);
         }
 
-        // Closing the window with unsaved edits asks first.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.preview_dirty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending = Some(Action::Quit);
+        // Closing the window with unsaved edits asks first. While an
+        // operation runs (an install, a restore), closing would stop it
+        // halfway: the first request only warns, a second one closes.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if let Some(task) = self.task.as_ref().filter(|_| !self.close_while_busy) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.status = Status::Error(format!("{} is not finished: closing now would stop it halfway. Close again to quit anyway.", task.label));
+                self.close_while_busy = true;
+            } else if self.preview_dirty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending = Some(Action::Quit);
+            }
+        }
+        if self.task.is_none() {
+            self.close_while_busy = false;
         }
         let dialog = self.dialog_open();
-        if !dialog && self.preview_dirty() && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+        if !dialog && !self.busy() && self.preview_dirty() && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             actions.push(Action::SavePreview);
         }
         // Ctrl+F searches the text being previewed.
@@ -4219,7 +4312,7 @@ fn getting_started(ui: &mut egui::Ui) {
         "4. Install mods",
         &[
             "Install .oiv packages with Install package… (top right) or by dropping them on the window; add-on packs (dlc.rpf) \
-             the same way, or from the File menu. Game data goes to the mods folder, plugins and scripts to the game folder.",
+             the same way. Game data goes to the mods folder, plugins and scripts to the game folder.",
             "On the Enhanced edition, files made for Legacy are found and can be converted while they are installed.",
             "Prefix tweaks (beside Install) prepares the game's Wine prefix for ScriptHookVDotNet mods: it installs .NET Framework 4.8, \
              after a backup of the prefix. You add ScriptHookVDotNet and the mods yourself.",
@@ -4234,7 +4327,7 @@ fn getting_started(ui: &mut egui::Ui) {
     section(
         ui,
         "6. When the game breaks",
-        &["Game > Snapshots saves the mods folder before a change and puts it back after. Tools > Crash detection reads the game's \
+        &["Tools > Snapshots of the mods folder saves the mods folder before a change and puts it back after. Tools > Crash detection reads the game's \
            crash reports, names the likely causes and narrows the mod down by halves."],
     );
 }
