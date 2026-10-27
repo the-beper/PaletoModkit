@@ -289,6 +289,13 @@ impl Archive {
         self.read_raw(offset, 0, entry.stored_len() as usize)
     }
 
+    /// A file as stored, with its entry, to be copied with [`crate::ArchiveEditor::add_stored`].
+    pub fn stored(&self, idx: usize) -> Result<StoredFile, Error> {
+        let data = self.read_stored(idx)?;
+        let entry = &self.entries[idx];
+        Ok(StoredFile { name: entry.name.clone(), kind: entry.kind.clone(), aes: self.encryption == Encryption::Aes, data })
+    }
+
     /// Opens a nested archive entry.
     pub fn open_child(&self, idx: usize, keys: Option<&Keys>) -> Result<Archive, Error> {
         let entry = &self.entries[idx];
@@ -308,6 +315,63 @@ impl Archive {
         let mut buf = vec![0u8; len];
         self.file.read_exact_at(&mut buf, self.base + block as u64 * BLOCK + skip)?;
         Ok(buf)
+    }
+}
+
+/// A file exactly as an archive stores it (still compressed and encrypted),
+/// with its entry: copying it never decodes it, so it needs no keys and
+/// works for files that cannot be encrypted again (NG, scripts).
+#[derive(Debug, Clone)]
+pub struct StoredFile {
+    pub(crate) name: String,
+    pub(crate) kind: EntryKind,
+    /// Whether it comes from an AES archive (its encrypted files are AES, not NG).
+    pub(crate) aes: bool,
+    pub(crate) data: Vec<u8>,
+}
+
+/// Starts [`StoredFile::to_bytes`].
+const STORED_MAGIC: &[u8; 16] = b"PALETO-STORED-1\n";
+
+impl StoredFile {
+    /// The file as one blob, to keep outside an archive; read with [`StoredFile::from_bytes`].
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let (tag, a, b, c) = match self.kind {
+            EntryKind::Binary { size, uncompressed_size, encrypted, .. } => (1, size, uncompressed_size, encrypted as u32),
+            EntryKind::Resource { size, system_flags, graphics_flags, .. } => (2, size, system_flags, graphics_flags),
+            EntryKind::Directory { .. } => unreachable!("only files are stored"),
+        };
+        let mut out = STORED_MAGIC.to_vec();
+        for w in [self.aes as u32, tag, a, b, c, self.name.len() as u32] {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        out.extend_from_slice(self.name.as_bytes());
+        out.extend_from_slice(&self.data);
+        out
+    }
+
+    /// Reads [`StoredFile::to_bytes`]: `None` if `bytes` is not one,
+    /// [`Error::Corrupt`] if it is cut short or its sizes do not match its data.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Option<Self>, Error> {
+        let bad = || Error::Corrupt("damaged stored file");
+        let Some(rest) = bytes.strip_prefix(STORED_MAGIC) else { return Ok(None) };
+        let (head, rest) = rest.split_at_checked(24).ok_or_else(bad)?;
+        let w = |i: usize| u32::from_le_bytes(head[i * 4..i * 4 + 4].try_into().unwrap());
+        let (name, data) = rest.split_at_checked(w(5) as usize).ok_or_else(bad)?;
+        let name = String::from_utf8(name.to_vec()).map_err(|_| bad())?;
+        if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+            return Err(bad());
+        }
+        let kind = match w(1) {
+            1 if w(4) <= 1 => EntryKind::Binary { offset: 0, size: w(2), uncompressed_size: w(3), encrypted: w(4) == 1 },
+            2 => EntryKind::Resource { offset: 0, size: w(2), system_flags: w(3), graphics_flags: w(4) },
+            _ => return Err(bad()),
+        };
+        let entry = Entry { name, kind };
+        if w(0) > 1 || entry.stored_len() != data.len() as u64 {
+            return Err(bad());
+        }
+        Ok(Some(StoredFile { name: entry.name, kind: entry.kind, aes: w(0) == 1, data: data.to_vec() }))
     }
 }
 

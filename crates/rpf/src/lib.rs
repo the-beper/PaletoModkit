@@ -6,7 +6,7 @@ pub mod edit;
 mod hashes;
 pub mod keys;
 
-pub use archive::{Archive, Encryption, Entry, EntryKind};
+pub use archive::{Archive, Encryption, Entry, EntryKind, StoredFile};
 pub use edit::ArchiveEditor;
 pub use keys::Keys;
 

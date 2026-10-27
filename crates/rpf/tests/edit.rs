@@ -277,6 +277,40 @@ fn scripts() {
 }
 
 #[test]
+fn stored_files_are_copied_as_they_are() {
+    use paleto_rpf::StoredFile;
+    let keys = test_keys();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    std::fs::write(&path, aes_archive(dir.path(), &keys, b"x")).unwrap();
+    let mut ed = ArchiveEditor::open(&path, Some(&keys)).unwrap();
+    ed.add_file("main.ysc", resource(100)).unwrap();
+    ed.add_file("b.txt", b"plain text ".repeat(10)).unwrap();
+    let script = ed.stored("main.ysc").unwrap();
+
+    // Kept outside an archive and read back; anything else is not one.
+    let bytes = script.to_bytes();
+    let script = StoredFile::from_bytes(&bytes).unwrap().unwrap();
+    assert!(StoredFile::from_bytes(&resource(100)).unwrap().is_none());
+    assert!(StoredFile::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+
+    // Encryption is tied to the archive and the name.
+    let mut plain = ArchiveEditor::new("p.rpf");
+    assert!(matches!(plain.add_stored("main.ysc", script.clone()), Err(paleto_rpf::Error::Unsupported(_))));
+    assert!(matches!(ed.add_stored("other.ysc", script.clone()), Err(paleto_rpf::Error::Unsupported(_))));
+    ed.add_stored("main.ysc", script).unwrap();
+    // A plain file goes anywhere, under any name.
+    plain.add_stored("c.txt", ed.stored("b.txt").unwrap()).unwrap();
+    assert_eq!(plain.read("c.txt", None).unwrap(), b"plain text ".repeat(10));
+
+    ed.save(&path).unwrap();
+    let archive = Archive::open(&path, Some(&keys)).unwrap();
+    assert_eq!(archive.read(archive.find("main.ysc").unwrap(), Some(&keys)).unwrap(), resource(100));
+    let copied = archive.stored(archive.find("main.ysc").unwrap()).unwrap();
+    assert_eq!(copied.to_bytes(), StoredFile::from_bytes(&bytes).unwrap().unwrap().to_bytes());
+}
+
+#[test]
 fn names_that_are_paths_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.rpf");

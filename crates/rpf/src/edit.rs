@@ -24,7 +24,7 @@ use std::sync::Arc;
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
 
-use crate::archive::{AES, BLOCK, DIR_IDENT, MAGIC, OPEN, RSC7_MAGIC, decode};
+use crate::archive::{AES, BLOCK, DIR_IDENT, MAGIC, OPEN, RSC7_MAGIC, StoredFile, decode};
 use crate::crypto::encrypt_aes;
 use crate::{Archive, Encryption, Entry, EntryKind, Error, Keys};
 
@@ -169,6 +169,39 @@ impl ArchiveEditor {
         }
         let node = FileNode::from_file(name, data)?;
         self.insert(&parts, Node::File(node))
+    }
+
+    /// Adds or replaces a file with one exactly as another archive stored it
+    /// (see [`Archive::stored`], [`ArchiveEditor::stored`]).
+    ///
+    /// Encryption is tied to the archive (AES or NG) and, for NG, scripts and
+    /// nested archives, to the name: an encrypted file, a script or an archive
+    /// is only taken under its own name, from an archive encrypted the same way.
+    pub fn add_stored(&mut self, path: &str, stored: StoredFile) -> Result<(), Error> {
+        let parts = split(path)?;
+        let name = parts.last().unwrap();
+        let tied = match stored.kind {
+            EntryKind::Binary { encrypted, .. } => encrypted || name.ends_with(".rpf"),
+            EntryKind::Resource { .. } => is_script(name) || is_script(&stored.name.to_ascii_lowercase()),
+            EntryKind::Directory { .. } => return Err(Error::NotAFile(stored.name)),
+        };
+        if tied && (stored.aes != self.aes.is_some() || !stored.name.eq_ignore_ascii_case(name)) {
+            return Err(Error::Unsupported("copying an encrypted file, script or archive to another name or another kind of archive"));
+        }
+        let node = FileNode { kind: stored.kind, data: Data::Bytes(stored.data) };
+        self.insert(&parts, Node::File(node))
+    }
+
+    /// A file as stored, with its entry, to be put back with [`ArchiveEditor::add_stored`].
+    pub fn stored(&self, path: &str) -> Result<StoredFile, Error> {
+        let parts = split(path)?;
+        match self.node(&parts) {
+            Some(Node::File(f)) => {
+                Ok(StoredFile { name: parts.last().unwrap().clone(), kind: f.kind.clone(), aes: self.aes.is_some(), data: f.data.read()? })
+            }
+            Some(Node::Archive(_)) => Err(Error::Unsupported("reading an archive that is being edited")),
+            _ => Err(Error::NotFound(path.to_string())),
+        }
     }
 
     /// Deletes a file or folder. Returns false if it does not exist.

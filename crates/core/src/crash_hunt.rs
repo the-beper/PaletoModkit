@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use paleto_rpf::{ArchiveEditor, Keys};
+use paleto_rpf::{Archive, ArchiveEditor, Keys, StoredFile};
 
 use crate::export::{Kind, locate, read_in};
 use crate::game::{Game, resolve_ci};
@@ -317,33 +317,61 @@ fn switch_inside(game: &Game, keys: Option<&Keys>, top: &str, items: &[Part], ki
         let ed = crate::convert::inner(&mut editor, &nested, keys)?;
         if off {
             std::fs::create_dir_all(aside.parent().unwrap())?;
-            // What is kept aside is written once the archive took the change
-            // (scripts, for one, can be refused), so a failure leaves no trace.
+            // Files move as stored (still compressed and encrypted), never
+            // decoded: scripts and NG-encrypted files cannot be encrypted again.
+            // What is kept aside is written once the archive took the change,
+            // so a failure leaves no trace.
             match kind {
                 Kind::Deleted => {
-                    ed.add_file(&file, read_in(&original, keys, &nested, &file)?)?;
+                    put_back(ed, &original, keys, &nested, &file)?;
                     std::fs::write(&marker, b"")?;
                 }
                 Kind::Added => {
-                    std::fs::write(&aside, ed.read(&file, keys)?)?;
+                    std::fs::write(&aside, ed.stored(&file)?.to_bytes())?;
                     ed.delete(&file)?;
                 }
                 _ => {
-                    let changed = ed.read(&file, keys)?;
-                    ed.add_file(&file, read_in(&original, keys, &nested, &file)?)?;
-                    std::fs::write(&aside, changed)?;
+                    let changed = ed.stored(&file)?;
+                    put_back(ed, &original, keys, &nested, &file)?;
+                    std::fs::write(&aside, changed.to_bytes())?;
                 }
             }
         } else if marker.is_file() {
             ed.delete(&file)?;
             std::fs::remove_file(&marker)?;
         } else if aside.is_file() {
-            ed.add_file(&file, std::fs::read(&aside)?)?;
+            let kept = std::fs::read(&aside)?;
+            match StoredFile::from_bytes(&kept)? {
+                Some(stored) => ed.add_stored(&file, stored)?,
+                // Kept aside as the standalone file by an older version.
+                None => ed.add_file(&file, kept)?,
+            }
             std::fs::remove_file(&aside)?;
         }
     }
     editor.save(&disk)?;
     Ok(())
+}
+
+/// Puts the game's own `file` back in `ed`, as stored. Decoded and added again
+/// only when its encryption cannot be copied (from an AES archive into a
+/// mods copy that is not, say).
+fn put_back(ed: &mut ArchiveEditor, original: &Path, keys: Option<&Keys>, nested: &[String], file: &str) -> Result<(), Error> {
+    match ed.add_stored(file, stored_in(original, keys, nested, file)?) {
+        Err(paleto_rpf::Error::Unsupported(_)) => Ok(ed.add_file(file, read_in(original, keys, nested, file)?)?),
+        done => Ok(done?),
+    }
+}
+
+/// A file inside an archive on disk (nested archives named in `nested`), as stored.
+fn stored_in(disk: &Path, keys: Option<&Keys>, nested: &[String], file: &str) -> Result<StoredFile, Error> {
+    let mut archive = Archive::open(disk, keys)?;
+    for n in nested {
+        let idx = archive.find(n).ok_or_else(|| Error::Package(format!("{n} not found in {}", disk.display())))?;
+        archive = archive.open_child(idx, keys)?;
+    }
+    let idx = archive.find(file).ok_or_else(|| Error::Package(format!("{file} not found in {}", disk.display())))?;
+    Ok(archive.stored(idx)?)
 }
 
 /// Puts back every file a hunt inside an archive turned off.
@@ -565,6 +593,93 @@ mod tests {
         let Outcome::Test(_) = start_inside(&game, None, "mods/update/update.rpf", &cache).unwrap() else { panic!() };
         stop(&game, None).unwrap();
         assert_eq!(contents(&root.join("mods/update/update.rpf")), modded);
+    }
+
+    /// Every file of an archive as stored: scripts stay encrypted, so no keys are needed.
+    fn stored_contents(path: &Path) -> BTreeMap<String, Vec<u8>> {
+        let a = paleto_rpf::Archive::open(path, None).unwrap();
+        a.walk(0).into_iter().filter(|(_, i)| !a.entries[*i].is_dir()).map(|(p, i)| (p, a.read_stored(i).unwrap())).collect()
+    }
+
+    /// A resource (RSC7) of `len` bytes, its payload filled from `seed`.
+    fn resource(len: usize, seed: u8) -> Vec<u8> {
+        let mut data: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect();
+        data[..4].copy_from_slice(b"RSC7");
+        data[4..8].copy_from_slice(&10u32.to_le_bytes());
+        data[8..12].copy_from_slice(&0x0000_0001u32.to_le_bytes());
+        data[12..16].copy_from_slice(&0xA000_0002u32.to_le_bytes());
+        data
+    }
+
+    /// Saves `ed` and renames its `.ytd` files `.ysc` in the names table: scripts
+    /// cannot be added to an OPEN archive, but the game's archives hold them.
+    fn save_with_scripts(ed: ArchiveEditor, path: &Path) {
+        ed.save(path).unwrap();
+        let mut data = std::fs::read(path).unwrap();
+        let word = |i: usize| u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+        let (start, len) = (16 + 16 * word(4), word(8));
+        let names = &mut data[start..start + len];
+        let at: Vec<usize> = names.windows(5).enumerate().filter(|(_, w)| *w == b".ytd\0").map(|(k, _)| k).collect();
+        assert!(!at.is_empty());
+        for k in at {
+            names[k..k + 5].copy_from_slice(b".ysc\0");
+        }
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn looks_inside_an_open_archive_with_scripts() {
+        // OPEN archives, as the mods copy of an NG archive is: scripts in them
+        // are NG-encrypted, cannot be encrypted again, and are moved as stored.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("update")).unwrap();
+        std::fs::create_dir_all(root.join("mods/update")).unwrap();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        let mut update = ArchiveEditor::new("update.rpf");
+        update.add_file("common/data/a.meta", b"stock".to_vec()).unwrap();
+        update.add_file("scripts/x.ytd", resource(256, 1)).unwrap();
+        update.add_file("scripts/gone.ytd", resource(128, 2)).unwrap();
+        save_with_scripts(update, &root.join("update/update.rpf"));
+        let mut update = ArchiveEditor::new("update.rpf");
+        update.add_file("common/data/a.meta", b"mod a".to_vec()).unwrap();
+        update.add_file("common/data/b.meta", b"new".to_vec()).unwrap();
+        // Another size: without keys, changes are found by size or stored bytes.
+        update.add_file("scripts/x.ytd", resource(384, 3)).unwrap();
+        update.add_file("scripts/new.ytd", resource(160, 4)).unwrap();
+        save_with_scripts(update, &root.join("mods/update/update.rpf"));
+        let game = Game::open(&root).unwrap();
+        let original = stored_contents(&root.join("update/update.rpf"));
+        let modded = stored_contents(&root.join("mods/update/update.rpf"));
+        let cache = dir.path().join("changes.tsv");
+        let suspects: Vec<String> = crate::export::changed_files(&game, None).unwrap().into_iter().map(|c| c.path).collect();
+        for script in ["gone.ysc", "new.ysc", "x.ysc"] {
+            assert!(suspects.contains(&format!("update/update.rpf/scripts/{script}")), "{suspects:?}");
+        }
+        assert_eq!(suspects.len(), 5, "{suspects:?}");
+
+        for culprit in &suspects {
+            let mut outcome = start_inside(&game, None, "mods/update/update.rpf", &cache).unwrap();
+            let found = loop {
+                match outcome {
+                    Outcome::Found(p) => break p,
+                    Outcome::Test(hunt) => {
+                        // The files turned off hold the game's own bytes, as stored (or are gone, if added).
+                        let now = stored_contents(&root.join("mods/update/update.rpf"));
+                        for p in &hunt.disabled {
+                            let inner = p.strip_prefix("update/update.rpf/").unwrap();
+                            assert_eq!(now.get(inner), original.get(inner), "{p} not turned off");
+                        }
+                        outcome = answer(&game, None, !hunt.disabled.contains(culprit)).unwrap();
+                    }
+                }
+            };
+            assert_eq!(&found, culprit);
+            assert_eq!(turned_off(&game), std::slice::from_ref(culprit));
+            stop(&game, None).unwrap();
+            assert_eq!(stored_contents(&root.join("mods/update/update.rpf")), modded, "not restored after {culprit}");
+            assert!(turned_off(&game).is_empty());
+        }
     }
 
     #[test]
