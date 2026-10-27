@@ -358,9 +358,22 @@ fn xml_nesting_is_bounded() {
     // Pointed-to structures nest without end in XML: `<next type="CPaletoR">` in each other.
     let meta = MetaFile::parse(&pso_root(&[(joaat(b"next"), 0x0C, 3, 0, 0)], 8, vec![0; 8], &[])).unwrap();
     let nested = |depth: usize| format!("<CPaletoR>{}{}</CPaletoR>", "<next type=\"CPaletoR\">".repeat(depth), "</next>".repeat(depth));
-    assert!(meta.rebuild_from_xml(&nested(128)).is_ok());
-    assert!(error(meta.rebuild_from_xml(&nested(129))).contains("nest more than 128 deep"));
-    assert!(error(meta.rebuild_from_xml(&nested(10_000))).contains("nest more than 128 deep"));
+    assert!(meta.rebuild_from_xml(&nested(64)).is_ok());
+    assert!(error(meta.rebuild_from_xml(&nested(65))).contains("structures nest more than 64 deep"));
+    assert!(error(meta.rebuild_from_xml(&nested(10_000))).contains("structures nest more than 64 deep"));
+}
+
+#[test]
+fn xml_nesting_matches_the_binary_reader() {
+    // Each `<next>` is one element and one level of structures: the XML must
+    // refuse what the binary reader would refuse, or Paleto writes a file it
+    // cannot open again.
+    let meta = MetaFile::parse(&pso_root(&[(joaat(b"next"), 0x0C, 3, 0, 0)], 8, vec![0; 8], &[])).unwrap();
+    let nested = |depth: usize| format!("<CPaletoR>{}{}</CPaletoR>", "<next type=\"CPaletoR\">".repeat(depth), "</next>".repeat(depth));
+    let mut back = MetaFile::parse(&meta.rebuild_from_xml(&nested(64)).unwrap()).unwrap();
+    back.learn_names("CPaletoR next");
+    assert_eq!(back.to_xml().matches("<next type=").count(), 64);
+    assert!(error(meta.rebuild_from_xml(&nested(65))).contains("structures nest more than 64 deep"));
 }
 
 #[test]

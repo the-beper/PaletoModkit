@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use super::{Kind, Schema, Value};
+use super::{Kind, MAX_NESTING, Schema, Value};
 use crate::Error;
 use crate::names::Names;
 
@@ -255,8 +255,9 @@ pub(super) fn read(schema: &Schema, names: &Names, root_type: u32, text: &str, m
     XmlReader { schema, names, map_types, budget, map_entries: RefCell::default() }.read_struct(root, root_type, 0)
 }
 
-/// Deepest element nesting read: twice the reader's nesting of structures,
-/// as arrays and maps put an `<Item>` between levels.
+/// Deepest element nesting read, a guard for the stack. Structures are held
+/// to the binary reader's own bound by [`XmlReader::nest`]: an element is
+/// as deep in the XML as its structure is for that reader.
 const MAX_DEPTH: usize = 128;
 
 struct XmlReader<'a> {
@@ -301,8 +302,18 @@ impl XmlReader<'_> {
         self.spend()
     }
 
+    /// Refuses a structure `depth` levels down that the binary reader would
+    /// not follow, so every file rebuilt from XML can be opened again.
+    fn nest(&self, node: Node, depth: usize) -> Result<(), Error> {
+        if depth > MAX_NESTING as usize {
+            return Err(Error::Edit(format!("{}: structures nest more than {MAX_NESTING} deep", at(node))));
+        }
+        Ok(())
+    }
+
     fn read_struct(&self, node: Node, ty: u32, depth: usize) -> Result<Value, Error> {
         self.enter(node, depth)?;
+        self.nest(node, depth)?;
         let info = self.schema.structs.get(&ty).ok_or_else(|| Error::Edit(format!("unknown structure {}", self.names.name(ty))))?;
         // By name, so many children or fields take no quadratic time.
         let fields: HashSet<u32> = info.fields.iter().map(|f| f.name).collect();
@@ -407,6 +418,8 @@ impl XmlReader<'_> {
         let mut entries = Vec::new();
         let mut entry_type = 0;
         for child in elements(node) {
+            // The binary reader reads each entry as a structure at this depth.
+            self.nest(child, depth)?;
             let key = child.attribute("key").ok_or_else(|| Error::Edit(format!("{}: a key=\"...\" attribute is needed", at(child))))?;
             // The entry structure: the one with Key and Item fields whose item matches.
             let ty = self.map_entry_type(child)?;
