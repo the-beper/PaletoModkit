@@ -301,6 +301,27 @@ fn one_operation_at_a_time() {
 }
 
 #[test]
+fn switching_game_waits_for_the_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut harness, _archive) = previewed_archive(dir.path());
+    let ctx = harness.ctx.clone();
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("GTA5.exe"), b"").unwrap();
+    let slow = dir.path().join("slow.txt");
+    pipe(&slow);
+    harness.state_mut().add_files(vec![slow.clone()], &ctx);
+    harness.run_steps(2);
+
+    // The operation's result would land in the other game.
+    harness.state_mut().select_game_folder(&other, &ctx);
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("Wait for the current operation")));
+    release(&slow);
+    settle(&mut harness);
+    assert_eq!(harness.state().names(), ["handling.meta", "notes.txt", "slow.txt"]);
+}
+
+#[test]
 fn closing_while_busy_asks_first() {
     let dir = tempfile::tempdir().unwrap();
     let (mut harness, _archive) = previewed_archive(dir.path());

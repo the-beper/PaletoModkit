@@ -32,6 +32,9 @@ fn replaced_and_added_files_are_marked() {
     std::fs::create_dir_all(&mine).unwrap();
     std::fs::write(mine.join("vehicleaihandlinginfo.meta"), b"<mine/>").unwrap();
     std::fs::write(mine.join("extra.meta"), b"<extra/>").unwrap();
+    // SAFETY: this test binary runs this single test. No cached keys, as in
+    // CI: the fake game's keys cannot be found.
+    unsafe { std::env::set_var("XDG_DATA_HOME", dir.path().join("data")) };
 
     let mut harness = Harness::builder().build_eframe(|cc| App::new(cc));
     let ctx = harness.ctx.clone();
@@ -59,4 +62,13 @@ fn replaced_and_added_files_are_marked() {
     harness.state_mut().add_files(vec![mine.join("vehicleaihandlinginfo.meta")], &ctx);
     settle(&mut harness);
     assert_eq!(harness.state().changed_names(), [("extra.meta".to_string(), true)]);
+
+    // Compared without the keys, the result is not kept:
+    // coming back compares again.
+    let mut common = ArchiveEditor::open(&root.join("common.rpf"), None).unwrap();
+    common.add_file("data/ai/extra.meta", b"<extra/>".to_vec()).unwrap();
+    common.save(&root.join("common.rpf")).unwrap();
+    harness.state_mut().open(ai.clone());
+    settle(&mut harness);
+    assert!(harness.state().changed_names().is_empty());
 }

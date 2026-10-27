@@ -534,12 +534,15 @@ impl Report {
 }
 
 /// The shell of [`is_running`] on the host: succeeds when some process has
-/// the prefix (`$1`) or its Steam data folder (`$2`) in its environment.
-const RUNNING_ON_HOST: &str = "for e in /proc/[0-9]*/environ; do { tr '\\0' '\\n' < \"$e\"; } 2>/dev/null; done | grep -qxF -e \"WINEPREFIX=$1\" -e \"WINEPREFIX=$1/\" -e \"STEAM_COMPAT_DATA_PATH=$2\" -e \"STEAM_COMPAT_DATA_PATH=$2/\"";
+/// the prefix (`$1`) or its Steam data folder (`$2`) in its environment, both
+/// sides compared as given and with links resolved.
+const RUNNING_ON_HOST: &str = "a=$(readlink -f \"$1\"); b=$(readlink -f \"$2\"); for e in /proc/[0-9]*/environ; do { tr '\\0' '\\n' < \"$e\"; } 2>/dev/null; done | sed -n 's/^WINEPREFIX=//p; s/^STEAM_COMPAT_DATA_PATH=//p' | while IFS= read -r p; do printf '%s\\n%s\\n' \"$p\" \"${p%/}\"; readlink -f \"$p\"; done | grep -qxF -e \"$1\" -e \"$2\" -e \"${a:-$1}\" -e \"${b:-$2}\"";
 
 /// Whether a process is using the prefix (the game, or a wineserver of it).
-/// Steam gives the processes of a game the prefix in their environment.
+/// Steam gives the processes of a game the prefix in their environment, in its
+/// own spelling of the path: it is compared with links resolved too.
 pub fn is_running(prefix: &Prefix) -> bool {
+    use std::os::unix::ffi::OsStrExt;
     if let Some(spawn) = host_spawn() {
         // The processes of the host are not in this sandbox's /proc.
         return Command::new(spawn)
@@ -552,11 +555,13 @@ pub fn is_running(prefix: &Prefix) -> bool {
             .status()
             .is_ok_and(|s| s.success());
     }
-    let wanted = [
-        format!("WINEPREFIX={}", prefix.path.display()),
-        format!("STEAM_COMPAT_DATA_PATH={}", prefix.compat.display()),
-    ];
-    let trim = |s: &[u8]| String::from_utf8_lossy(s).trim_end_matches('/').to_string();
+    let wanted = [&prefix.path, &prefix.compat];
+    let resolved: Vec<PathBuf> = wanted.iter().filter_map(|p| std::fs::canonicalize(p).ok()).collect();
+    // Paths compare by their parts: a trailing slash makes no difference.
+    let matches = |value: &[u8]| {
+        let value = Path::new(std::ffi::OsStr::from_bytes(value));
+        wanted.iter().any(|w| w.as_path() == value) || std::fs::canonicalize(value).is_ok_and(|v| resolved.contains(&v))
+    };
     std::fs::read_dir("/proc")
         .into_iter()
         .flatten()
@@ -568,7 +573,8 @@ pub fn is_running(prefix: &Prefix) -> bool {
                 .all(|b| b.is_ascii_digit())
                 && std::fs::read(e.path().join("environ")).is_ok_and(|env| {
                     env.split(|b| *b == 0)
-                        .any(|var| wanted.iter().any(|w| trim(var) == *w))
+                        .filter_map(|var| var.strip_prefix(b"WINEPREFIX=").or_else(|| var.strip_prefix(b"STEAM_COMPAT_DATA_PATH=")))
+                        .any(matches)
                 })
         })
 }
@@ -1371,6 +1377,30 @@ mod tests {
         let _ = child.wait();
         assert!(found, "a process with WINEPREFIX=/steam/pfx/ is using /steam/pfx");
         assert!(!other);
+    }
+
+    #[test]
+    fn the_running_check_resolves_links() {
+        // Steam reaches the library through a link; the prefix was found by its real path.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("disk/compatdata/271590");
+        std::fs::create_dir_all(real.join("pfx")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("disk"), dir.path().join("library")).unwrap();
+        let real = std::fs::canonicalize(real).unwrap();
+        let proton = Proton { name: String::new(), dir: PathBuf::new(), wine: PathBuf::new(), wineserver: PathBuf::new() };
+        let prefix = Prefix { app_id: "271590", path: real.join("pfx"), compat: real.clone(), proton };
+        let other = Prefix { path: dir.path().join("pfx"), compat: dir.path().to_path_buf(), ..prefix.clone() };
+        let on_host = |p: &Prefix| Command::new("sh").args(["-c", RUNNING_ON_HOST, "sh"]).arg(&p.path).arg(&p.compat).status().unwrap().success();
+
+        for (var, path) in [("WINEPREFIX", "library/compatdata/271590/pfx/"), ("STEAM_COMPAT_DATA_PATH", "library/compatdata/271590")] {
+            let mut child = Command::new("sleep").arg("5").env(var, dir.path().join(path)).spawn().unwrap();
+            let found = (is_running(&prefix), on_host(&prefix));
+            let not_other = (is_running(&other), on_host(&other));
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(found, (true, true), "{var}");
+            assert_eq!(not_other, (false, false), "{var}");
+        }
     }
 
     #[test]

@@ -60,6 +60,7 @@ pub enum Location {
 
 /// The entries of a folder that differ from the original game files, by lowercase name.
 type Changes = HashMap<String, vfs::Change>;
+type Comparison = Task<Result<Changes, String>>;
 
 pub struct App {
     game: Option<Game>,
@@ -93,7 +94,9 @@ pub struct App {
     /// Raises the window when a later launch asks for it.
     #[cfg(target_os = "linux")]
     activator: Option<crate::wayland_activation::Activator>,
-    changes_task: Option<(Location, Task<Result<Changes, String>>)>,
+    /// The comparison running, and whether it has the keys. Without them encrypted
+    /// originals cannot be read and every file looks added: such a result is not cached.
+    changes_task: Option<(Location, bool, Comparison)>,
     /// Comparisons done, by folder and the archive's modification time.
     changes_cache: Vec<(Location, Option<std::time::SystemTime>, Arc<Changes>)>,
     /// The desktop's light or dark preference, for the "same as the system" theme.
@@ -368,7 +371,13 @@ pub enum Info {
 }
 
 impl Action {
-    /// Whether running it starts the background task, of which there is one at a time.
+    /// Whether it must wait for the background task: it starts one (there is one
+    /// at a time), or switches game under it.
+    fn waits_for_task(&self) -> bool {
+        self.starts_task() || matches!(self, Action::SelectGame(_) | Action::PickGame)
+    }
+
+    /// Whether running it starts the background task.
     fn starts_task(&self) -> bool {
         matches!(
             self,
@@ -1089,7 +1098,7 @@ impl App {
                     let task = Task::spawn("Comparing with the original", &self.ctx, move || {
                         vfs::compare_folder(&modded, &original, keys.as_deref()).map_err(|e| e.to_string())
                     });
-                    self.changes_task = Some((location.clone(), task));
+                    self.changes_task = Some((location.clone(), self.keys.is_some(), task));
                 }
             }
         }
@@ -1306,7 +1315,7 @@ impl App {
     /// Runs an action, first asking about unsaved edits it would throw away.
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
         // Refused before asking about unsaved edits: discarding them would be for nothing.
-        if action.starts_task() && self.busy() {
+        if action.waits_for_task() && self.busy() {
             self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
             return;
         }
@@ -1319,7 +1328,7 @@ impl App {
 
     fn run(&mut self, action: Action, ctx: &egui::Context) {
         // A second operation would replace the running one halfway.
-        if action.starts_task() && self.busy() {
+        if action.waits_for_task() && self.busy() {
             self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
             return;
         }
@@ -2257,18 +2266,20 @@ impl App {
         if !self.dialog_open() && !self.busy() {
             self.startup.promote(self.game.as_ref());
         }
-        if let Some((location, task)) = &self.changes_task
+        if let Some((location, with_keys, task)) = &self.changes_task
             && let Some(result) = task.poll()
         {
-            let location = location.clone();
+            let (location, with_keys) = (location.clone(), *with_keys);
             self.changes_task = None;
             if let (Ok(changes), Location::Archive(path)) = (result, &location) {
                 let modified = std::fs::metadata(&path.disk).and_then(|m| m.modified()).ok();
                 let changes = Arc::new(changes);
-                self.changes_cache.retain(|(l, _, _)| l != &location);
-                self.changes_cache.push((location.clone(), modified, changes.clone()));
-                if self.changes_cache.len() > 64 {
-                    self.changes_cache.remove(0);
+                if with_keys {
+                    self.changes_cache.retain(|(l, _, _)| l != &location);
+                    self.changes_cache.push((location.clone(), modified, changes.clone()));
+                    if self.changes_cache.len() > 64 {
+                        self.changes_cache.remove(0);
+                    }
                 }
                 if let Some(b) = self.browser.as_mut().filter(|b| b.location == location) {
                     mark_changes(&mut b.rows, &changes);
