@@ -101,6 +101,13 @@ pub fn read(dds: &[u8]) -> Result<Image, Error> {
     let flags = u32_at(dds, 8);
     let (height, width) = (u32_at(dds, 12), u32_at(dds, 16));
     let levels = if flags & DDSD_MIPMAPCOUNT != 0 { u32_at(dds, 28).max(1) } else { 1 };
+    // Checked first: every path below sizes its data from these.
+    if width == 0 || height == 0 || width > 16384 || height > 16384 {
+        return Err(bad("invalid size"));
+    }
+    if levels > 32 {
+        return Err(bad("too many mip levels"));
+    }
     let (pf_flags, fourcc, bits) = (u32_at(dds, 80), &dds[84..88], u32_at(dds, 88));
     let masks = [u32_at(dds, 92), u32_at(dds, 96), u32_at(dds, 100), u32_at(dds, 104)];
     if u32_at(dds, 112) & 0x200 != 0 || u32_at(dds, 24) > 1 {
@@ -163,9 +170,6 @@ pub fn read(dds: &[u8]) -> Result<Image, Error> {
         };
         (format, false)
     };
-    if width == 0 || height == 0 || width > 16384 || height > 16384 {
-        return Err(bad("invalid size"));
-    }
     let len: usize = (0..levels).map(|i| format.level_size((width >> i).max(1), (height >> i).max(1))).sum();
     let data = dds.get(start..start + len).ok_or_else(|| bad("data is shorter than its mip levels"))?;
     Ok(Image { format, srgb, width, height, levels, data: data.to_vec() })

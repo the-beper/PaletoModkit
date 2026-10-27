@@ -529,6 +529,9 @@ fn main() -> Result<()> {
             }
             let edition = if ytd.enhanced { "Enhanced" } else { "Legacy" };
             println!("{} textures ({edition} format)", ytd.textures.len());
+            if ytd.unsupported > 0 {
+                println!("{} skipped (format not supported)", ytd.unsupported);
+            }
         }
         Command::Xml { path, output, import } => {
             let data = read_any(&path, cli.game.as_deref())?;

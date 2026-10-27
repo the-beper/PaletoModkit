@@ -66,18 +66,29 @@ impl TextureView {
     /// Summary for the preview header.
     pub fn summary(&self) -> String {
         let edition = if self.dict.enhanced { "Enhanced" } else { "Legacy" };
-        match self.dict.textures.len() {
+        let shown = match self.dict.textures.len() {
             1 => format!("1 texture, {edition} format"),
             n => format!("{n} textures, {edition} format"),
+        };
+        match self.dict.unsupported {
+            0 => shown,
+            n => format!("{shown}; {n} skipped (format not supported)"),
         }
     }
 
     /// `editable`: the dictionary is inside an archive, so textures can be changed.
     pub fn ui(&mut self, ui: &mut egui::Ui, busy: bool, editable: bool) -> Option<Request> {
         let mut request = None;
-        let hint = if editable { "Change the textures (in the mods folder copy)" } else { "Only dictionaries inside archives can be changed" };
+        // Textures that cannot be read cannot be written back either.
+        let skipped = self.dict.unsupported > 0;
+        let hint = match (editable, skipped) {
+            (_, true) => "It holds textures in a format not supported, so it cannot be changed",
+            (true, false) => "Change the textures (in the mods folder copy)",
+            (false, false) => "Only dictionaries inside archives can be changed",
+        };
+        let editable = editable && !skipped;
         if self.dict.textures.is_empty() {
-            ui.label("This texture dictionary is empty.");
+            ui.label(if skipped { "This texture dictionary holds only textures in a format not supported." } else { "This texture dictionary is empty." });
             let add = ui.add_enabled(editable && !busy, egui::Button::new("➕ Add texture…"));
             if add.on_disabled_hover_text(hint).clicked() {
                 request = Some(Request::Add);
@@ -239,4 +250,16 @@ fn checkerboard(painter: &egui::Painter, rect: egui::Rect, dark: bool) {
 pub fn write(tex: &Texture, png: bool, path: &Path) -> Result<(), String> {
     let data = if png { tex.to_png().map_err(|e| e.to_string())? } else { tex.to_dds() };
     std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_counts_unsupported_textures() {
+        let view = |unsupported| TextureView::new(TextureDictionary { enhanced: false, textures: Vec::new(), unsupported });
+        assert_eq!(view(0).summary(), "0 textures, Legacy format");
+        assert_eq!(view(2).summary(), "0 textures, Legacy format; 2 skipped (format not supported)");
+    }
 }

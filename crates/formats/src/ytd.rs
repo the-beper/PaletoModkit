@@ -234,6 +234,8 @@ pub struct TextureDictionary {
     /// Enhanced edition layout.
     pub enhanced: bool,
     pub textures: Vec<Texture>,
+    /// Textures left out because their format is not supported.
+    pub unsupported: usize,
 }
 
 impl TextureDictionary {
@@ -254,15 +256,17 @@ impl TextureDictionary {
         let (list, count) = (u64_at(root, 0x30), u16_at(root, 0x38) as usize);
         // Placeholder dictionaries have no texture list at all.
         let pointers = if count == 0 { &[][..] } else { res.block(list, count * 8)? };
-        let textures = pointers
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|p| u64::from_le_bytes(*p))
-            .filter(|&ptr| ptr != 0)
-            .map(|ptr| if enhanced { read_enhanced(res, ptr) } else { read_legacy(res, ptr) })
-            .collect::<Result<_, _>>()?;
-        Ok(TextureDictionary { enhanced, textures })
+        let (mut textures, mut unsupported) = (Vec::new(), 0);
+        for ptr in pointers.as_chunks::<8>().0.iter().map(|p| u64::from_le_bytes(*p)).filter(|&ptr| ptr != 0) {
+            // One texture in a format we cannot read does not hide the others
+            // (`Unsupported` comes only from the format lookup of the readers).
+            match if enhanced { read_enhanced(res, ptr) } else { read_legacy(res, ptr) } {
+                Ok(texture) => textures.push(texture),
+                Err(Error::Unsupported(_)) => unsupported += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(TextureDictionary { enhanced, textures, unsupported })
     }
 }
 
@@ -311,7 +315,8 @@ struct Header {
 impl Header {
     fn load(self, res: &Resource, format: Format, srgb: bool) -> Result<Texture, Error> {
         let name = if self.name == 0 { String::new() } else { res.string(self.name)? };
-        let sizes: Vec<usize> = (0..self.levels.max(1))
+        // From a byte: past 16 halvings a 16-bit size is 1x1 anyway.
+        let sizes: Vec<usize> = (0..self.levels.clamp(1, 16))
             .map(|i| format.level_size((self.width >> i).max(1), (self.height >> i).max(1)))
             .collect();
         let wanted = self.data_len.unwrap_or(0).max(sizes.iter().sum());

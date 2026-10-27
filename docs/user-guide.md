@@ -91,7 +91,7 @@ Text tables (`.gxt2`) open as `0xHASH = text` lines, one per string, and are con
 
 ## Textures
 
-Selecting a texture dictionary (`.ytd`) shows its textures, with their format, size and mipmaps. **Alpha** shows their transparency over a checkerboard.
+Selecting a texture dictionary (`.ytd`) shows its textures, with their format, size and mipmaps. Textures in a format Paleto Modkit cannot read are left out, and the header says how many; such a dictionary cannot be changed. **Alpha** shows their transparency over a checkerboard.
 
 ![Texture dictionary viewer](../screenshots/texture-viewer.png)
 

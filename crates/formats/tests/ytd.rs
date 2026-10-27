@@ -11,6 +11,11 @@ const GFX: u64 = 0x6000_0000;
 
 /// One 8x4 A8R8G8B8 texture with two mip levels, named "probe".
 fn build(enhanced: bool) -> Vec<u8> {
+    build_with(enhanced, |_| {})
+}
+
+/// [`build`], with `patch` applied to the system pages (the texture header is at 0x50).
+fn build_with(enhanced: bool, patch: impl Fn(&mut [u8])) -> Vec<u8> {
     let mut system = vec![0u8; 0x200];
     let mut put = |at: usize, bytes: &[u8]| system[at..at + bytes.len()].copy_from_slice(bytes);
     // Dictionary: texture list at 0x40 with one entry.
@@ -36,6 +41,7 @@ fn build(enhanced: bool) -> Vec<u8> {
         put(tex + 0x70, &GFX.to_le_bytes());
     }
     put(0x180, b"probe\0");
+    patch(&mut system);
 
     // Mip 0: pixel i is (B, G, R, A) = (i, 2i, 3i, 255); mip 1: all grey.
     let mut graphics = vec![0u8; 0x200];
@@ -239,4 +245,35 @@ fn export_names_stay_in_their_folder() {
     assert_eq!(tex("../../evil").file_name(true), ".._.._evil.png");
     assert_eq!(tex("a\\b").file_name(false), "a_b.dds");
     assert_eq!(tex("").file_name(false), "texture.dds");
+}
+
+/// Damaged files give an error or what can be read, never a panic or a hang.
+#[test]
+fn damaged_textures() {
+    // A format we cannot read: left out, the rest of the dictionary still reads.
+    // Changing it is refused, never done without that texture.
+    for (enhanced, at, code) in [(false, 0x50 + 0x58, &0xDEADu32.to_le_bytes()[..]), (true, 0x50 + 0x1F, &[0xFF][..])] {
+        let file = build_with(enhanced, |s| s[at..at + code.len()].copy_from_slice(code));
+        let ytd = TextureDictionary::parse(&file).unwrap();
+        assert_eq!((ytd.textures.len(), ytd.unsupported), (0, 1));
+        assert!(paleto_formats::edit_textures(&file, &[paleto_formats::Edit::Remove("probe")]).is_err());
+    }
+    // 255 mip levels said for an 8x4 texture.
+    for enhanced in [false, true] {
+        let at = if enhanced { 0x50 + 0x22 } else { 0x50 + 0x5D };
+        let ytd = TextureDictionary::parse(&build_with(enhanced, |s| s[at] = 255)).unwrap();
+        assert!(ytd.textures[0].levels <= 16);
+    }
+
+    // DDS: a 24-bit image of a million pixels a side, and four billion mip levels.
+    let mut rgb = vec![0u8; 128];
+    let mut put = |at: usize, v: u32| rgb[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    for (at, v) in [(0, u32::from_le_bytes(*b"DDS ")), (4, 124), (8, 0x1007), (12, 1 << 20), (16, 1 << 20), (88, 24), (92, 0xFF_0000), (96, 0xFF00), (100, 0xFF)] {
+        put(at, v);
+    }
+    rgb.resize(128 + 3 * 16, 0);
+    assert!(paleto_formats::read_dds(&rgb).is_err());
+    let mut dds = bc1_dds();
+    dds[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(paleto_formats::read_dds(&dds).is_err());
 }

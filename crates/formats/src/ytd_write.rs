@@ -88,7 +88,7 @@ pub fn edit_textures(ytd: &[u8], edits: &[Edit]) -> Result<Vec<u8>, Error> {
         };
         name.push(0);
         let (format, width, height, levels, data_ptr) = fields(&header, enhanced)?;
-        let len: usize = (0..levels.max(1)).map(|i| format.level_size((width >> i).max(1), (height >> i).max(1))).sum();
+        let len: usize = (0..levels.clamp(1, 16)).map(|i| format.level_size((width >> i).max(1), (height >> i).max(1))).sum();
         let data = res.bytes(data_ptr, len)?.to_vec();
         textures.push(Tex { header, name, hash, data });
     }
@@ -246,7 +246,8 @@ fn fields(h: &[u8], enhanced: bool) -> Result<(Format, u32, u32, u32, u64), Erro
 
 /// Writes a new image's size and format into a texture header.
 fn set_image(h: &mut [u8], image: &dds::Image, enhanced: bool) -> Result<(), Error> {
-    let (w, h16) = ((image.width as u16).to_le_bytes(), (image.height as u16).to_le_bytes());
+    let size = |n: u32| u16::try_from(n).map(u16::to_le_bytes).map_err(|_| Error::Edit(format!("{}x{} is too large for a texture", image.width, image.height)));
+    let (w, h16) = (size(image.width)?, size(image.height)?);
     let levels = image.levels.min(255) as u8;
     if enhanced {
         let code = image.format.enhanced_code(image.srgb);
