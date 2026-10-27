@@ -44,7 +44,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The tests need no game files: they build small archives, packages and game folders of their own. The GUI tests drive the real app headless with `egui_kittest`, without a display or a compositor. CI runs both, and validates the desktop entry, the AppStream metadata and the MIME types.
+The tests need no game files: they build small archives, packages and game folders of their own. The GUI tests drive the real app headless with `egui_kittest`, without a display or a compositor. Disk and archive reads run on worker threads (`Task::spawn_cancellable` in `crates/gui/src/task.rs`), so a test calls `settle` (step until `App::idle`) after opening or previewing something, never a fixed number of frames; `App::delay_loads` slows the reads down to test what shows meanwhile. CI runs both, and validates the desktop entry, the AppStream metadata and the MIME types.
 
 The tests must not depend on your computer either: on yours the app finds your installed game and cached keys, on CI there are none. Run them as CI does, with an empty home folder:
 

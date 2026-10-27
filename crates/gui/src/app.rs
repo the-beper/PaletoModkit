@@ -75,6 +75,10 @@ pub struct App {
     legacy_files: usize,
     /// The search for copies of game files left unchanged in the mods folder.
     copies_task: Option<Task<Vec<paleto_core::cleanup::Copy>>>,
+    /// The preview being read; the one shown stays until it is ready.
+    preview_task: Option<Task<Loaded>>,
+    /// The texture or sound to select in the next preview loaded.
+    preview_select: Option<String>,
     /// Expand all: the folders found, `None` once cancelled.
     expand_task: Option<Task<Option<Vec<PathBuf>>>>,
     /// Tests make background loads this slow, to see them while they run.
@@ -243,6 +247,40 @@ struct Preview {
     hex: Option<HexView>,
     /// The search bar of a text preview, while it is open.
     find: Option<Find>,
+}
+
+/// What loading a preview needs, taken from the app when it is asked for:
+/// the load runs on another thread.
+struct PreviewRequest {
+    name: String,
+    location: Location,
+    /// The names in the folder, where a model's textures are looked for.
+    rows: Vec<String>,
+    keys: Option<Arc<Keys>>,
+    shared: Arc<SharedTextures>,
+    /// The texture or sound to select once loaded (a reload after an edit).
+    select: Option<String>,
+    delay: std::time::Duration,
+}
+
+/// A preview read and parsed; its views are made on the UI thread.
+struct Loaded {
+    source: PreviewSource,
+    name: String,
+    info: String,
+    content: Content,
+    error: Option<String>,
+    select: Option<String>,
+}
+
+enum Content {
+    Text { text: String, codec: Codec, syntax: Syntax },
+    Textures(TextureDictionary),
+    Model(Vec<paleto_formats::drawable::Drawable>),
+    Audio(Vec<paleto_formats::awc::Sound>),
+    /// The bytes, and the whole size when only the start was read.
+    Hex(Vec<u8>, Option<u64>),
+    Nothing,
 }
 
 /// The search of a text preview.
@@ -540,6 +578,8 @@ impl App {
             legacy_files: 0,
             copies_task: None,
             expand_task: None,
+            preview_task: None,
+            preview_select: None,
             load_delay: std::time::Duration::ZERO,
             shared: Arc::default(),
             settings: Settings::default(),
@@ -630,6 +670,7 @@ impl App {
             && self.copies_task.is_none()
             && self.export_task.is_none()
             && self.expand_task.is_none()
+            && self.preview_task.is_none()
             && !self.startup.running()
             && !self.mods_check.as_ref().is_some_and(ModsCheck::checking)
             && !self.crash.as_ref().is_some_and(CrashWindow::loading)
@@ -1014,7 +1055,7 @@ impl App {
     fn select_game(&mut self, game: Game, ctx: &egui::Context) {
         self.tree.clear();
         self.browser = None;
-        self.preview = None;
+        self.clear_preview();
         self.back.clear();
         self.forward.clear();
         self.keys = None;
@@ -1128,6 +1169,10 @@ impl App {
             PreviewSource::Archive(a) => a.parent().map(|d| self.original_of(&Location::Archive(d))) == here,
             PreviewSource::Disk(d) => d.parent().map(|d| Location::Folder(d.to_path_buf())) == here,
         });
+        // A file of another folder (or the other copy of this one) still loading is not wanted any more.
+        if self.browser.as_ref().is_some_and(|b| b.location != location) {
+            self.preview_task = None;
+        }
         match (same, &mut self.preview, &location) {
             (Some(false), _, _) => self.preview = None,
             (Some(true), Some(p), Location::Archive(a)) => p.source = PreviewSource::Archive(a.join(&p.name)),
@@ -1253,53 +1298,61 @@ impl App {
             return;
         }
         self.followed = file.clone();
-        if let (Some(name), Some(p)) = (file, &self.preview)
-            && p.name != name
-        {
-            actions.push(Action::Preview(name));
+        if let (Some(name), Some(p)) = (file, &self.preview) {
+            if p.name != name {
+                actions.push(Action::Preview(name));
+            } else {
+                // Back on the file shown: another one still loading must not replace it.
+                self.preview_task = None;
+            }
         }
     }
 
-    /// Texture dictionaries next to a model, named after it (`name.ytd`, and
-    /// `name+hi.ytd` as vehicles have).
-    /// The texture dictionaries a model draws from: those of its name next to
-    /// it, then the ones its dictionary inherits from (up to vehshare.ytd).
-    /// Tuning parts (in "<vehicle>_mods.rpf") use their vehicle's.
-    fn sibling_textures(&self, model: &str) -> Vec<TextureDictionary> {
-        let Some(b) = &self.browser else { return Vec::new() };
-        let stem = model.rsplit_once('.').map_or(model, |(s, _)| s).to_ascii_lowercase();
-        let read_here = |name: &str| match &b.location {
-            Location::Folder(dir) => std::fs::read(dir.join(name)).ok(),
-            Location::Archive(a) => a.join(name).read(self.keys.as_deref()).ok(),
-        };
-        let here = |name: &str| b.rows.iter().find(|r| r.name.eq_ignore_ascii_case(&format!("{name}.ytd"))).map(|r| r.name.clone());
-        let mut names = vec![stem.clone(), format!("{stem}+hi")];
-        if let Location::Archive(a) = &b.location {
-            let archive = a.inner.iter().rev().chain(a.disk.file_name().map(|n| n.to_str().unwrap_or_default().to_string()).iter()).find(|p| p.to_ascii_lowercase().ends_with("_mods.rpf")).cloned();
-            if let Some(vehicle) = archive.map(|n| n.to_ascii_lowercase().trim_end_matches("_mods.rpf").to_string()) {
-                names.extend([vehicle.clone(), format!("{vehicle}+hi")]);
-            }
+    /// Closes the preview, and drops a load that would open one.
+    fn clear_preview(&mut self) {
+        self.preview = None;
+        self.preview_task = None;
+    }
+
+    /// Makes the views of a preview read in the background, and shows it.
+    fn show_loaded(&mut self, loaded: Loaded) {
+        let Loaded { source, name, mut info, content, error, select } = loaded;
+        if let Some(e) = error {
+            self.status = Status::Error(e);
         }
-        // The model's own dictionaries come from next to it; shared ones from
-        // where the game loads them last (a DLC may patch them), else next to it.
-        let own = names.len();
-        for name in names.clone() {
-            for parent in self.shared.parents_of(&name) {
-                if !names.contains(&parent) {
-                    names.push(parent);
+        let (mut text, mut textures, mut model, mut audio, mut hex) = (None, None, None, None, None);
+        let (mut codec, mut syntax) = (Codec::Plain, Syntax::for_file(&name));
+        match content {
+            Content::Text { text: t, codec: c, syntax: s } => (text, codec, syntax) = (Some((t.clone(), t)), c, s),
+            Content::Textures(dict) => {
+                let mut view = TextureView::new(dict);
+                add_info(&mut info, view.summary());
+                if let Some(i) = select.as_ref().and_then(|s| view.dict.textures.iter().position(|t| t.name.eq_ignore_ascii_case(s))) {
+                    view.select(i);
                 }
+                textures = Some(view);
             }
+            Content::Model(drawables) => {
+                let view = ModelView::new(drawables);
+                add_info(&mut info, view.summary());
+                model = Some(view);
+            }
+            Content::Audio(sounds) => {
+                let mut view = AudioView::new(sounds);
+                add_info(&mut info, view.summary());
+                if let Some(id) = select.as_ref().and_then(|s| u32::from_str_radix(s, 16).ok()) {
+                    view.select_id(id);
+                }
+                audio = Some(view);
+            }
+            Content::Hex(data, total) => {
+                let view = HexView::new(data, total);
+                add_info(&mut info, view.summary());
+                hex = Some(view);
+            }
+            Content::Nothing => {}
         }
-        let shared = |name: &str| self.shared.place(name).and_then(|p| p.read(self.keys.as_deref()).ok());
-        let local = |name: &str| here(name).and_then(|file| read_here(&file));
-        names
-            .iter()
-            .enumerate()
-            .filter_map(|(i, name)| {
-                let data = if i < own { local(name).or_else(|| shared(name)) } else { shared(name).or_else(|| local(name)) };
-                TextureDictionary::parse(&data?).ok()
-            })
-            .collect()
+        self.preview = Some(Preview { source, name, syntax, info, text, codec, textures, model, audio, hex, find: None });
     }
 
     fn preview_dirty(&self) -> bool {
@@ -1483,96 +1536,19 @@ impl App {
                     return;
                 }
                 let Some(b) = &self.browser else { return };
-                // Only what the file list does not say: its type and size are there.
-                let mut info = String::new();
-                // The size of a large file on disk of which only the start is read, for the hex view.
-                let mut partial = None;
-                let (source, data) = match &b.location {
-                    Location::Folder(dir) => {
-                        let path = dir.join(&name);
-                        let data = match std::fs::metadata(&path) {
-                            Ok(m) if m.len() as usize <= MAX_TEXT || binary_preview(&name) => std::fs::read(&path).map_err(|e| e.to_string()),
-                            Ok(m) => {
-                                partial = Some(m.len());
-                                read_start(&path, hex_view::MAX_HEX).map_err(|e| e.to_string())
-                            }
-                            Err(_) => Ok(Vec::new()),
-                        };
-                        add_info(&mut info, "read-only");
-                        (PreviewSource::Disk(path), data)
-                    }
-                    Location::Archive(a) => {
-                        let path = a.join(&name);
-                        let data = path.read(self.keys.as_deref()).map_err(|e| e.to_string());
-                        (PreviewSource::Archive(path), data)
-                    }
+                let request = PreviewRequest {
+                    location: b.location.clone(),
+                    rows: b.rows.iter().map(|r| r.name.clone()).collect(),
+                    keys: self.keys.clone(),
+                    shared: self.shared.clone(),
+                    select: self.preview_select.take(),
+                    delay: self.load_delay,
+                    name,
                 };
-                let (mut text, mut textures, mut model, mut audio, mut hex) = (None, None, None, None, None);
-                let mut codec = Codec::Plain;
-                let mut syntax = Syntax::for_file(&name);
-                let ext = extension(&name).to_ascii_lowercase();
-                let fail = |e: paleto_formats::Error| Status::Error(format!("{name}: {e}"));
-                match data {
-                    // Only its start was read: nothing but the hex view can show that.
-                    Ok(data) if partial.is_some() => hex = Some(HexView::new(data, partial)),
-                    Ok(data) if is_ytd(&name) => match TextureDictionary::parse(&data) {
-                        Ok(dict) => {
-                            let view = TextureView::new(dict);
-                            add_info(&mut info, view.summary());
-                            textures = Some(view);
-                        }
-                        Err(e) => self.status = fail(e),
-                    },
-                    Ok(data) if matches!(ext.as_str(), "ydr" | "yft" | "ydd") => match paleto_formats::drawable::parse(&data, &ext, &self.sibling_textures(&name)) {
-                        Ok(drawables) => {
-                            let view = ModelView::new(drawables);
-                            add_info(&mut info, view.summary());
-                            model = Some(view);
-                        }
-                        Err(e) => self.status = fail(e),
-                    },
-                    Ok(data) if ext == "awc" => {
-                        let key = self.keys.as_ref().and_then(|k| k.awc);
-                        match paleto_formats::awc::parse(&data, key.as_ref()) {
-                            Ok(sounds) => {
-                                let view = AudioView::new(sounds);
-                                add_info(&mut info, view.summary());
-                                audio = Some(view);
-                            }
-                            Err(e) => self.status = fail(e),
-                        }
-                    }
-                    Ok(data) if ext == "gxt2" => match paleto_formats::gxt2::parse(&data) {
-                        Ok(entries) => {
-                            let t = paleto_formats::gxt2::to_text(&entries);
-                            add_info(&mut info, format!("{} texts, shown as 0xHASH = text", entries.len()));
-                            text = Some((t.clone(), t));
-                            codec = Codec::Gxt2;
-                        }
-                        Err(e) => self.status = fail(e),
-                    },
-                    Ok(data) if MetaFile::is_meta(&data) => match MetaFile::parse(&data) {
-                        Ok(meta) => {
-                            let t = meta.to_xml();
-                            add_info(&mut info, format!("{}, shown as XML", meta.kind()));
-                            text = Some((t.clone(), t));
-                            codec = Codec::Meta(Arc::new(meta));
-                            syntax = Syntax::Xml;
-                        }
-                        Err(e) => self.status = fail(e),
-                    },
-                    Ok(data) => match as_text(&data) {
-                        Some(t) => text = Some((t.clone(), t)),
-                        None => hex = Some(HexView::new(data, None)),
-                    },
-                    Err(e) => self.status = Status::Error(e),
-                }
-                if let Some(view) = &hex {
-                    add_info(&mut info, view.summary());
-                }
-                self.preview = Some(Preview { source, name, syntax, info, text, codec, textures, model, audio, hex, find: None });
+                // Replacing a load drops it: its result never comes.
+                self.preview_task = Some(Task::spawn(format!("Loading {}", request.name), ctx, move || load_preview(request)));
             }
-            Action::ClosePreview => self.preview = None,
+            Action::ClosePreview => self.clear_preview(),
             Action::PickTexture(replace) => {
                 let title = replace.as_ref().map_or("Add texture".to_string(), |name| format!("Replace {name}"));
                 let dialog = rfd::FileDialog::new().set_title(title).add_filter("DDS or PNG", &["dds", "png"]);
@@ -1861,7 +1837,7 @@ impl App {
             }
             Action::DeleteCopies(copies) => {
                 let Some(game) = self.game.clone() else { return };
-                self.preview = None;
+                self.clear_preview();
                 self.task = Some(Task::spawn("Deleting unchanged copies", ctx, move || match paleto_core::cleanup::delete(&game, &copies) {
                     Ok(n) => Outcome::Done { message: format!("deleted {n} copies of game files from the mods folder"), reload: None },
                     Err(e) => Outcome::Failed(e.to_string()),
@@ -1906,7 +1882,7 @@ impl App {
                     return;
                 }
                 if self.preview.as_ref().is_some_and(|p| p.name == from) {
-                    self.preview = None;
+                    self.clear_preview();
                 }
                 if let Some(dir) = self.disk_folder() {
                     self.select_after = Some(to.clone());
@@ -1951,7 +1927,7 @@ impl App {
                     return;
                 }
                 if self.preview.as_ref().is_some_and(|p| names.contains(&p.name)) {
-                    self.preview = None;
+                    self.clear_preview();
                 }
                 if let Some(dir) = self.disk_folder() {
                     self.task = Some(Task::spawn("Deleting", ctx, move || {
@@ -2017,7 +1993,7 @@ impl App {
             Action::ToggleMod(part, enabled) => {
                 let Some(game) = self.game.clone() else { return };
                 // Files are about to move: an open preview may point at one.
-                self.preview = None;
+                self.clear_preview();
                 self.task = Some(Task::spawn(if enabled { "Turning a mod on" } else { "Turning a mod off" }, ctx, move || {
                     match paleto_core::crash_hunt::set_enabled(&game, &part, enabled) {
                         Ok(()) => Outcome::Done { message: format!("{part} turned {}", if enabled { "on" } else { "off" }), reload: None },
@@ -2104,7 +2080,7 @@ impl App {
                 let Some(game) = self.game.clone() else { return };
                 let keys = self.keys.clone();
                 // Files are about to move: an open preview may point at one.
-                self.preview = None;
+                self.clear_preview();
                 let label = match action {
                     Action::HuntStart | Action::HuntInside(_) => "Comparing the mods folder with the game's files",
                     Action::HuntStop => "Turning everything back on",
@@ -2143,7 +2119,7 @@ impl App {
             }
             Action::RestoreSnapshot(id, save_first) => {
                 let Some(game) = self.game.clone() else { return };
-                self.preview = None;
+                self.clear_preview();
                 self.task = Some(Task::spawn("Restoring a snapshot", ctx, move || {
                     let run = || -> Result<(), paleto_core::Error> {
                         if save_first {
@@ -2357,6 +2333,13 @@ impl App {
                 }
             }
         }
+        if let Some(loaded) = self.preview_task.as_ref().and_then(Task::poll) {
+            self.preview_task = None;
+            // Edits made to the shown text while the other file loaded win: nobody asked about them.
+            if !self.preview_dirty() {
+                self.show_loaded(loaded);
+            }
+        }
         if let Some(found) = self.expand_task.as_ref().and_then(Task::poll) {
             self.expand_task = None;
             self.open_dirs.extend(found.into_iter().flatten());
@@ -2440,21 +2423,10 @@ impl App {
                         b.scroll_to = Some(pos);
                     }
                     if let (Some(selected), Some(name)) = (self.refresh_preview.take(), self.previewing().map(str::to_string)) {
-                        let status = std::mem::replace(&mut self.status, Status::Info(String::new()));
+                        self.preview_select = Some(selected);
                         self.apply(Action::Preview(name), ctx);
-                        if let Some(view) = self.preview.as_mut().and_then(|p| p.textures.as_mut())
-                            && let Some(i) = view.dict.textures.iter().position(|t| t.name.eq_ignore_ascii_case(&selected))
-                        {
-                            view.select(i);
-                        }
-                        if let Some(view) = self.preview.as_mut().and_then(|p| p.audio.as_mut())
-                            && let Ok(id) = u32::from_str_radix(&selected, 16)
-                        {
-                            view.select_id(id);
-                        }
-                        if matches!(self.status, Status::Info(_) | Status::Note(..)) {
-                            self.status = status;
-                        }
+                        // Not left for another file when the reload did not start.
+                        self.preview_select = None;
                     }
                 }
                 Outcome::Installed(result) => {
@@ -4169,9 +4141,20 @@ impl eframe::App for App {
                     self.side_tree(ui, &mut actions);
                 });
             }
-            if self.preview.is_some() {
+            // A load shows in the panel once it takes long enough to notice.
+            let loading = self.preview_task.as_ref().filter(|t| t.elapsed() >= LOADING_SHOWN).map(|t| t.label.clone());
+            if self.preview_task.as_ref().is_some_and(|t| t.elapsed() < LOADING_SHOWN) {
+                ctx.request_repaint_after(LOADING_SHOWN);
+            }
+            if self.preview.is_some() || loading.is_some() {
                 let preview_max = (ui.available_width() - LIST_MIN).max(240.0);
                 egui::Panel::right("preview").resizable(true).default_size(460.0).size_range(240.0..=preview_max).show(ui, |ui| {
+                    if let Some(label) = &loading {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add(egui::Label::new(RichText::new(format!("{label}…")).weak()).truncate());
+                        });
+                    }
                     self.preview_ui(ui, &mut actions);
                 });
             }
@@ -4319,6 +4302,116 @@ fn add_info(info: &mut String, part: impl std::fmt::Display) {
         info.push_str(" · ");
     }
     info.push_str(&part.to_string());
+}
+
+/// How long a preview load runs before the panel shows that it is loading.
+const LOADING_SHOWN: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Reads and parses a file for its preview (on a worker thread).
+fn load_preview(req: PreviewRequest) -> Loaded {
+    std::thread::sleep(req.delay);
+    let name = &req.name;
+    // Only what the file list does not say: its type and size are there.
+    let mut info = String::new();
+    // The size of a large file on disk of which only the start is read, for the hex view.
+    let mut partial = None;
+    let (source, data) = match &req.location {
+        Location::Folder(dir) => {
+            let path = dir.join(name);
+            let data = match std::fs::metadata(&path) {
+                Ok(m) if m.len() as usize <= MAX_TEXT || binary_preview(name) => std::fs::read(&path).map_err(|e| e.to_string()),
+                Ok(m) => {
+                    partial = Some(m.len());
+                    read_start(&path, hex_view::MAX_HEX).map_err(|e| e.to_string())
+                }
+                Err(_) => Ok(Vec::new()),
+            };
+            add_info(&mut info, "read-only");
+            (PreviewSource::Disk(path), data)
+        }
+        Location::Archive(a) => {
+            let path = a.join(name);
+            let data = path.read(req.keys.as_deref()).map_err(|e| e.to_string());
+            (PreviewSource::Archive(path), data)
+        }
+    };
+    let ext = extension(name).to_ascii_lowercase();
+    let fail = |e: paleto_formats::Error| (Content::Nothing, Some(format!("{name}: {e}")));
+    let text = |text: String, codec: Codec, syntax: Syntax| Content::Text { text, codec, syntax };
+    let (content, error) = match data {
+        // Only its start was read: nothing but the hex view can show that.
+        Ok(data) if partial.is_some() => (Content::Hex(data, partial), None),
+        Ok(data) if is_ytd(name) => TextureDictionary::parse(&data).map_or_else(fail, |dict| (Content::Textures(dict), None)),
+        Ok(data) if matches!(ext.as_str(), "ydr" | "yft" | "ydd") => {
+            paleto_formats::drawable::parse(&data, &ext, &sibling_textures(&req)).map_or_else(fail, |drawables| (Content::Model(drawables), None))
+        }
+        Ok(data) if ext == "awc" => {
+            let key = req.keys.as_ref().and_then(|k| k.awc);
+            paleto_formats::awc::parse(&data, key.as_ref()).map_or_else(fail, |sounds| (Content::Audio(sounds), None))
+        }
+        Ok(data) if ext == "gxt2" => match paleto_formats::gxt2::parse(&data) {
+            Ok(entries) => {
+                add_info(&mut info, format!("{} texts, shown as 0xHASH = text", entries.len()));
+                (text(paleto_formats::gxt2::to_text(&entries), Codec::Gxt2, Syntax::for_file(name)), None)
+            }
+            Err(e) => fail(e),
+        },
+        Ok(data) if MetaFile::is_meta(&data) => match MetaFile::parse(&data) {
+            Ok(meta) => {
+                add_info(&mut info, format!("{}, shown as XML", meta.kind()));
+                (text(meta.to_xml(), Codec::Meta(Arc::new(meta)), Syntax::Xml), None)
+            }
+            Err(e) => fail(e),
+        },
+        Ok(data) => match as_text(&data) {
+            Some(t) => (text(t, Codec::Plain, Syntax::for_file(name)), None),
+            None => (Content::Hex(data, None), None),
+        },
+        Err(e) => (Content::Nothing, Some(e)),
+    };
+    Loaded { source, name: req.name.clone(), info, content, error, select: req.select.clone() }
+}
+
+/// Texture dictionaries next to a model, named after it (`name.ytd`, and
+/// `name+hi.ytd` as vehicles have).
+/// The texture dictionaries a model draws from: those of its name next to
+/// it, then the ones its dictionary inherits from (up to vehshare.ytd).
+/// Tuning parts (in "<vehicle>_mods.rpf") use their vehicle's.
+fn sibling_textures(req: &PreviewRequest) -> Vec<TextureDictionary> {
+    let model = req.name.as_str();
+    let stem = model.rsplit_once('.').map_or(model, |(s, _)| s).to_ascii_lowercase();
+    let read_here = |name: &str| match &req.location {
+        Location::Folder(dir) => std::fs::read(dir.join(name)).ok(),
+        Location::Archive(a) => a.join(name).read(req.keys.as_deref()).ok(),
+    };
+    let here = |name: &str| req.rows.iter().find(|r| r.eq_ignore_ascii_case(&format!("{name}.ytd"))).cloned();
+    let mut names = vec![stem.clone(), format!("{stem}+hi")];
+    if let Location::Archive(a) = &req.location {
+        let archive = a.inner.iter().rev().chain(a.disk.file_name().map(|n| n.to_str().unwrap_or_default().to_string()).iter()).find(|p| p.to_ascii_lowercase().ends_with("_mods.rpf")).cloned();
+        if let Some(vehicle) = archive.map(|n| n.to_ascii_lowercase().trim_end_matches("_mods.rpf").to_string()) {
+            names.extend([vehicle.clone(), format!("{vehicle}+hi")]);
+        }
+    }
+    // The model's own dictionaries come from next to it; shared ones from
+    // where the game loads them last (a DLC may patch them), else next to it.
+    let own = names.len();
+    for name in names.clone() {
+        for parent in req.shared.parents_of(&name) {
+            if !names.contains(&parent) {
+                names.push(parent);
+            }
+        }
+    }
+    let shared = |name: &str| req.shared.place(name).and_then(|p| p.read(req.keys.as_deref()).ok());
+    let local = |name: &str| here(name).and_then(|file| read_here(&file));
+    names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| {
+            let data = if i < own { local(name).or_else(|| shared(name)) } else { shared(name).or_else(|| local(name)) };
+            TextureDictionary::parse(&data?).ok()
+        })
+        .collect()
 }
 
 /// Every folder under `root`; `None` once cancelled. `delay` slows each folder down, for tests.

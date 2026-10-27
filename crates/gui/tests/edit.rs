@@ -124,7 +124,7 @@ fn format_xml() {
     let ctx = harness.ctx.clone();
     harness.state_mut().open(ArchivePath::new(archive.clone()));
     harness.state_mut().preview("dlclist.xml", &ctx);
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.state_mut().format_preview(&ctx);
     // Only whitespace changes, line endings included, and only once saved.
     let tidy = "<Paths>\r\n\t<Item>a</Item>\n\t<Item>b</Item>\r\n\t<Item>c</Item>\r\n</Paths>\r\n";
@@ -225,7 +225,7 @@ fn previewed_archive(dir: &std::path::Path) -> (Harness<'static, App>, std::path
     settle(&mut harness);
     harness.state_mut().open(ArchivePath::new(archive.clone()));
     harness.state_mut().preview("handling.meta", &ctx);
-    harness.run_steps(2);
+    settle(&mut harness);
     assert_eq!(harness.state().preview_text(), Some("<handling/>"));
     (harness, archive)
 }
@@ -375,7 +375,7 @@ fn previewing_the_edited_file_again_keeps_the_edits() {
     let ctx = harness.ctx.clone();
     harness.state_mut().edit_preview("<edited/>");
     harness.state_mut().preview("handling.meta", &ctx);
-    harness.run_steps(2);
+    settle(&mut harness);
     assert_eq!(harness.state().preview_text(), Some("<edited/>"));
     assert!(unsaved(&mut harness));
 }

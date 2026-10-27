@@ -144,7 +144,7 @@ fn unsaved_changes() {
     settle(&mut harness);
     harness.state_mut().go(Location::Archive(data.clone()));
     harness.state_mut().preview("handling.meta", &ctx);
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.state_mut().edit_preview("<changed/>");
     harness.run_steps(2);
 
@@ -170,7 +170,7 @@ fn unsaved_changes() {
     // Discard drops the edit and carries on.
     harness.state_mut().go(Location::Archive(data));
     harness.state_mut().preview("handling.meta", &ctx);
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.state_mut().edit_preview("<lost/>");
     harness.run_steps(2);
     harness.get_all_by_label("x64").next().unwrap().click();
@@ -350,25 +350,25 @@ fn preview_follows_selection() {
     settle(&mut harness);
     harness.state_mut().go(Location::Archive(data));
     harness.state_mut().preview("handling.meta", &ctx);
-    harness.run_steps(3);
+    settle(&mut harness);
 
     // Clicking another file, or moving with the arrows, previews it.
     harness.get_by_label("dlclist.xml").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(harness.state().previewing(), Some("dlclist.xml"));
     harness.key_press(egui::Key::ArrowDown);
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(harness.state().previewing(), Some("handling.meta"));
 
     // A file of no known type is shown as hex.
     harness.get_by_label("zz_blob.bin").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(harness.state().previewing(), Some("zz_blob.bin"));
     harness.get_by_label_contains("00000000  00 01 02 00 FF");
 
     // With unsaved edits it asks once; declining keeps the preview.
     harness.get_by_label("handling.meta").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.state_mut().edit_preview("<edited/>");
     harness.run_steps(2);
     harness.get_by_label("dlclist.xml").click();
@@ -510,6 +510,65 @@ fn show_original_of_one_archive() {
 }
 
 #[test]
+fn previews_load_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    fake_game(&root);
+    let mut ed = ArchiveEditor::open(&root.join("update/update.rpf"), None).unwrap();
+    ed.add_file("common/data/notes.txt", b"notes".to_vec()).unwrap();
+    ed.save(&root.join("update/update.rpf")).unwrap();
+    let data = paleto_core::ArchivePath::new(root.join("update/update.rpf")).join("common").join("data");
+    let mut harness = Harness::builder().with_size([1200.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.state_mut().go(Location::Archive(data.clone()));
+    settle(&mut harness);
+    harness.state_mut().delay_loads(Duration::from_millis(400));
+
+    // A slow load says so in the panel, then shows the file.
+    harness.state_mut().preview("notes.txt", &ctx);
+    std::thread::sleep(Duration::from_millis(200));
+    harness.run_steps(2);
+    harness.get_by_label("Loading notes.txt…");
+    assert_eq!(harness.state().previewing(), None);
+    settle(&mut harness);
+    assert_eq!(harness.state().preview_text(), Some("notes"));
+    assert!(harness.query_by_label("Loading notes.txt…").is_none());
+
+    // A newer request wins: the older one never shows.
+    harness.state_mut().preview("handling.meta", &ctx);
+    harness.run_steps(1);
+    harness.state_mut().preview("notes.txt", &ctx);
+    settle(&mut harness);
+    assert_eq!(harness.state().previewing(), Some("notes.txt"));
+
+    // Selecting another file, then the one shown again: the other never replaces it.
+    harness.get_by_label("handling.meta").click();
+    harness.run_steps(2);
+    // The row in the list, not the preview's title.
+    harness.get_all_by_label("notes.txt").min_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap().click();
+    settle(&mut harness);
+    assert_eq!(harness.state().previewing(), Some("notes.txt"));
+
+    // Edits made to the shown text while another file loads are kept.
+    harness.state_mut().preview("handling.meta", &ctx);
+    harness.run_steps(1);
+    harness.state_mut().edit_preview("edited");
+    settle(&mut harness);
+    assert_eq!(harness.state().preview_text(), Some("edited"));
+    harness.state_mut().edit_preview("notes");
+
+    // Leaving the folder drops a load still running there.
+    harness.state_mut().close_preview(&ctx);
+    harness.state_mut().preview("handling.meta", &ctx);
+    harness.run_steps(1);
+    harness.state_mut().go(Location::Folder(root.join("x64")));
+    settle(&mut harness);
+    assert_eq!(harness.state().previewing(), None);
+}
+
+#[test]
 fn search_in_a_text() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("game");
@@ -524,7 +583,7 @@ fn search_in_a_text() {
     settle(&mut harness);
     harness.state_mut().go(Location::Archive(data));
     harness.state_mut().preview("notes.txt", &ctx);
-    harness.run_steps(3);
+    settle(&mut harness);
     // A plain file has nothing to add to what the list says.
     assert_eq!(harness.state().preview_info(), Some(""));
 
