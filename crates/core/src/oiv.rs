@@ -216,7 +216,7 @@ impl Package {
         for cmd in cmds {
             match cmd {
                 Command::Add { source, .. } => {
-                    self.zip.by_name(&content_path(source)).map_err(|_| Error::Package(format!("missing content/{source}")))?;
+                    find_entry(&self.zip, &content_path(source)).ok_or_else(|| Error::Package(format!("missing content/{source}")))?;
                 }
                 Command::Archive { body, .. } => self.check(body)?,
                 _ => {}
@@ -522,13 +522,16 @@ fn content_path(source: &str) -> String {
     format!("content/{}", source.replace('\\', "/").trim_start_matches('/'))
 }
 
-/// Reads a zip entry, matching the name case-insensitively and accepting
-/// backslash separators (packages made on Windows use both).
-fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, Error> {
+/// The index of a zip entry, matching the name case-insensitively and
+/// accepting backslash separators (packages made on Windows use both).
+fn find_entry(zip: &ZipArchive<File>, name: &str) -> Option<usize> {
     let wanted = name.replace('\\', "/").to_ascii_lowercase();
-    let index = (0..zip.len())
-        .find(|&i| zip.name_for_index(i).is_some_and(|n| n.is_ok_and(|n| n.replace('\\', "/").to_ascii_lowercase() == wanted)))
-        .ok_or_else(|| Error::Package(format!("missing {name}")))?;
+    (0..zip.len()).find(|&i| zip.name_for_index(i).is_some_and(|n| n.is_ok_and(|n| n.replace('\\', "/").to_ascii_lowercase() == wanted)))
+}
+
+/// Reads a zip entry found by [`find_entry`].
+fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, Error> {
+    let index = find_entry(zip, name).ok_or_else(|| Error::Package(format!("missing {name}")))?;
     let mut entry = zip.by_index(index).map_err(zip_err)?;
     let mut data = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut data)?;
@@ -641,6 +644,28 @@ mod tests {
         assert!(!root.join("PlayGTAV.exe").exists());
         assert_eq!(std::fs::read(root.join("dinput8.dll")).unwrap(), b"new");
         assert_eq!(log.iter().filter(|l| l.starts_with("warning: refusing")).count(), 3, "{log:?}");
+    }
+
+    #[test]
+    fn content_names_ignore_case_and_separators() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content>
+            <add source="scripts/a.asi">scripts\a.asi</add>
+        </content></package>"#;
+        let oiv = dir.path().join("x.oiv");
+        let mut zip = zip::ZipWriter::new(File::create(&oiv).unwrap());
+        for (name, data) in [("assembly.xml", assembly.as_bytes()), ("Content\\Scripts\\A.asi", b"asi")] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+
+        Package::open(&oiv).unwrap().install_with(&Game::open(&root).unwrap(), None).unwrap();
+        assert_eq!(std::fs::read(root.join("scripts/a.asi")).unwrap(), b"asi");
     }
 
     #[test]
