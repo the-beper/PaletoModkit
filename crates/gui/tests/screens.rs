@@ -260,7 +260,7 @@ fn dialogs() {
     if let Some(expand) = harness.get_all_by_label("⏷ Expand all").next() {
         expand.click();
     }
-    harness.run_steps(10);
+    settle(&mut harness);
 
     if let Some(help) = harness.get_all_by_label("Help").next() {
         help.click();

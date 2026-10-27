@@ -23,7 +23,7 @@ use crate::snapshots_window::{self, SnapshotsWindow};
 use crate::crash_window::{self, CrashWindow};
 use crate::export_window::{self, ExportWindow};
 use crate::settings::{Density, FileClass, Grouping, Settings, SortBy, TextSize, Theme};
-use crate::task::Task;
+use crate::task::{Cancel, Task};
 use crate::theme::{self, SystemTheme};
 use crate::textures::{self, Export, Request, TextureEdit, TextureView};
 
@@ -75,6 +75,10 @@ pub struct App {
     legacy_files: usize,
     /// The search for copies of game files left unchanged in the mods folder.
     copies_task: Option<Task<Vec<paleto_core::cleanup::Copy>>>,
+    /// Expand all: the folders found, `None` once cancelled.
+    expand_task: Option<Task<Option<Vec<PathBuf>>>>,
+    /// Tests make background loads this slow, to see them while they run.
+    load_delay: std::time::Duration,
     /// Where the dictionaries that models share are (vehshare.ytd...).
     shared: Arc<SharedTextures>,
     settings: Settings,
@@ -518,6 +522,8 @@ enum Action {
     Refresh,
     ExpandAll,
     CollapseAll,
+    /// Stops the cancellable task the status bar shows.
+    CancelTask,
     ShowInfo(Option<Info>),
     Settings(Settings),
 }
@@ -533,6 +539,8 @@ impl App {
             legacy_scan: None,
             legacy_files: 0,
             copies_task: None,
+            expand_task: None,
+            load_delay: std::time::Duration::ZERO,
             shared: Arc::default(),
             settings: Settings::default(),
             tree: HashMap::new(),
@@ -621,9 +629,16 @@ impl App {
             && self.legacy_scan.is_none()
             && self.copies_task.is_none()
             && self.export_task.is_none()
+            && self.expand_task.is_none()
             && !self.startup.running()
             && !self.mods_check.as_ref().is_some_and(ModsCheck::checking)
             && !self.crash.as_ref().is_some_and(CrashWindow::loading)
+    }
+
+    /// Makes background loads this slow, so tests can see them running.
+    #[doc(hidden)]
+    pub fn delay_loads(&mut self, delay: std::time::Duration) {
+        self.load_delay = delay;
     }
 
     /// The names marked as differing from the original game files, and
@@ -1019,6 +1034,7 @@ impl App {
         };
         self.mods_check = None;
         self.script_hook = None;
+        self.expand_task = None;
         let root = game.root.clone();
         self.game = Some(game);
         self.startup.begin(self.game.as_ref(), ctx);
@@ -1977,10 +1993,20 @@ impl App {
             }
             Action::ExpandAll => {
                 if let Some(game) = &self.game {
-                    self.open_dirs.extend(subfolders(&game.root));
+                    let (root, delay) = (game.root.clone(), self.load_delay);
+                    self.expand_task = Some(Task::spawn_cancellable("Opening every folder", ctx, move |cancel| subfolders(&root, cancel, delay)));
                 }
             }
-            Action::CollapseAll => self.open_dirs.clear(),
+            Action::CollapseAll => {
+                self.expand_task = None;
+                self.open_dirs.clear();
+            }
+            Action::CancelTask => {
+                // Dropping the task tells its worker to stop.
+                if let Some(task) = self.expand_task.take() {
+                    self.status = Status::Info(format!("{}: cancelled", task.label));
+                }
+            }
             Action::ShowInfo(info) => self.info = info,
             Action::CheckMods(open) => {
                 self.mods_check = match (&self.game, open) {
@@ -2330,6 +2356,10 @@ impl App {
                     self.status = Status::Error(format!("comparing the mods folder: {e}"));
                 }
             }
+        }
+        if let Some(found) = self.expand_task.as_ref().and_then(Task::poll) {
+            self.expand_task = None;
+            self.open_dirs.extend(found.into_iter().flatten());
         }
         if let Some(copies) = self.copies_task.as_ref().and_then(Task::poll) {
             self.copies_task = None;
@@ -4102,13 +4132,17 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     let running = [
-                        self.task.as_ref().map(|t| &t.label),
-                        self.keys_task.as_ref().map(|t| &t.label),
-                        self.copies_task.as_ref().map(|t| &t.label),
-                        self.export_task.as_ref().map(|t| &t.label),
+                        self.task.as_ref().map(|t| (&t.label, t.cancellable())),
+                        self.keys_task.as_ref().map(|t| (&t.label, t.cancellable())),
+                        self.copies_task.as_ref().map(|t| (&t.label, t.cancellable())),
+                        self.export_task.as_ref().map(|t| (&t.label, t.cancellable())),
+                        self.expand_task.as_ref().map(|t| (&t.label, t.cancellable())),
                     ];
-                    if let Some(t) = running.into_iter().flatten().next() {
+                    if let Some((t, cancellable)) = running.into_iter().flatten().next() {
                         ui.spinner();
+                        if cancellable && ui.button("✖ Cancel").on_hover_text("Stop it: nothing it found so far is used").clicked() {
+                            actions.push(Action::CancelTask);
+                        }
                         ui.add(egui::Label::new(format!("{t}…")).truncate());
                         ui.separator();
                     }
@@ -4287,10 +4321,15 @@ fn add_info(info: &mut String, part: impl std::fmt::Display) {
     info.push_str(&part.to_string());
 }
 
-fn subfolders(root: &Path) -> Vec<PathBuf> {
+/// Every folder under `root`; `None` once cancelled. `delay` slows each folder down, for tests.
+fn subfolders(root: &Path, cancel: &Cancel, delay: std::time::Duration) -> Option<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        if cancel.is_set() {
+            return None;
+        }
+        std::thread::sleep(delay);
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
             if path.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
@@ -4299,7 +4338,7 @@ fn subfolders(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    out
+    Some(out)
 }
 
 fn getting_started(ui: &mut egui::Ui) {

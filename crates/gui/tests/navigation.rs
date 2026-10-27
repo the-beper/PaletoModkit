@@ -251,6 +251,29 @@ impl eframe::Storage for Store {
 }
 
 #[test]
+fn expand_all_can_be_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    fake_game(&root);
+    std::fs::create_dir_all(root.join("mods/inner_dir/deeper")).unwrap();
+    let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    // Each folder takes long: it is still running when Cancel is pressed.
+    harness.state_mut().delay_loads(Duration::from_millis(300));
+    harness.get_by_label("⏷ Expand all").click();
+    harness.run_steps(3);
+    assert!(!harness.state().idle());
+    harness.get_by_label("✖ Cancel").click();
+    harness.run_steps(3);
+    assert!(harness.state().idle());
+    harness.get_by_label("Opening every folder: cancelled");
+    assert!(harness.state().open_folders().is_empty());
+    assert!(harness.query_by_label("✖ Cancel").is_none());
+}
+
+#[test]
 fn expand_collapse_and_remember() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("game");
@@ -265,7 +288,7 @@ fn expand_collapse_and_remember() {
 
     // Expand all reaches nested folders; collapse all closes everything.
     harness.get_by_label("⏷ Expand all").click();
-    harness.run_steps(10);
+    settle(&mut harness);
     assert_eq!(harness.query_all_by_label("deeper").count(), 1);
     harness.get_by_label("⏶ Collapse all").click();
     harness.run_steps(10);
@@ -274,7 +297,7 @@ fn expand_collapse_and_remember() {
 
     // Open folders are only remembered when the option is on.
     harness.get_by_label("⏷ Expand all").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     let open = harness.state().open_folders();
     let mut store = Store::default();
     eframe::App::save(harness.state_mut(), &mut store);
