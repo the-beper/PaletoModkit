@@ -80,10 +80,11 @@ pub(super) fn parse(data: &[u8], names: &mut Names) -> Result<(Header, Schema, B
                 let raw = (0..count)
                     .map(|j| {
                         let e = offset + 12 + j * 12;
+                        let ty_sub = psch.get(e + 4..e + 6).ok_or_else(|| Error::Format("PSO: truncated schema".into()))?;
                         Ok(Entry {
                             name: be32(psch, e)?,
-                            ty: *psch.get(e + 4).ok_or_else(|| Error::Format("PSO: truncated schema".into()))?,
-                            sub: psch[e + 5],
+                            ty: ty_sub[0],
+                            sub: ty_sub[1],
                             offset: be16(psch, e + 6)? as usize,
                             reference: be32(psch, e + 8)?,
                         })
@@ -91,7 +92,7 @@ pub(super) fn parse(data: &[u8], names: &mut Names) -> Result<(Header, Schema, B
                     .collect::<Result<Vec<_>, Error>>()?;
                 let mut fields = Vec::new();
                 for e in raw.iter().filter(|e| e.name != ARRAYINFO) {
-                    fields.push(Field { name: e.name, offset: e.offset, kind: kind(e, &raw)? });
+                    fields.push(Field { name: e.name, offset: e.offset, kind: kind(e, &raw, 0)? });
                 }
                 schema.structs.insert(name, StructInfo { size, fields });
             }
@@ -119,7 +120,12 @@ struct Entry {
     reference: u32,
 }
 
-fn kind(e: &Entry, all: &[Entry]) -> Result<Kind, Error> {
+/// The kind of a schema entry; `depth` counts the arrays it is the element of
+/// (an array's element is described by another entry, which could be itself).
+fn kind(e: &Entry, all: &[Entry], depth: u32) -> Result<Kind, Error> {
+    if depth > 8 {
+        return Err(Error::Format("PSO: arrays nested too deep".into()));
+    }
     let unsupported = || Error::Unsupported(format!("PSO field type {:#x}/{}", e.ty, e.sub));
     let info = |index: usize| all.get(index).filter(|i| i.name == ARRAYINFO).copied();
     Ok(match e.ty {
@@ -150,7 +156,7 @@ fn kind(e: &Entry, all: &[Entry]) -> Result<Kind, Error> {
         0x0D => {
             let index = (e.reference & 0xFFFF) as usize;
             let elem = info(index).or_else(|| info((e.reference & 0xFFF) as usize)).ok_or_else(unsupported)?;
-            let mut elem = kind(&elem, all)?;
+            let mut elem = kind(&elem, all, depth + 1)?;
             if elem == Kind::Vec3 {
                 elem = Kind::Vec3Padded;
             }

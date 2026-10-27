@@ -190,3 +190,93 @@ fn pso_keeps_its_layout() {
     let xml = again.to_xml();
     assert!(xml.contains("<first>1 2 6</first>") && xml.contains("<second>3 4 5</second>"), "{xml}");
 }
+
+/// A schema entry: name, type, subtype, offset, reference.
+type SchemaEntry = (u32, u8, u8, u16, u32);
+/// A structure: name, size, entries.
+type SchemaStruct<'a> = (u32, u32, &'a [SchemaEntry]);
+
+/// A PSO file with the given structures and data blocks (type, bytes); block
+/// 1 is the root.
+fn pso_with(structs: &[SchemaStruct], blocks: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let be = |v: u32| v.to_be_bytes();
+    let mut psin = b"PSIN".to_vec();
+    psin.extend_from_slice(&be(0));
+    psin.resize(16, 0);
+    let mut places = Vec::new();
+    for (_, data) in blocks {
+        places.push(psin.len() as u32);
+        psin.extend_from_slice(data);
+    }
+    let len = psin.len() as u32;
+    psin[4..8].copy_from_slice(&be(len));
+    let mut pmap = b"PMAP".to_vec();
+    pmap.extend_from_slice(&be(16 + 16 * blocks.len() as u32));
+    pmap.extend_from_slice(&be(1));
+    pmap.extend_from_slice(&(blocks.len() as u16).to_be_bytes());
+    pmap.extend_from_slice(&0x7070u16.to_be_bytes());
+    for ((ty, data), at) in blocks.iter().zip(places) {
+        for w in [*ty, at, 0, data.len() as u32] {
+            pmap.extend_from_slice(&be(w));
+        }
+    }
+    let mut elements = Vec::new();
+    let mut index = Vec::new();
+    let table_end = 12 + 8 * structs.len() as u32;
+    for (name, size, entries) in structs {
+        index.extend_from_slice(&be(*name));
+        index.extend_from_slice(&be(table_end + elements.len() as u32));
+        elements.extend_from_slice(&be(entries.len() as u32));
+        elements.extend_from_slice(&be(*size));
+        elements.extend_from_slice(&be(0));
+        for &(name, t, sub, offset, reference) in *entries {
+            elements.extend_from_slice(&be(name));
+            elements.extend_from_slice(&[t, sub]);
+            elements.extend_from_slice(&offset.to_be_bytes());
+            elements.extend_from_slice(&be(reference));
+        }
+    }
+    let mut psch = b"PSCH".to_vec();
+    psch.extend_from_slice(&be(table_end + elements.len() as u32));
+    psch.extend_from_slice(&be(structs.len() as u32));
+    psch.extend_from_slice(&index);
+    psch.extend_from_slice(&elements);
+    [psin, pmap, psch].concat()
+}
+
+/// Damaged files give an error, never a stack overflow, a panic or a huge allocation.
+#[test]
+fn damaged_pso() {
+    // An array whose element is described as the array itself.
+    let mut data = pso();
+    let info = [0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0];
+    let at = data.windows(12).position(|w| w == info).unwrap();
+    data[at + 4] = 0x0D;
+    data[at + 8..at + 12].copy_from_slice(&3u32.to_be_bytes());
+    assert!(MetaFile::parse(&data).is_err());
+
+    // A schema cut between an entry's type and subtype (PSCH is the last section).
+    let mut data = pso();
+    let psch = data.windows(4).position(|w| w == b"PSCH").unwrap();
+    let cut = 20 + 12 + 4 * 12 + 5;
+    data[psch + 4..psch + 8].copy_from_slice(&(cut as u32).to_be_bytes());
+    data.truncate(psch + cut);
+    assert!(MetaFile::parse(&data).is_err());
+
+    // Four billion empty structures in an array of 16 bytes (two read fine).
+    let (root, empty) = (joaat(b"CPaletoRoot"), joaat(b"CPaletoEmpty"));
+    let file = |count: u32| {
+        let mut root_data = 2u32.to_be_bytes().to_vec(); // block 2, offset 0
+        root_data.extend_from_slice(&[0; 4]);
+        root_data.extend_from_slice(&count.to_be_bytes());
+        root_data.resize(16, 0);
+        pso_with(
+            &[(root, 16, &[(0x100, 0x0C, 0, 0, empty), (joaat(b"items"), 0x0D, 6, 0, 0)]), (empty, 0, &[])],
+            &[(root, root_data), (empty, vec![0; 16])],
+        )
+    };
+    let mut meta = MetaFile::parse(&file(2)).unwrap();
+    meta.learn_names("CPaletoRoot CPaletoEmpty items");
+    assert_eq!(meta.to_xml().matches("<Item").count(), 2, "{}", meta.to_xml());
+    assert!(MetaFile::parse(&file(u32::MAX)).is_err());
+}

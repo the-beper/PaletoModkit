@@ -101,7 +101,7 @@ impl Schema {
             Kind::Enum { size, .. } | Kind::Flags { size, .. } => *size as usize,
             Kind::Chars(n) => *n,
             Kind::Struct(t) => self.structs.get(t).map_or(0, |s| s.size),
-            Kind::Array { inline: Some(n), elem, .. } => n * self.size(elem),
+            Kind::Array { inline: Some(n), elem, .. } => n.saturating_mul(self.size(elem)),
             Kind::Array { inline: None, .. } => 16,
         }
     }
@@ -299,6 +299,10 @@ impl Reader<'_> {
             }
             Kind::Array { elem, inline: Some(count), .. } => {
                 let stride = self.schema.size(elem);
+                // Elements that read nothing (empty structures) never run out of data.
+                if stride == 0 && *count > blocks.get(id)?.1.len() {
+                    return Err(Error::Format("array longer than its data".into()));
+                }
                 let items = (0..*count).map(|i| self.read(elem, id, at + i * stride, depth + 1)).collect::<Result<_, _>>()?;
                 Value::Array(items)
             }
@@ -312,12 +316,18 @@ impl Reader<'_> {
                     let ty = blocks.get(bid)?.0;
                     self.hints.blocks.entry(key).or_insert(ty);
                 }
+                let empty = self.schema.size(elem) == 0;
                 let stride = self.schema.size(elem).max(1);
-                let mut items = Vec::with_capacity(count);
+                // The count comes from the file: memory follows the data.
+                let mut items = Vec::with_capacity(count.min(blocks.get(bid)?.1.len() / stride + 1));
                 for _ in 0..count {
                     // Long arrays may continue in the next block (resource metadata).
                     if off + stride > blocks.get(bid)?.1.len() && blocks.get(bid + 1).is_ok() {
                         (bid, off) = (bid + 1, 0);
+                    }
+                    // Elements that read nothing (empty structures) never run out of data.
+                    if empty && off >= blocks.get(bid)?.1.len() {
+                        return Err(Error::Format("array past the end of its data".into()));
                     }
                     items.push(self.read(elem, bid, off, depth + 1)?);
                     off += stride;
