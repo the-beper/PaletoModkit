@@ -39,12 +39,14 @@ pub struct Changed {
 /// Every change of the mods folder against the game's files. Reads the
 /// archives' files that might differ (the same size), so it takes a while.
 pub fn changed_files(game: &Game, keys: Option<&Keys>) -> Result<Vec<Changed>, Error> {
-    changed_files_cached(game, keys, &mut ChangesCache::default())
+    changed_files_cached(game, keys, &mut ChangesCache::default(), &|| false)
 }
 
 /// [`changed_files`], reading again only the files of the mods folder that
 /// changed since `cache` saw them (by size and time, of the copy and its original).
-pub fn changed_files_cached(game: &Game, keys: Option<&Keys>, cache: &mut ChangesCache) -> Result<Vec<Changed>, Error> {
+/// Gives up with [`Error::Cancelled`] as soon as `stop` says so (checked for each
+/// file); the cache then keeps nothing of this run.
+pub fn changed_files_cached(game: &Game, keys: Option<&Keys>, cache: &mut ChangesCache, stop: &dyn Fn() -> bool) -> Result<Vec<Changed>, Error> {
     let mods = game.mods_dir();
     let mut out = Vec::new();
     if !mods.is_dir() {
@@ -52,6 +54,9 @@ pub fn changed_files_cached(game: &Game, keys: Option<&Keys>, cache: &mut Change
     }
     let mut seen = HashMap::new();
     for (file, _) in crate::vfs::local_files(&mods)? {
+        if stop() {
+            return Err(Error::Cancelled);
+        }
         let rel = file.strip_prefix(&mods).unwrap().to_string_lossy().replace('\\', "/");
         let lower = rel.to_ascii_lowercase();
         let size = std::fs::metadata(&file).map_or(0, |m| m.len());
@@ -75,7 +80,11 @@ pub fn changed_files_cached(game: &Game, keys: Option<&Keys>, cache: &mut Change
                 if lower.ends_with(".rpf") {
                     let modded = Archive::open(&file, keys)?;
                     let original = Archive::open(&original, keys)?;
-                    diff_archives(&rel, &modded, &original, keys, &mut found);
+                    diff_archives(&rel, &modded, &original, keys, stop, &mut found);
+                    // What it found before stopping is not all there is.
+                    if stop() {
+                        return Err(Error::Cancelled);
+                    }
                 } else if !same_file(&file, &original) {
                     found.push(Changed { path: rel, kind: Kind::Modified, size });
                 }
@@ -92,9 +101,9 @@ pub fn changed_files_cached(game: &Game, keys: Option<&Keys>, cache: &mut Change
 }
 
 /// [`changed_files_cached`] with the cache kept in `cache_path`.
-pub fn changed_files_cached_at(game: &Game, keys: Option<&Keys>, cache_path: &Path) -> Result<Vec<Changed>, Error> {
+pub fn changed_files_cached_at(game: &Game, keys: Option<&Keys>, cache_path: &Path, stop: &dyn Fn() -> bool) -> Result<Vec<Changed>, Error> {
     let mut cache = ChangesCache::load(cache_path);
-    let found = changed_files_cached(game, keys, &mut cache)?;
+    let found = changed_files_cached(game, keys, &mut cache, stop)?;
     cache.entries.retain(|k, _| Path::new(k).is_file());
     // A cache that cannot be written only costs time.
     let _ = cache.save(cache_path);
@@ -161,20 +170,24 @@ impl ChangesCache {
     }
 }
 
-fn diff_archives(prefix: &str, modded: &Archive, original: &Archive, keys: Option<&Keys>, out: &mut Vec<Changed>) {
+/// Stops early, with part of the changes, once `stop` says so.
+fn diff_archives(prefix: &str, modded: &Archive, original: &Archive, keys: Option<&Keys>, stop: &dyn Fn() -> bool, out: &mut Vec<Changed>) {
     let files = |a: &Archive| -> HashMap<String, (String, usize)> {
         a.walk(0).into_iter().filter(|(_, i)| !a.entries[*i].is_dir()).map(|(p, i)| (p.to_ascii_lowercase(), (p, i))).collect()
     };
     let (ours, theirs) = (files(modded), files(original));
     let mut found = Vec::new();
     for (lower, (path, i)) in &ours {
+        if stop() {
+            return;
+        }
         let full = format!("{prefix}/{path}");
         let entry = &modded.entries[*i];
         match theirs.get(lower) {
             None => found.push(Changed { path: full, kind: Kind::Added, size: entry.size() }),
             Some((_, j)) if entry.is_archive() && original.entries[*j].is_archive() => {
                 match (modded.open_child(*i, keys), original.open_child(*j, keys)) {
-                    (Ok(a), Ok(b)) => diff_archives(&full, &a, &b, keys, &mut found),
+                    (Ok(a), Ok(b)) => diff_archives(&full, &a, &b, keys, stop, &mut found),
                     _ if entry_differs(modded, *i, original, *j, keys) => found.push(Changed { path: full, kind: Kind::Modified, size: entry.size() }),
                     _ => {}
                 }
@@ -454,13 +467,22 @@ mod tests {
         let game = Game::open(&root).unwrap();
 
         let cache = dir.path().join("changes.tsv");
-        let changes = changed_files_cached_at(&game, None, &cache).unwrap();
+        let changes = changed_files_cached_at(&game, None, &cache, &|| false).unwrap();
         // Unchanged archives are not read again: what the cache says comes back.
         let text = std::fs::read_to_string(&cache).unwrap();
         std::fs::write(&cache, text.replace("handling.meta", "cached.meta")).unwrap();
-        assert!(changed_files_cached_at(&game, None, &cache).unwrap().iter().any(|c| c.path.ends_with("cached.meta")));
+        assert!(changed_files_cached_at(&game, None, &cache, &|| false).unwrap().iter().any(|c| c.path.ends_with("cached.meta")));
         std::fs::write(&cache, text).unwrap();
-        assert_eq!(changed_files_cached_at(&game, None, &cache).unwrap(), changes);
+        assert_eq!(changed_files_cached_at(&game, None, &cache, &|| false).unwrap(), changes);
+        // Stopped halfway, it gives up and keeps no cache of that run.
+        let calls = std::cell::Cell::new(0);
+        let stop = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 3
+        };
+        let stopped = dir.path().join("stopped.tsv");
+        assert!(matches!(changed_files_cached_at(&game, None, &stopped, &stop), Err(Error::Cancelled)));
+        assert!(!stopped.exists());
         let list: Vec<(&str, Kind)> = changes.iter().map(|c| (c.path.as_str(), c.kind)).collect();
         assert_eq!(
             list,

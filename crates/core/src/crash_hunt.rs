@@ -182,7 +182,7 @@ pub fn start_inside(game: &Game, keys: Option<&Keys>, part: &str, cache: &Path) 
     let top = part.strip_prefix("mods/").ok_or_else(|| Error::Package(format!("{part} is not in the mods folder")))?.to_string();
     // The culprit found by the first hunt is turned off: back on, to look inside.
     enable(game, part)?;
-    let changes = crate::export::changed_files_cached_at(game, keys, cache)?;
+    let changes = crate::export::changed_files_cached_at(game, keys, cache, &|| false)?;
     let prefix = format!("{}/", top.to_ascii_lowercase());
     let inner: Vec<&crate::export::Changed> =
         changes.iter().filter(|c| c.path.to_ascii_lowercase().starts_with(&prefix) && c.kind != Kind::Pack).collect();

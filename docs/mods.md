@@ -102,7 +102,7 @@ Paleto does not install ScriptHookVDotNet, LemonUI or the mods: copy those to th
 
 ![Exporting the mods folder](images/export.png)
 
-1. It compares the mods folder with the game's files, nested archives included. The first time this reads every modded archive whole (about a minute and a half for a mods folder of 60 GB); after that, only the archives changed since.
+1. It compares the mods folder with the game's files, nested archives included. The first time this reads every modded archive whole (about a minute and a half for a mods folder of 60 GB); after that, only the archives changed since. Closing the window stops it.
 2. It lists the changes, grouped by archive: files changed, added or deleted, and add-on packs. Filter them by name and pick the ones to keep.
 3. **Save N changes as…** writes the package, with the name, version and author you give it. Add-on packs come with their DLC list entry, added to the list of whoever installs the package.
 

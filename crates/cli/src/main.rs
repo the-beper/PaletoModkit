@@ -702,7 +702,7 @@ fn main() -> Result<()> {
             use paleto_core::export;
             let game = find_game(cli.game.as_deref(), None)?;
             let keys = game.keys()?;
-            let mut changes = export::changed_files_cached_at(&game, Some(&keys), &export::ChangesCache::default_path())?;
+            let mut changes = export::changed_files_cached_at(&game, Some(&keys), &export::ChangesCache::default_path(), &|| false)?;
             if !only.is_empty() {
                 let only: Vec<String> = only.iter().map(|o| o.to_ascii_lowercase()).collect();
                 changes.retain(|c| only.iter().any(|o| c.path.to_ascii_lowercase().contains(o)));

@@ -54,4 +54,7 @@ pub enum Error {
     Convert(String),
     #[error("prefix: {0}")]
     Prefix(String),
+    /// Stopped because nobody wants the result any more.
+    #[error("cancelled")]
+    Cancelled,
 }

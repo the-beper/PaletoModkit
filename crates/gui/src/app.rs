@@ -2116,8 +2116,10 @@ impl App {
                 let (true, Some(game)) = (open, self.game.clone()) else { return };
                 let keys = self.keys.clone();
                 self.export = Some(ExportWindow::new());
-                self.export_task = Some(Task::spawn("Comparing the mods folder with the game's files", ctx, move || {
-                    paleto_core::export::changed_files_cached_at(&game, keys.as_deref(), &paleto_core::export::ChangesCache::default_path()).map_err(|e| e.to_string())
+                // Closing the window drops the task, which stops the comparison.
+                self.export_task = Some(Task::spawn_cancellable("Comparing the mods folder with the game's files", ctx, move |cancel| {
+                    let stop = || cancel.is_set();
+                    paleto_core::export::changed_files_cached_at(&game, keys.as_deref(), &paleto_core::export::ChangesCache::default_path(), &stop).map_err(|e| e.to_string())
                 }));
             }
             Action::WriteExport(path, changes, meta) => {
