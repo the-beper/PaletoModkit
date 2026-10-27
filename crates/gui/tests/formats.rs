@@ -1,8 +1,10 @@
-//! Previews of text tables (.gxt2) and audio containers (.awc).
+//! Previews of text tables (.gxt2), audio containers (.awc), and of other
+//! binary files as hex.
 
 use std::time::Duration;
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use paleto_core::ArchivePath;
 use paleto_modkit::App;
 use paleto_rpf::ArchiveEditor;
@@ -115,4 +117,18 @@ fn audio_export() {
     let saved = ArchivePath::new(root.join("mods/update/update.rpf")).join("data").join("beep.awc").read(None).unwrap();
     let sounds = paleto_formats::awc::parse(&saved, None).unwrap();
     assert_eq!(sounds[0].samples.len(), 1000);
+}
+
+#[test]
+fn unknown_binary_as_hex() {
+    let mut blob = b"PALETO\0\x01\xFF".to_vec();
+    blob.extend(0u8..24);
+    let (_dir, root) = game_with(&[("blob.bin", blob)]);
+    let mut harness = Harness::builder().with_size([1200.0, 700.0]).build_eframe(|cc| App::new(cc));
+    open(&mut harness, &root, "blob.bin");
+    assert_eq!(harness.state().preview_info(), Some("shown as hex"));
+    // Offset, the bytes in hex (16 or 8 a row, as the panel's width allows), and the printable ones as text.
+    harness.get_by_label_contains("00000000  50 41 4C 45 54 4F 00 01 ");
+    harness.get_by_label_contains(" PALETO..");
+    assert!(harness.query_by_label_contains("No preview").is_none());
 }

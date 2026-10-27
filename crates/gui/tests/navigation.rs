@@ -337,11 +337,11 @@ fn preview_follows_selection() {
     harness.run_steps(3);
     assert_eq!(harness.state().previewing(), Some("handling.meta"));
 
-    // A file without a preview says so.
+    // A file of no known type is shown as hex.
     harness.get_by_label("zz_blob.bin").click();
     harness.run_steps(3);
     assert_eq!(harness.state().previewing(), Some("zz_blob.bin"));
-    harness.get_by_label("No preview for .bin files");
+    harness.get_by_label_contains("00000000  00 01 02 00 FF");
 
     // With unsaved edits it asks once; declining keeps the preview.
     harness.get_by_label("handling.meta").click();

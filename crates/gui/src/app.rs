@@ -12,6 +12,7 @@ use paleto_formats::{Format, MetaFile, TextureDictionary};
 use paleto_rpf::{Encryption, EntryKind, Keys};
 
 use crate::audio::{self, AudioRequest, AudioView};
+use crate::hex_view::{self, HexView};
 use crate::highlight::{self, Syntax};
 use crate::model::ModelView;
 use crate::mods_check::{self, ModsCheck};
@@ -234,6 +235,8 @@ struct Preview {
     textures: Option<TextureView>,
     model: Option<ModelView>,
     audio: Option<AudioView>,
+    /// Files with no other preview: their bytes.
+    hex: Option<HexView>,
     /// The search bar of a text preview, while it is open.
     find: Option<Find>,
 }
@@ -1466,15 +1469,21 @@ impl App {
                 let Some(b) = &self.browser else { return };
                 // Only what the file list does not say: its type and size are there.
                 let mut info = String::new();
+                // The size of a large file on disk of which only the start is read, for the hex view.
+                let mut partial = None;
                 let (source, data) = match &b.location {
                     Location::Folder(dir) => {
                         let path = dir.join(&name);
-                        let data = std::fs::metadata(&path)
-                            .ok()
-                            .filter(|m| m.len() as usize <= MAX_TEXT || binary_preview(&name))
-                            .map(|_| std::fs::read(&path).map_err(|e| e.to_string()));
+                        let data = match std::fs::metadata(&path) {
+                            Ok(m) if m.len() as usize <= MAX_TEXT || binary_preview(&name) => std::fs::read(&path).map_err(|e| e.to_string()),
+                            Ok(m) => {
+                                partial = Some(m.len());
+                                read_start(&path, hex_view::MAX_HEX).map_err(|e| e.to_string())
+                            }
+                            Err(_) => Ok(Vec::new()),
+                        };
                         add_info(&mut info, "read-only");
-                        (PreviewSource::Disk(path), data.unwrap_or(Ok(Vec::new())))
+                        (PreviewSource::Disk(path), data)
                     }
                     Location::Archive(a) => {
                         let path = a.join(&name);
@@ -1482,12 +1491,14 @@ impl App {
                         (PreviewSource::Archive(path), data)
                     }
                 };
-                let (mut text, mut textures, mut model, mut audio) = (None, None, None, None);
+                let (mut text, mut textures, mut model, mut audio, mut hex) = (None, None, None, None, None);
                 let mut codec = Codec::Plain;
                 let mut syntax = Syntax::for_file(&name);
                 let ext = extension(&name).to_ascii_lowercase();
                 let fail = |e: paleto_formats::Error| Status::Error(format!("{name}: {e}"));
                 match data {
+                    // Only its start was read: nothing but the hex view can show that.
+                    Ok(data) if partial.is_some() => hex = Some(HexView::new(data, partial)),
                     Ok(data) if is_ytd(&name) => match TextureDictionary::parse(&data) {
                         Ok(dict) => {
                             let view = TextureView::new(dict);
@@ -1534,10 +1545,16 @@ impl App {
                         }
                         Err(e) => self.status = fail(e),
                     },
-                    Ok(data) => text = as_text(&data).map(|t| (t.clone(), t)),
+                    Ok(data) => match as_text(&data) {
+                        Some(t) => text = Some((t.clone(), t)),
+                        None => hex = Some(HexView::new(data, None)),
+                    },
                     Err(e) => self.status = Status::Error(e),
                 }
-                self.preview = Some(Preview { source, name, syntax, info, text, codec, textures, model, audio, find: None });
+                if let Some(view) = &hex {
+                    add_info(&mut info, view.summary());
+                }
+                self.preview = Some(Preview { source, name, syntax, info, text, codec, textures, model, audio, hex, find: None });
             }
             Action::ClosePreview => self.preview = None,
             Action::PickTexture(replace) => {
@@ -2341,8 +2358,7 @@ impl App {
                         desktop_notify(&label, message);
                     }
                     Outcome::Installed(Ok(changes)) => {
-                        let msg = format!("Installed successfully ({} changes)", changes.len());
-                        desktop_notify(&label, &msg);
+                        desktop_notify(&label, &install_summary(changes));
                     }
                     Outcome::Installed(Err(err)) => {
                         desktop_notify(&label, &format!("Installation failed: {err}"));
@@ -3298,6 +3314,8 @@ impl App {
                                 request => Action::ExportSounds(request, None),
                             });
                         }
+                    } else if let Some(view) = &p.hex {
+                        view.ui(ui);
                     } else {
                         let ext = extension(&p.name);
                         let kind = if ext.is_empty() { "this file type".to_string() } else { format!(".{} files", ext.to_ascii_lowercase()) };
@@ -4534,6 +4552,14 @@ fn as_text(data: &[u8]) -> Option<String> {
     String::from_utf8(data.to_vec()).ok()
 }
 
+/// The first `limit` bytes of a file.
+fn read_start(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut data = Vec::with_capacity(limit);
+    std::fs::File::open(path)?.take(limit as u64).read_to_end(&mut data)?;
+    Ok(data)
+}
+
 fn load_icon(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
@@ -4545,12 +4571,25 @@ fn extension(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_uppercase()).unwrap_or_default()
 }
 
-fn size(bytes: u64) -> String {
+pub(crate) fn size(bytes: u64) -> String {
     match bytes {
         b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
         b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
         b if b >= 1 << 10 => format!("{:.1} KB", b as f64 / 1024.0),
         b => format!("{b} B"),
+    }
+}
+
+/// What an install did, from its log: the files it added, edited, deleted or
+/// converted, and its warnings. "saved" lines only close archives whose edits
+/// are already counted.
+fn install_summary(log: &[String]) -> String {
+    let warnings = log.iter().filter(|l| l.starts_with("warning:")).count();
+    let changes = log.iter().filter(|l| !l.starts_with("warning:") && !l.starts_with("saved ")).count();
+    let plural = |n: usize, what: &str| if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") };
+    match warnings {
+        0 => format!("Installed successfully ({})", plural(changes, "change")),
+        n => format!("Installed successfully ({}, {})", plural(changes, "change"), plural(n, "warning")),
     }
 }
 
@@ -4581,4 +4620,17 @@ fn format_combo(ui: &mut egui::Ui, format: &mut Option<Format>, auto: String) {
             ui.selectable_value(format, Some(f), f.name());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_summary_counts_changes_apart_from_warnings() {
+        let log: Vec<String> = ["add mods/x.rpf\\a.ytd", "edit mods/x.rpf\\b.meta", "warning: refusing to delete c", "saved mods/x.rpf", "converted d.ydr", "warning: e: not converted: bad"].map(String::from).into();
+        assert_eq!(install_summary(&log), "Installed successfully (3 changes, 2 warnings)");
+        assert_eq!(install_summary(&log[..1]), "Installed successfully (1 change)");
+        assert_eq!(install_summary(&log[2..4]), "Installed successfully (0 changes, 1 warning)");
+    }
 }

@@ -12,6 +12,7 @@ How to browse the game files and change them with the desktop app. For installin
 - [Textures](#textures)
 - [3D models](#3d-models)
 - [Audio](#audio)
+- [Other files](#other-files)
 - [Keyboard and mouse](#keyboard-and-mouse)
 - [Appearance](#appearance)
 - [Menus at a glance](#menus-at-a-glance)
@@ -24,7 +25,7 @@ How to browse the game files and change them with the desktop app. For installin
 - **Location bar**: back, forward and up buttons, then the path as clickable parts. Inside the mods copy of an archive, the path shows **MODS**, and **Show original** at the right end shows the game's own archive instead (marked **ORIGINAL**; **Show mods copy** goes back). This lasts until you leave that archive.
 - **Side tree**: the game folder. Click a name to open it, its arrow to expand it. **Expand all** and **Collapse all** are above it. **View → Side tree** hides it when you want the room for the file list.
 - **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it, and again to reverse the order.
-- **Preview panel**: opens on the right when you select a file: text, XML, textures, models or sounds.
+- **Preview panel**: opens on the right when you select a file: text, XML, textures, models or sounds, and any other file as hex.
 - **Status bar**: what is running and the result of the last operation on the left. One operation runs at a time: starting another one, or switching game, is refused until it is done, and closing the window while one runs asks for a second close, since it would stop halfway. On the right: how many items the folder holds and what is selected (with its size), the files of the mods folder made for Legacy on the Enhanced edition (until they are converted; click the count to see them), and the edition (the game folder on hover).
 
 Paleto Modkit finds the games installed in your Steam libraries. **Game → Choose the game folder…** picks any other install (the folder holding `GTA5.exe` or `GTA5_Enhanced.exe`). Both editions are supported; the status bar says which one is open.
@@ -118,6 +119,10 @@ Selecting an audio container (`.awc`) lists its sounds.
 - **▶ Play** and **⏹ Stop**.
 - **⬇ Export**: the selected sound or all of them, as WAV.
 - **🔄 Replace…**: replaces the selected sound with a WAV or MP3 file, converted to the sound's format and rate. Radio songs are streams of several channels: a stereo file replaces both channels at once. On the Enhanced edition streams are MP3, one mono MP3 per channel.
+
+## Other files
+
+Any other binary file is shown read-only as hex: the offset, 16 bytes per row (8 while the panel is too narrow for 16), and the same bytes as text (`.` for those that are not printable). Only its first 8 MB are shown; the header says so for a larger file.
 
 ## Keyboard and mouse
 
