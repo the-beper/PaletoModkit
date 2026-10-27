@@ -69,7 +69,7 @@ Paleto Modkit converts them with [CodeWalker](https://github.com/dexyfex/CodeWal
 - **when you add files or folders to an archive** (drag and drop, **Add files…**): the files on disk are left alone;
 - **for files already in `mods/`**, such as packs copied by hand: **Tools → Mods in game** marks them and offers **Convert to Enhanced**.
 
-Each time, a dialog says how many files were made for Legacy and lets you install them as they are instead.
+Each time, a dialog says how many files were made for Legacy and lets you install them as they are instead. A conversion still running after a minute per file (plus one) is stopped, and fails with that message.
 
 The app also checks the mods folder in the background when it starts, and warns in the status bar when it finds Legacy files. Only archives changed since the last check are read again, so this takes a moment the first time only.
 
@@ -88,7 +88,7 @@ Mods written for ScriptHookVDotNet (a `scripts` folder with `.dll` files) need t
 ![Prefix tweaks](images/prefix-tweaks.png)
 
 1. It finds the game's prefix (`steamapps/compatdata/<app id>/pfx`) and the Proton the game last ran with (when that tool was renamed, the one Steam's `CompatToolMapping` names for the game is used). For a game Steam knows as a non-Steam game (its app id is a long number of its own) or one outside Steam's library, the window offers **Choose prefix folder…**: pick the game's `compatdata/<app id>` folder (the one with `pfx` inside; it must have been started once with Proton). Paleto remembers the choice; **Use Steam's prefix again** forgets it. This also works for the folders other launchers make (Faugus, for example), which have the same `config_info` and `drive_c`; where `pfx` is only a link to the folder itself, the window warns in bold that the game must be closed first (Paleto cannot see it running), **Back up now** works but **Restore** is not supported: copy the folder yourself before changing it.
-2. It backs the prefix up (instant and free on btrfs and XFS; a full copy elsewhere).
+2. It backs the prefix up (instant and free on btrfs and XFS; a full copy elsewhere). Each prefix lists only its own backups, so after choosing another prefix folder the backups of Steam's prefix stay out of the way.
 3. It downloads winetricks and Microsoft's installers once (about 120 MB), checked against fixed checksums, and installs .NET Framework 4.8 with the Proton's own Wine. It takes about five minutes. Microsoft's installer needs your graphical session for its windows, which it keeps hidden; the rest of the work runs cut off from the desktop, so no window or message box appears.
 4. It sets the Windows version back (winetricks leaves Windows 7, and the game then refuses to start), and verifies the result.
 

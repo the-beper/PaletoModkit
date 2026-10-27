@@ -6,8 +6,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
@@ -66,12 +67,62 @@ pub fn convert(tool: &Path, files: &[(&str, &[u8])]) -> Result<Vec<Outcome>, Err
     result
 }
 
-/// A new, empty folder for temporary files; the caller removes it.
+/// A new, empty folder for temporary files, only this user's; the caller
+/// removes it. A folder of that name already there (made by someone else in a
+/// shared `/tmp`) is never used: the next name is tried.
 pub(crate) fn scratch_dir() -> Result<PathBuf, Error> {
+    use std::os::unix::fs::DirBuilderExt;
     static RUN: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!("paleto-{}-{}", std::process::id(), RUN.fetch_add(1, Ordering::Relaxed)));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    loop {
+        let dir = std::env::temp_dir().join(format!("paleto-{}-{}", std::process::id(), RUN.fetch_add(1, Ordering::Relaxed)));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            result => return result.map(|_| dir).map_err(Error::from),
+        }
+    }
+}
+
+/// How long the converter may take: a minute, and a minute more per file.
+fn time_limit(files: usize) -> Duration {
+    Duration::from_secs(60 * (1 + files as u64))
+}
+
+/// Runs a program to its end and returns its output, killing it once
+/// `limit` has passed: a stuck converter must not hang an install forever.
+fn output_within(cmd: &mut Command, limit: Duration) -> Result<std::process::Output, Error> {
+    // Read while it runs, so a full pipe never blocks it.
+    fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out);
+            }
+            out
+        })
+    }
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let start = Instant::now();
+    let status = loop {
+        let stop = |child: &mut std::process::Child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                stop(&mut child);
+                return Err(e.into());
+            }
+        }
+        if start.elapsed() > limit {
+            stop(&mut child);
+            return Err(Error::Convert(format!("{TOOL} took longer than {} s and was stopped", limit.as_secs())));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
 fn run(tool: &Path, dir: &Path, files: &[(&str, &[u8])]) -> Result<Vec<Outcome>, Error> {
@@ -84,10 +135,10 @@ fn run(tool: &Path, dir: &Path, files: &[(&str, &[u8])]) -> Result<Vec<Outcome>,
         args.push(input);
         args.push(output);
     }
-    let out = Command::new(tool)
-        .args(&args)
-        .output()
-        .map_err(|e| Error::Convert(format!("cannot run {}: {e}", tool.display())))?;
+    let out = output_within(Command::new(tool).args(&args), time_limit(files.len())).map_err(|e| match e {
+        Error::Io(e) => Error::Convert(format!("cannot run {}: {e}", tool.display())),
+        e => e,
+    })?;
     if !out.status.success() {
         return Err(Error::Convert(format!("{TOOL} failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
     }
@@ -422,9 +473,8 @@ pub(crate) mod tests {
     /// A stand-in for paleto-cwconv: version 162 becomes 171, 171 is left
     /// alone, anything else fails.
     pub(crate) fn fake_tool(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(TOOL);
-        std::fs::write(
+        crate::write_script(
             &path,
             r#"#!/bin/sh
 while [ $# -gt 0 ]; do
@@ -437,9 +487,7 @@ while [ $# -gt 0 ]; do
     shift 2
 done
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         path
     }
 
@@ -518,5 +566,31 @@ done
         let mut pack = ArchiveEditor::open(&converted, None).unwrap();
         assert_eq!(pack.archive("x64/vehicles.rpf", false, None).unwrap().read("car.yft", None).unwrap(), res(171));
         assert_eq!(legacy_in_archive(&Archive::open(&drop.join("dlc.rpf"), None).unwrap(), None), ["x64/vehicles.rpf/car.yft"]);
+    }
+
+    #[test]
+    fn a_stuck_converter_is_stopped() {
+        let start = Instant::now();
+        let err = output_within(Command::new("sleep").arg("30"), Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("was stopped"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+        let out = output_within(Command::new("sh").args(["-c", "echo out; echo err >&2"]), Duration::from_secs(30)).unwrap();
+        assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (&b"out\n"[..], &b"err\n"[..]));
+    }
+
+    #[test]
+    fn scratch_folders_are_new_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let first = scratch_dir().unwrap();
+        // The next name already taken, as someone else could in a shared /tmp.
+        let n: u32 = first.to_string_lossy().rsplit('-').next().unwrap().parse().unwrap();
+        let taken = std::env::temp_dir().join(format!("paleto-{}-{}", std::process::id(), n + 1));
+        let _ = std::fs::create_dir(&taken);
+        let next = scratch_dir().unwrap();
+        assert_ne!(next, taken);
+        assert_eq!(std::fs::metadata(&next).unwrap().permissions().mode() & 0o777, 0o700);
+        for dir in [first, taken, next] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

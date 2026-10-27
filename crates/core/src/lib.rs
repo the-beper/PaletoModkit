@@ -23,6 +23,19 @@ pub use game::{Edition, Game};
 pub use oiv::Package;
 pub use vfs::ArchivePath;
 
+/// Writes an executable script for a test. Run while another thread forks, a
+/// file this process wrote can fail with "Text file busy" (the fork holds it
+/// open for writing until it runs its program): `cp` writes it instead.
+#[cfg(test)]
+pub(crate) fn write_script(path: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let draft = path.with_extension("draft");
+    std::fs::write(&draft, text).unwrap();
+    assert!(std::process::Command::new("cp").arg(&draft).arg(path).status().unwrap().success());
+    std::fs::remove_file(&draft).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

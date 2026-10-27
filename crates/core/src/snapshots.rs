@@ -58,6 +58,7 @@ pub fn list(game: &Game) -> Vec<Snapshot> {
 /// Takes a snapshot of the mods folder.
 pub fn create(game: &Game, label: &str) -> Result<Snapshot, Error> {
     let mods = game.mods_dir();
+    put_back(game)?;
     if !mods.is_dir() {
         return Err(Error::Package("there is no mods folder to save".into()));
     }
@@ -86,6 +87,7 @@ pub fn create(game: &Game, label: &str) -> Result<Snapshot, Error> {
 pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
     let snapshot = list(game).into_iter().find(|s| s.id == id).ok_or_else(|| Error::Package(format!("no snapshot {id}")))?;
     let mods = game.mods_dir();
+    put_back(game)?;
     let incoming = game.root.join(".mods.restoring");
     let outgoing = game.root.join(".mods.replaced");
     for dir in [&incoming, &outgoing] {
@@ -104,6 +106,16 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
         return Err(e.into());
     }
     let _ = std::fs::remove_dir_all(&outgoing);
+    Ok(())
+}
+
+/// A restore that failed between its two renames left the mods folder only
+/// in `.mods.replaced`: puts it back rather than delete it with the leftovers.
+fn put_back(game: &Game) -> Result<(), Error> {
+    let outgoing = game.root.join(".mods.replaced");
+    if !game.mods_dir().exists() && outgoing.is_dir() {
+        std::fs::rename(&outgoing, game.mods_dir())?;
+    }
     Ok(())
 }
 
@@ -190,5 +202,26 @@ mod tests {
         delete(&game, &second.id).unwrap();
         assert_eq!(list(&game).len(), 1);
         assert!(restore(&game, &second.id).is_err());
+    }
+
+    #[test]
+    fn a_failed_restore_loses_no_mods() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/x64e.rpf"), b"old").unwrap();
+        let game = Game::open(root).unwrap();
+        let first = create(&game, "old").unwrap();
+        std::fs::write(root.join("mods/x64e.rpf"), b"current").unwrap();
+        // A restore stopped between its two renames: the mods folder is only in `.mods.replaced`.
+        std::fs::rename(root.join("mods"), root.join(".mods.replaced")).unwrap();
+
+        // Saving first keeps it, and the restore does not delete it with the leftovers.
+        let saved = create(&game, "before").unwrap();
+        assert_eq!(std::fs::read(saved.mods().join("x64e.rpf")).unwrap(), b"current");
+        restore(&game, &first.id).unwrap();
+        assert_eq!(std::fs::read(root.join("mods/x64e.rpf")).unwrap(), b"old");
+        assert!(!root.join(".mods.replaced").exists());
     }
 }

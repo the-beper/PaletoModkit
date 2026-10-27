@@ -606,8 +606,17 @@ pub fn backups(prefix: &Prefix) -> Vec<Backup> {
     backups_in(&backups_dir(), prefix)
 }
 
+/// The file of a backup that names the prefix it is a copy of.
+const SOURCE: &str = "source.txt";
+
+/// How a backup names its prefix: the real path, links resolved.
+fn source_of(prefix: &Prefix) -> String {
+    std::fs::canonicalize(&prefix.path).unwrap_or_else(|_| prefix.path.clone()).to_string_lossy().into_owned()
+}
+
 fn backups_in(base: &Path, prefix: &Prefix) -> Vec<Backup> {
     let start = format!("{}-", prefix.app_id);
+    let source = source_of(prefix);
     let mut out: Vec<(u64, Backup)> = std::fs::read_dir(base)
         .into_iter()
         .flatten()
@@ -617,6 +626,13 @@ fn backups_in(base: &Path, prefix: &Prefix) -> Vec<Backup> {
             let secs = id.strip_prefix(&start)?.parse::<u64>().ok()?;
             let dir = e.path();
             dir.join("pfx").is_dir().then_some(())?;
+            // Another prefix of the same game (one chosen, Steam's own) has backups of its own.
+            // Backups made before they named their prefix belong to all.
+            if let Ok(from) = std::fs::read_to_string(dir.join(SOURCE))
+                && from != source
+            {
+                return None;
+            }
             let label = std::fs::read_to_string(dir.join("label.txt"))
                 .unwrap_or_default()
                 .trim()
@@ -646,6 +662,7 @@ fn backup_in(base: &Path, prefix: &Prefix, label: &str) -> Result<Backup, Error>
     let _ = std::fs::remove_dir_all(&partial);
     let result = crate::snapshots::copy_tree(&prefix.path, &partial.join("pfx")).and_then(|_| {
         std::fs::write(partial.join("label.txt"), label.trim())?;
+        std::fs::write(partial.join(SOURCE), source_of(prefix))?;
         std::fs::rename(&partial, &dir)?;
         Ok(())
     });
@@ -667,6 +684,13 @@ pub fn restore(prefix: &Prefix, id: &str) -> Result<(), Error> {
 }
 
 fn restore_in(base: &Path, prefix: &Prefix, id: &str) -> Result<(), Error> {
+    let incoming = prefix.compat.join(".pfx.restoring");
+    let outgoing = prefix.compat.join(".pfx.replaced");
+    // A restore that failed between its two renames left the prefix only in
+    // `.pfx.replaced`: put it back rather than delete it with the leftovers.
+    if !prefix.path.exists() && outgoing.is_dir() {
+        std::fs::rename(&outgoing, &prefix.path)?;
+    }
     let chosen = backups_in(base, prefix)
         .into_iter()
         .find(|b| b.id == id)
@@ -678,8 +702,6 @@ fn restore_in(base: &Path, prefix: &Prefix, id: &str) -> Result<(), Error> {
         return Err(Error::Prefix(OWN_PFX_NOTE.into()));
     }
     backup_in(base, prefix, "before restoring a backup")?;
-    let incoming = prefix.compat.join(".pfx.restoring");
-    let outgoing = prefix.compat.join(".pfx.replaced");
     for dir in [&incoming, &outgoing] {
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1327,12 +1349,10 @@ mod tests {
     /// directory asked for, in the "host" environment it makes up (B is set there).
     fn fake_spawn(dir: &Path) -> PathBuf {
         let path = dir.join("flatpak-spawn");
-        std::fs::write(
+        crate::write_script(
             &path,
             "#!/bin/sh\n[ \"$1\" = --host ] && shift\nwhile case \"$1\" in --directory=*) cd \"${1#--directory=}\"; true;; --*) true;; *) false;; esac; do shift; done\nB=fromhost; export B\nexec \"$@\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         path
     }
 
@@ -1605,7 +1625,11 @@ mod tests {
         use std::os::unix::fs::symlink;
         let write = |path: &Path, text: &str, mode: u32| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
+            if mode & 0o111 != 0 {
+                crate::write_script(path, text);
+            } else {
+                std::fs::write(path, text).unwrap();
+            }
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
         };
         let proton = dir.join("Proton X");
@@ -1830,6 +1854,42 @@ mod tests {
                 && !prefix.compat.join(".pfx.restoring").exists()
         );
         assert!(restore_in(&base, &prefix, "3240220-1").is_err());
+    }
+
+    #[test]
+    fn each_prefix_has_its_own_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (dir.path().join("one"), dir.path().join("two"));
+        let (one, two) = (fake(&one), fake(&two));
+        let base = dir.path().join("backups");
+        let mine = backup_in(&base, &one, "one").unwrap();
+        backup_in(&base, &two, "two").unwrap();
+        // A backup made before backups named their prefix shows for both.
+        let old = base.join("3240220-1");
+        std::fs::create_dir_all(old.join("pfx")).unwrap();
+        let labels = |p: &Prefix| backups_in(&base, p).into_iter().map(|b| b.label).collect::<Vec<_>>();
+        assert_eq!(labels(&one), ["one", ""]);
+        assert_eq!(labels(&two), ["two", ""]);
+        // The other prefix's backup cannot be restored here.
+        assert!(restore_in(&base, &two, &mine.id).is_err());
+    }
+
+    #[test]
+    fn a_failed_restore_loses_no_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = fake(dir.path());
+        let base = dir.path().join("backups");
+        let first = backup_in(&base, &prefix, "first").unwrap();
+        std::fs::write(prefix.path.join("user.reg"), "current").unwrap();
+        // A restore stopped between its two renames: the prefix is only in `.pfx.replaced`.
+        std::fs::rename(&prefix.path, prefix.compat.join(".pfx.replaced")).unwrap();
+
+        restore_in(&base, &prefix, &first.id).unwrap();
+        assert!(!prefix.path.join("user.reg").exists());
+        // What was in `.pfx.replaced` was put back first, so the backup before restoring has it.
+        let before = &backups_in(&base, &prefix)[0];
+        assert_eq!(before.label, "before restoring a backup");
+        assert_eq!(std::fs::read_to_string(before.dir.join("pfx/user.reg")).unwrap(), "current");
     }
 
     #[test]
