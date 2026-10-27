@@ -91,6 +91,18 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.5.0" date="2026-10-27">
+      <description>
+        <p>Model export as CodeWalker XML, more files in the preview, and a window that no longer blocks.</p>
+        <ul>
+          <li>Export as XML… in the model viewer (and paleto model) writes .ydr, .ydd, .yft and .ybn as the XML that Sollumz and CodeWalker import, with the textures as DDS files.</li>
+          <li>The preview shows collision (.ybn) and navigation meshes (.ynv) in 3D, and a read-only summary of clip dictionaries (.ycd).</li>
+          <li>Cube map textures have a Face menu; DDS export and import keep all six faces.</li>
+          <li>Folders, archives, the side tree and previews load without blocking the window; long reads can be cancelled. Files with no other preview open as hex.</li>
+          <li>Damaged files give an error instead of a crash or a hang, and edits of archives, OIV packages and the game folder are safer.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.0" date="2026-10-25">
       <description>
         <p>A Tools menu, one Crash detection window, a mod inventory and a Script Hook V updater.</p>
