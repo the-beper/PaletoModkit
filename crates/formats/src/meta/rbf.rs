@@ -25,6 +25,10 @@ pub(super) enum Node {
 
 const MAGIC: &[u8; 4] = b"RBF0";
 
+/// Deepest element nesting accepted. Real files nest a few levels; the tree
+/// is converted (and dropped) recursively, so it must stay well off the stack's end.
+const MAX_DEPTH: usize = 64;
+
 pub(super) fn parse(data: &[u8]) -> Result<Node, Error> {
     if !data.starts_with(MAGIC) {
         return Err(Error::Format("not RBF metadata".into()));
@@ -37,6 +41,9 @@ pub(super) fn parse(data: &[u8]) -> Result<Node, Error> {
         Ok(b)
     };
     let mut names: Vec<(String, u8)> = Vec::new();
+    // Every record copies its name: a long name reused by many short records
+    // would multiply the file's size.
+    let mut name_bytes = data.len().saturating_mul(8).saturating_add(1 << 20);
     // Open elements, each with the attributes still to come.
     let mut stack: Vec<(String, Vec<Node>, Vec<Node>, u16)> = Vec::new();
     loop {
@@ -78,9 +85,13 @@ pub(super) fn parse(data: &[u8]) -> Result<Node, Error> {
                     names.push((String::from_utf8_lossy(take(len)?).into_owned(), ty));
                 }
                 let name = names.get(index as usize).ok_or_else(bad)?.0.clone();
+                name_bytes = name_bytes.checked_sub(name.len()).ok_or_else(|| Error::Format("RBF metadata repeats its names too much".into()))?;
                 let f32_at = |b: &[u8]| f32::from_le_bytes(b.try_into().unwrap());
                 let node = match ty {
                     0x00 => {
+                        if stack.len() >= MAX_DEPTH {
+                            return Err(Error::Format("RBF metadata nests too deeply".into()));
+                        }
                         take(4)?;
                         let attributes = u16::from_le_bytes(take(2)?.try_into().unwrap());
                         stack.push((name, Vec::new(), Vec::new(), attributes));
@@ -122,7 +133,7 @@ fn record(name: &str, ty: u8, out: &mut Vec<u8>, names: &mut Vec<String>) -> Res
                 return Err(Error::Unsupported("RBF metadata with more than 253 names".into()));
             }
             out.extend_from_slice(&[names.len() as u8, ty]);
-            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(name.len(), "bytes in a name")?);
             out.extend_from_slice(name.as_bytes());
             names.push(name.to_string());
         }
@@ -130,12 +141,17 @@ fn record(name: &str, ty: u8, out: &mut Vec<u8>, names: &mut Vec<String>) -> Res
     Ok(())
 }
 
+/// A length as a 16-bit field, refused when it does not fit.
+fn len16(len: usize, what: &str) -> Result<[u8; 2], Error> {
+    u16::try_from(len).map(u16::to_le_bytes).map_err(|_| Error::Edit(format!("RBF: too many {what} ({len}, at most 65535)")))
+}
+
 fn write_node(node: &Node, out: &mut Vec<u8>, names: &mut Vec<String>) -> Result<(), Error> {
     match node {
         Node::Element { name, attributes, children } => {
             record(name, 0x00, out, names)?;
             out.extend_from_slice(&[0; 4]);
-            out.extend_from_slice(&(attributes.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(attributes.len(), "attributes")?);
             for n in attributes.iter().chain(children) {
                 write_node(n, out, names)?;
             }
@@ -158,12 +174,13 @@ fn write_node(node: &Node, out: &mut Vec<u8>, names: &mut Vec<String>) -> Result
         }
         Node::Str { name, value } => {
             record(name, 0x60, out, names)?;
-            out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(value.len(), "bytes in a string")?);
             out.extend_from_slice(value.as_bytes());
         }
         Node::Bytes(bytes) => {
             out.extend_from_slice(&[0xFD, 0xFF]);
-            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            let len = u32::try_from(bytes.len()).map_err(|_| Error::Edit("RBF: text longer than 4 GB".into()))?;
+            out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(bytes);
         }
     }
@@ -274,11 +291,14 @@ fn value_node(name: &str, text: &str) -> Node {
 
 pub(super) fn from_xml(text: &str) -> Result<Node, Error> {
     let doc = roxmltree::Document::parse(text).map_err(|e| Error::Edit(format!("XML: {e}")))?;
-    read_xml(doc.root_element())
+    read_xml(doc.root_element(), 1)
 }
 
-fn read_xml(element: roxmltree::Node) -> Result<Node, Error> {
+fn read_xml(element: roxmltree::Node, depth: usize) -> Result<Node, Error> {
     let name = element.tag_name().name().to_string();
+    if depth > MAX_DEPTH {
+        return Err(Error::Edit(format!("<{name}>: elements nest more than {MAX_DEPTH} deep")));
+    }
     let attrs: Vec<_> = element.attributes().collect();
     let elements: Vec<_> = element.children().filter(|n| n.is_element()).collect();
     if let Some(value) = element.attribute("value").filter(|v| !v.is_empty()) {
@@ -293,7 +313,7 @@ fn read_xml(element: roxmltree::Node) -> Result<Node, Error> {
     let mut children = Vec::new();
     for child in element.children() {
         if child.is_element() {
-            children.push(read_xml(child)?);
+            children.push(read_xml(child, depth + 1)?);
         } else if let Some(text) = child.text().filter(|t| !(!elements.is_empty() && t.trim().is_empty())) {
             let numbers = || text.split_whitespace();
             let bytes = match content {

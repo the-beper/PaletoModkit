@@ -1,6 +1,7 @@
 //! Resource metadata: an RSC7 resource (version 2) holding a `Meta` root
 //! with structure infos, enum infos and data blocks (CodeWalker's `Meta.cs`).
 
+use std::cell::Cell;
 use std::io::Write;
 
 use flate2::Compression;
@@ -28,10 +29,23 @@ pub(super) struct Header {
 
 pub(super) fn parse(data: &[u8]) -> Result<(Header, Schema, Blocks, u32), Error> {
     let res = Resource::parse(data)?;
-    let root = res.block(SYS, ROOT_LEN)?.to_vec();
-    let list = |ptr: u64, count: usize, len: usize| -> Result<Vec<u8>, Error> {
-        if count == 0 { Ok(Vec::new()) } else { Ok(res.block(ptr, count * len)?.to_vec()) }
+    // Infos and blocks may all point at the same page: memory follows the
+    // resource's size, not the counts.
+    let limit = (res.system.len() + res.graphics.len()).saturating_mul(4);
+    let copied = Cell::new(0usize);
+    let copy = |ptr: u64, len: usize| -> Result<Vec<u8>, Error> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let block = res.block(ptr, len)?;
+        copied.set(copied.get() + len);
+        if copied.get() > limit {
+            return Err(Error::Format("metadata blocks overlap too much".into()));
+        }
+        Ok(block.to_vec())
     };
+    let root = copy(SYS, ROOT_LEN)?;
+    let list = |ptr: u64, count: usize, len: usize| copy(ptr, count * len);
 
     let mut schema = Schema::default();
     let mut structs = Vec::new();
@@ -55,7 +69,7 @@ pub(super) fn parse(data: &[u8]) -> Result<(Header, Schema, Blocks, u32), Error>
     let infos = list(u64_at(&root, 0x30), u16_at(&root, 0x4C) as usize, 16)?;
     for info in infos.as_chunks::<16>().0 {
         let len = u32_at(info, 4) as usize;
-        let data = if len == 0 { Vec::new() } else { res.block(u64_at(info, 8), len)?.to_vec() };
+        let data = copy(u64_at(info, 8), len)?;
         blocks.push((u32_at(info, 0), data));
     }
     let name_ptr = u64_at(&root, 0x38);

@@ -3,6 +3,8 @@
 //! strings as text, array items as `<Item>`, pointed-to structures with a
 //! `type` attribute.
 
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use super::{Kind, Schema, Value};
@@ -247,13 +249,25 @@ pub(super) fn read(schema: &Schema, names: &Names, root_type: u32, text: &str, m
     if names.hash(root.tag_name().name()) != root_type {
         return Err(Error::Edit(format!("the root element must be <{}>", names.name(root_type))));
     }
-    XmlReader { schema, names, map_types }.read_struct(root, root_type)
+    // Written files hold fewer values than bytes; missing fields filled with
+    // defaults can make more, but not without end.
+    let budget = Cell::new(text.len().saturating_mul(4).saturating_add(1 << 20));
+    XmlReader { schema, names, map_types, budget, map_entries: RefCell::default() }.read_struct(root, root_type, 0)
 }
+
+/// Deepest element nesting read: twice the reader's nesting of structures,
+/// as arrays and maps put an `<Item>` between levels.
+const MAX_DEPTH: usize = 128;
 
 struct XmlReader<'a> {
     schema: &'a Schema,
     names: &'a Names,
     map_types: &'a [u32],
+    /// Values still allowed.
+    budget: Cell<usize>,
+    /// The map entry structure found for each item type, so the schema is
+    /// searched once per type, not once per item.
+    map_entries: RefCell<HashMap<Option<u32>, Option<u32>>>,
 }
 
 type Node<'a, 'i> = roxmltree::Node<'a, 'i>;
@@ -273,20 +287,37 @@ fn at(node: Node) -> String {
 }
 
 impl XmlReader<'_> {
-    fn read_struct(&self, node: Node, ty: u32) -> Result<Value, Error> {
+    fn spend(&self) -> Result<(), Error> {
+        let left = self.budget.get().checked_sub(1).ok_or_else(|| Error::Edit("the XML makes too many values".into()))?;
+        self.budget.set(left);
+        Ok(())
+    }
+
+    /// Counts a value read from `node`, `depth` elements down.
+    fn enter(&self, node: Node, depth: usize) -> Result<(), Error> {
+        if depth > MAX_DEPTH {
+            return Err(Error::Edit(format!("{}: elements nest more than {MAX_DEPTH} deep", at(node))));
+        }
+        self.spend()
+    }
+
+    fn read_struct(&self, node: Node, ty: u32, depth: usize) -> Result<Value, Error> {
+        self.enter(node, depth)?;
         let info = self.schema.structs.get(&ty).ok_or_else(|| Error::Edit(format!("unknown structure {}", self.names.name(ty))))?;
-        let children: Vec<Node> = elements(node).collect();
-        for child in &children {
+        // By name, so many children or fields take no quadratic time.
+        let fields: HashSet<u32> = info.fields.iter().map(|f| f.name).collect();
+        let mut children = HashMap::new();
+        for child in elements(node) {
             let hash = self.names.hash(child.tag_name().name());
-            if !info.fields.iter().any(|f| f.name == hash) {
-                return Err(Error::Edit(format!("{}: no such field in {}", at(*child), self.names.name(ty))));
+            if !fields.contains(&hash) {
+                return Err(Error::Edit(format!("{}: no such field in {}", at(child), self.names.name(ty))));
             }
+            children.entry(hash).or_insert(child);
         }
         let mut values = Vec::with_capacity(info.fields.len());
         for field in &info.fields {
-            let child = children.iter().find(|c| self.names.hash(c.tag_name().name()) == field.name).copied();
-            values.push(match child {
-                Some(child) => self.read_field(child, &field.kind)?,
+            values.push(match children.get(&field.name) {
+                Some(&child) => self.read_field(child, &field.kind, depth + 1)?,
                 None => self.default(&field.kind)?,
             });
         }
@@ -294,6 +325,7 @@ impl XmlReader<'_> {
     }
 
     fn default(&self, kind: &Kind) -> Result<Value, Error> {
+        self.spend()?;
         Ok(match kind {
             Kind::Bool => Value::Bool(false),
             Kind::F32 => Value::Float(0),
@@ -312,16 +344,17 @@ impl XmlReader<'_> {
         })
     }
 
-    fn read_field(&self, node: Node, kind: &Kind) -> Result<Value, Error> {
+    fn read_field(&self, node: Node, kind: &Kind, depth: usize) -> Result<Value, Error> {
+        self.enter(node, depth)?;
         let bad = |what: &str| Error::Edit(format!("{}: {what}", at(node)));
         Ok(match kind {
-            Kind::Struct(ty) => self.read_struct(node, *ty)?,
+            Kind::Struct(ty) => self.read_struct(node, *ty, depth)?,
             Kind::StructPtr => match node.attribute("type") {
                 None if elements(node).next().is_none() => Value::Ptr(None),
                 None => return Err(bad("a type=\"...\" attribute is needed")),
                 Some(t) => {
                     let ty = self.names.hash(t);
-                    Value::Ptr(Some((ty, Box::new(self.read_struct(node, ty)?))))
+                    Value::Ptr(Some((ty, Box::new(self.read_struct(node, ty, depth)?))))
                 }
             },
             Kind::Array { elem, .. } if is_number(elem) => {
@@ -335,11 +368,11 @@ impl XmlReader<'_> {
                     if child.tag_name().name() != "Item" {
                         return Err(Error::Edit(format!("{}: expected <Item>", at(child))));
                     }
-                    items.push(self.read_field(child, elem)?);
+                    items.push(self.read_field(child, elem, depth + 1)?);
                 }
                 Value::Array(items)
             }
-            Kind::Map => self.read_map(node)?,
+            Kind::Map => self.read_map(node, depth)?,
             Kind::Bytes => {
                 let text = text_of(node);
                 let bytes = text.split_whitespace().map(|b| u8::from_str_radix(b, 16)).collect::<Result<_, _>>();
@@ -370,7 +403,7 @@ impl XmlReader<'_> {
         })
     }
 
-    fn read_map(&self, node: Node) -> Result<Value, Error> {
+    fn read_map(&self, node: Node, depth: usize) -> Result<Value, Error> {
         let mut entries = Vec::new();
         let mut entry_type = 0;
         for child in elements(node) {
@@ -383,10 +416,10 @@ impl XmlReader<'_> {
             let mut values: Vec<Value> = info.fields.iter().map(|f| self.default(&f.kind)).collect::<Result<_, _>>()?;
             values[k] = self.scalar(child, &info.fields[k].kind, key)?;
             values[i] = match &info.fields[i].kind {
-                Kind::Struct(t) => self.read_struct(child, *t)?,
+                Kind::Struct(t) => self.read_struct(child, *t, depth + 1)?,
                 Kind::StructPtr => {
                     let t = self.names.hash(child.attribute("type").unwrap_or(""));
-                    Value::Ptr(Some((t, Box::new(self.read_struct(child, t)?))))
+                    Value::Ptr(Some((t, Box::new(self.read_struct(child, t, depth + 1)?))))
                 }
                 kind => self.scalar(child, kind, &text_of(child))?,
             };
@@ -397,6 +430,20 @@ impl XmlReader<'_> {
 
     fn map_entry_type(&self, item: Node) -> Result<u32, Error> {
         let item_type = item.attribute("type").map(|t| self.names.hash(t));
+        let cached = self.map_entries.borrow().get(&item_type).copied();
+        let found = match cached {
+            Some(found) => found,
+            None => {
+                let found = self.find_map_entry(item_type);
+                self.map_entries.borrow_mut().insert(item_type, found);
+                found
+            }
+        };
+        found.ok_or_else(|| Error::Edit(format!("{}: no map entry structure fits this item", at(item))))
+    }
+
+    /// The structure of map entries whose items have this type.
+    fn find_map_entry(&self, item_type: Option<u32>) -> Option<u32> {
         let (key, item_name) = (crate::hash::joaat(b"Key"), crate::hash::joaat(b"Item"));
         let fits = |info: &super::StructInfo| {
             let field = |h: u32| info.fields.iter().find(|f| f.name == h);
@@ -410,13 +457,14 @@ impl XmlReader<'_> {
         };
         let mut found: Vec<u32> = self.schema.structs.iter().filter(|(_, s)| fits(s)).map(|(t, _)| *t).collect();
         found.sort_by_key(|t| (!self.map_types.contains(t), *t));
-        found.first().copied().ok_or_else(|| Error::Edit(format!("{}: no map entry structure fits this item", at(item))))
+        found.first().copied()
     }
 
     fn scalar(&self, node: Node, kind: &Kind, text: &str) -> Result<Value, Error> {
+        self.spend()?;
         let bad = || Error::Edit(format!("{}: invalid value \"{text}\"", at(node)));
         let text = text.trim();
-        Ok(match kind {
+        let value = match kind {
             Kind::Bool => Value::Bool(match text {
                 "true" | "True" | "1" => true,
                 "false" | "False" | "0" | "" => false,
@@ -446,7 +494,16 @@ impl XmlReader<'_> {
                 Value::Int(bits as i64)
             }
             _ => Value::Int(parse_int(text).ok_or_else(bad)?),
-        })
+        };
+        // Numbers must fit their field (signed or not): a U8 of 300 would be written as 44.
+        let size = self.schema.size(kind);
+        if let Value::Int(v) = value
+            && (1..8).contains(&size)
+            && !(-(1i64 << (8 * size - 1))..(1i64 << (8 * size))).contains(&v)
+        {
+            return Err(Error::Edit(format!("{}: {text} does not fit in {size} bytes", at(node))));
+        }
+        Ok(value)
     }
 }
 

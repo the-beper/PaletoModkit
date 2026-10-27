@@ -62,10 +62,16 @@ pub(super) fn parse(data: &[u8], names: &mut Names) -> Result<(Header, Schema, B
     }
     let pmap_flags = be16(pmap, 14)?;
     let mut blocks = Vec::new();
+    // Blocks may overlap: memory follows the data, not the number of blocks.
+    let mut copied = 0usize;
     for i in 0..count as usize {
         let e = 16 + i * 16;
         let (ty, offset, len) = (be32(pmap, e)?, be32(pmap, e + 4)? as usize, be32(pmap, e + 12)? as usize);
         let bytes = psin.get(offset..offset + len).ok_or_else(|| Error::Format("PSO: block out of range".into()))?;
+        copied += len;
+        if copied > psin.len().saturating_mul(4) {
+            return Err(Error::Format("PSO: blocks overlap too much".into()));
+        }
         blocks.push((ty, bytes.to_vec()));
     }
 

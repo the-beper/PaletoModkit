@@ -82,7 +82,12 @@ pub(crate) struct Schema {
     pub structs: HashMap<u32, StructInfo>,
     /// Enum values: (name hash, value).
     pub enums: HashMap<u32, Vec<(u32, i64)>>,
+    /// The alignment of each structure, worked out once by [`Schema::check`].
+    aligns: HashMap<u32, usize>,
 }
+
+/// Deepest nesting of structures by value: the reader follows no deeper.
+const MAX_NESTING: u32 = 64;
 
 impl Schema {
     fn info(&self, ty: u32, names: &Names) -> Result<&StructInfo, Error> {
@@ -122,7 +127,50 @@ impl Schema {
     }
 
     fn struct_align(&self, ty: u32) -> usize {
-        self.structs.get(&ty).map_or(1, |s| s.fields.iter().map(|f| self.align(&f.kind)).max().unwrap_or(1))
+        self.aligns.get(&ty).copied().unwrap_or(1)
+    }
+
+    /// Refuses structures that contain themselves by value (directly or in
+    /// inline arrays) or nest too deep: writing and filling in defaults
+    /// recurse through them. Also works out each structure's alignment once,
+    /// as shared structures would make it exponential.
+    fn check(&mut self, names: &Names) -> Result<(), Error> {
+        let mut done = HashMap::new();
+        for &ty in self.structs.keys() {
+            self.nesting(ty, 0, &mut done, names)?;
+        }
+        self.aligns = done.into_iter().map(|(ty, (align, _))| (ty, align)).collect();
+        Ok(())
+    }
+
+    /// (alignment, levels of structures by value) of a structure.
+    fn nesting(&self, ty: u32, depth: u32, done: &mut HashMap<u32, (usize, u32)>, names: &Names) -> Result<(usize, u32), Error> {
+        if let Some(&known) = done.get(&ty) {
+            return Ok(known);
+        }
+        let Some(info) = self.structs.get(&ty) else { return Ok((1, 0)) };
+        let too_deep = || Error::Format(format!("structure {} contains itself or nests too deeply", names.name(ty)));
+        // A structure that contains itself is met again before it is done, deeper each time.
+        if depth > MAX_NESTING {
+            return Err(too_deep());
+        }
+        let (mut align, mut levels): (usize, u32) = (1, 1);
+        for field in &info.fields {
+            let mut kind = &field.kind;
+            while let Kind::Array { inline: Some(_), elem, .. } = kind {
+                kind = &**elem;
+            }
+            let (a, l) = match kind {
+                Kind::Struct(t) => self.nesting(*t, depth + 1, done, names)?,
+                other => (self.align(other), 0),
+            };
+            (align, levels) = (align.max(a), levels.max(l + 1));
+        }
+        if levels > MAX_NESTING {
+            return Err(too_deep());
+        }
+        done.insert(ty, (align, levels));
+        Ok((align, levels))
     }
 }
 
@@ -183,7 +231,7 @@ impl Blocks {
         if size == 8 && self.big_endian {
             return Ok(self.uint(data, at, 4)? | (self.uint(data, at + 4, 4)? << 32));
         }
-        let b = data.get(at..at + size).ok_or_else(|| Error::Format("data is truncated".into()))?;
+        let b = data.get(at..at.saturating_add(size)).ok_or_else(|| Error::Format("data is truncated".into()))?;
         let mut v = 0u64;
         for i in 0..size {
             let byte = if self.big_endian { b[i] } else { b[size - 1 - i] };
@@ -198,8 +246,20 @@ fn split_ptr(ptr: u64) -> (u32, usize) {
     ((ptr & 0xFFF) as u32, ((ptr >> 12) & 0xFFFFF) as usize)
 }
 
-fn make_ptr(id: u32, offset: usize) -> u64 {
-    id as u64 | ((offset as u64) << 12)
+fn make_ptr(id: u32, offset: usize) -> Result<u64, Error> {
+    // 12 bits of block id: more blocks would spill into the offset.
+    if id > 0xFFF {
+        return Err(Error::Edit("too many data blocks (a file holds at most 4095)".into()));
+    }
+    Ok(id as u64 | ((offset as u64) << 12))
+}
+
+/// A count for a field of `bytes` bytes, refused when it does not fit.
+fn count(n: usize, bytes: usize) -> Result<u64, Error> {
+    if (n as u64) >> (8 * bytes) != 0 {
+        return Err(Error::Edit(format!("{n} is too many for a {}-bit count", 8 * bytes)));
+    }
+    Ok(n as u64)
 }
 
 struct Reader<'a> {
@@ -207,13 +267,22 @@ struct Reader<'a> {
     blocks: &'a Blocks,
     names: &'a Names,
     hints: Hints,
+    /// Values and bytes still allowed: pointers that share their target can
+    /// make a small file read the same data over and over.
+    budget: usize,
 }
 
 impl Reader<'_> {
+    fn spend(&mut self, n: usize) -> Result<(), Error> {
+        self.budget = self.budget.checked_sub(n).ok_or_else(|| Error::Format("the same data is referenced too many times".into()))?;
+        Ok(())
+    }
+
     fn read_struct(&mut self, ty: u32, id: u32, offset: usize, depth: u32) -> Result<Value, Error> {
-        if depth > 64 {
+        if depth > MAX_NESTING {
             return Err(Error::Format("structures nest too deeply".into()));
         }
+        self.spend(1)?;
         let info = self.schema.info(ty, self.names)?;
         let len = self.blocks.get(id)?.1.len();
         // As in CodeWalker: some PSO pointers keep the offset shifted left by 8.
@@ -234,6 +303,7 @@ impl Reader<'_> {
     }
 
     fn read(&mut self, kind: &Kind, id: u32, at: usize, depth: u32) -> Result<Value, Error> {
+        self.spend(1)?;
         let blocks = self.blocks;
         let data = &blocks.get(id)?.1;
         let uint = |at: usize, size: usize| blocks.uint(data, at, size);
@@ -263,6 +333,7 @@ impl Reader<'_> {
             Kind::Flags { size, .. } => Value::Int(uint(at, *size as usize)? as i64),
             Kind::Chars(n) => {
                 let b = data.get(at..at + n).ok_or_else(|| Error::Format("data is truncated".into()))?;
+                self.spend(*n)?;
                 Value::Str(non_empty(&b[..b.iter().position(|&c| c == 0).unwrap_or(*n)]))
             }
             Kind::CharPtr => {
@@ -275,6 +346,7 @@ impl Reader<'_> {
                 self.hints.blocks.entry("chars".into()).or_insert(*ty);
                 let b = block.get(off..(off + count).min(block.len())).unwrap_or_default();
                 self.hints.nul_in_count.get_or_insert(b.last() == Some(&0));
+                self.spend(b.len())?;
                 Value::Str(non_empty(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]))
             }
             Kind::StrPtr => {
@@ -285,7 +357,9 @@ impl Reader<'_> {
                 let (ty, block) = blocks.get(bid)?;
                 self.hints.blocks.entry("string".into()).or_insert(*ty);
                 let b = block.get(off..).unwrap_or_default();
-                Value::Str(non_empty(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]))
+                let b = &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())];
+                self.spend(b.len())?;
+                Value::Str(non_empty(b))
             }
             Kind::Struct(ty) => self.read_struct(*ty, id, at, depth + 1)?,
             Kind::StructPtr => {
@@ -303,7 +377,7 @@ impl Reader<'_> {
                 if stride == 0 && *count > blocks.get(id)?.1.len() {
                     return Err(Error::Format("array longer than its data".into()));
                 }
-                let items = (0..*count).map(|i| self.read(elem, id, at + i * stride, depth + 1)).collect::<Result<_, _>>()?;
+                let items = (0..*count).map(|i| self.read(elem, id, at.saturating_add(i.saturating_mul(stride)), depth + 1)).collect::<Result<_, _>>()?;
                 Value::Array(items)
             }
             Kind::Array { elem, inline: None, wide } => {
@@ -342,6 +416,7 @@ impl Reader<'_> {
                 }
                 let (ty, block) = blocks.get(bid)?;
                 self.hints.blocks.entry("bytes".into()).or_insert(*ty);
+                self.spend(block.len())?;
                 Value::Bytes(block.clone())
             }
             Kind::Map => return Err(Error::Format("map outside a structure".into())),
@@ -396,6 +471,9 @@ struct Writer<'a> {
     /// Block types to use when the original file had no such block.
     default_block: fn(&str) -> u32,
     blocks: Vec<(u32, Vec<u8>)>,
+    /// Bytes the blocks may still grow by: a hostile schema could make a
+    /// small XML ask for gigabytes.
+    room: usize,
 }
 
 impl Writer<'_> {
@@ -414,6 +492,8 @@ impl Writer<'_> {
         };
         let data = &mut self.blocks[index].1;
         let offset = data.len().next_multiple_of(align);
+        let grown = offset + len - data.len();
+        self.room = self.room.checked_sub(grown).ok_or_else(|| Error::Edit("the rebuilt file would be far larger than the original".into()))?;
         data.resize(offset + len, 0);
         Ok((index as u32 + 1, offset))
     }
@@ -422,21 +502,24 @@ impl Writer<'_> {
         self.hints.blocks.get(key).copied().unwrap_or_else(|| (self.default_block)(key))
     }
 
-    fn put_uint(&mut self, id: u32, at: usize, size: usize, value: u64) {
+    fn put_uint(&mut self, id: u32, at: usize, size: usize, value: u64) -> Result<(), Error> {
         if size == 8 && self.big_endian {
-            self.put_uint(id, at, 4, value & 0xFFFF_FFFF);
+            self.put_uint(id, at, 4, value & 0xFFFF_FFFF)?;
             return self.put_uint(id, at + 4, 4, value >> 32);
         }
-        let data = &mut self.blocks[id as usize - 1].1;
+        let mut bytes = [0u8; 8];
         for i in 0..size {
-            let byte = (value >> (8 * i)) as u8;
-            let pos = if self.big_endian { at + size - 1 - i } else { at + i };
-            data[pos] = byte;
+            let pos = if self.big_endian { size - 1 - i } else { i };
+            bytes[pos] = (value >> (8 * i)) as u8;
         }
+        self.put_bytes(id, at, &bytes[..size])
     }
 
-    fn put_bytes(&mut self, id: u32, at: usize, bytes: &[u8]) {
-        self.blocks[id as usize - 1].1[at..at + bytes.len()].copy_from_slice(bytes);
+    fn put_bytes(&mut self, id: u32, at: usize, bytes: &[u8]) -> Result<(), Error> {
+        // A damaged schema can place a field past the end of its structure.
+        let room = self.blocks[id as usize - 1].1.get_mut(at..at + bytes.len()).ok_or_else(|| Error::Format("a field lies outside its structure".into()))?;
+        room.copy_from_slice(bytes);
+        Ok(())
     }
 
     fn write_struct(&mut self, ty: u32, value: &Value, id: u32, at: usize) -> Result<(), Error> {
@@ -454,41 +537,41 @@ impl Writer<'_> {
 
     fn write(&mut self, kind: &Kind, value: &Value, id: u32, at: usize) -> Result<(), Error> {
         match (kind, value) {
-            (Kind::Bool, Value::Bool(b)) => self.put_uint(id, at, 1, *b as u64),
-            (Kind::I8 | Kind::U8, Value::Int(v)) => self.put_uint(id, at, 1, *v as u64),
-            (Kind::I16 | Kind::U16 | Kind::Half, Value::Int(v)) => self.put_uint(id, at, 2, *v as u64),
-            (Kind::I32 | Kind::U32 | Kind::HexU32, Value::Int(v)) => self.put_uint(id, at, 4, *v as u64),
-            (Kind::U64, Value::Int(v)) => self.put_uint(id, at, 8, *v as u64),
-            (Kind::Enum { size, .. } | Kind::Flags { size, .. }, Value::Int(v)) => self.put_uint(id, at, *size as usize, *v as u64),
-            (Kind::F32, Value::Float(bits)) => self.put_uint(id, at, 4, *bits as u64),
+            (Kind::Bool, Value::Bool(b)) => self.put_uint(id, at, 1, *b as u64)?,
+            (Kind::I8 | Kind::U8, Value::Int(v)) => self.put_uint(id, at, 1, *v as u64)?,
+            (Kind::I16 | Kind::U16 | Kind::Half, Value::Int(v)) => self.put_uint(id, at, 2, *v as u64)?,
+            (Kind::I32 | Kind::U32 | Kind::HexU32, Value::Int(v)) => self.put_uint(id, at, 4, *v as u64)?,
+            (Kind::U64, Value::Int(v)) => self.put_uint(id, at, 8, *v as u64)?,
+            (Kind::Enum { size, .. } | Kind::Flags { size, .. }, Value::Int(v)) => self.put_uint(id, at, *size as usize, *v as u64)?,
+            (Kind::F32, Value::Float(bits)) => self.put_uint(id, at, 4, *bits as u64)?,
             (Kind::Vec2 | Kind::Vec3 | Kind::Vec3Padded | Kind::Vec4, Value::Vec(v)) => {
                 for (i, c) in v.iter().take(vec_len(kind)).enumerate() {
-                    self.put_uint(id, at + i * 4, 4, *c as u64);
+                    self.put_uint(id, at + i * 4, 4, *c as u64)?;
                 }
             }
-            (Kind::Hash, Value::Hash(h)) => self.put_uint(id, at, 4, *h as u64),
+            (Kind::Hash, Value::Hash(h)) => self.put_uint(id, at, 4, *h as u64)?,
             (Kind::Chars(n), Value::Str(s)) => {
                 let s = s.as_deref().unwrap_or("");
                 if s.len() >= *n {
-                    return Err(Error::Edit(format!("\"{s}\" is longer than {} characters", n - 1)));
+                    return Err(Error::Edit(format!("\"{s}\" is longer than {} characters", n.saturating_sub(1))));
                 }
-                self.put_bytes(id, at, s.as_bytes());
+                self.put_bytes(id, at, s.as_bytes())?;
             }
             (Kind::CharPtr, Value::Str(s)) => {
                 if let Some(s) = s {
+                    let count = count(s.len() + self.hints.nul_in_count.unwrap_or(false) as usize, 2)?;
                     let (bid, off) = self.alloc(self.block_type("chars"), s.len() + 1, 1)?;
-                    self.put_bytes(bid, off, s.as_bytes());
-                    let count = s.len() as u64 + self.hints.nul_in_count.unwrap_or(false) as u64;
-                    self.put_uint(id, at, 8, make_ptr(bid, off));
-                    self.put_uint(id, at + 8, 2, count);
-                    self.put_uint(id, at + 10, 2, count);
+                    self.put_bytes(bid, off, s.as_bytes())?;
+                    self.put_uint(id, at, 8, make_ptr(bid, off)?)?;
+                    self.put_uint(id, at + 8, 2, count)?;
+                    self.put_uint(id, at + 10, 2, count)?;
                 }
             }
             (Kind::StrPtr, Value::Str(s)) => {
                 if let Some(s) = s {
                     let (bid, off) = self.alloc(self.block_type("string"), s.len() + 1, 1)?;
-                    self.put_bytes(bid, off, s.as_bytes());
-                    self.put_uint(id, at, 8, make_ptr(bid, off));
+                    self.put_bytes(bid, off, s.as_bytes())?;
+                    self.put_uint(id, at, 8, make_ptr(bid, off)?)?;
                 }
             }
             (Kind::Struct(ty), v @ Value::Struct(_)) => self.write_struct(*ty, v, id, at)?,
@@ -497,7 +580,7 @@ impl Writer<'_> {
                     let size = self.schema.info(*ty, self.names)?.size.max(1);
                     let (bid, off) = self.alloc(*ty, size, self.schema.struct_align(*ty))?;
                     self.write_struct(*ty, v, bid, off)?;
-                    self.put_uint(id, at, 8, make_ptr(bid, off));
+                    self.put_uint(id, at, 8, make_ptr(bid, off)?)?;
                 }
             }
             (Kind::Array { elem, inline: Some(count), .. }, Value::Array(items)) => {
@@ -506,11 +589,13 @@ impl Writer<'_> {
                 }
                 let stride = self.schema.size(elem);
                 for (i, item) in items.iter().enumerate() {
-                    self.write(elem, item, id, at + i * stride)?;
+                    self.write(elem, item, id, at.saturating_add(i.saturating_mul(stride)))?;
                 }
             }
             (Kind::Array { elem, inline: None, wide }, Value::Array(items)) => {
                 if !items.is_empty() {
+                    let n = if *wide { 4 } else { 2 };
+                    let count = count(items.len(), n)?;
                     let stride = self.schema.size(elem).max(1);
                     let ty = match &**elem {
                         Kind::Struct(ty) => *ty,
@@ -520,10 +605,9 @@ impl Writer<'_> {
                     for (i, item) in items.iter().enumerate() {
                         self.write(elem, item, bid, off + i * stride)?;
                     }
-                    self.put_uint(id, at, 8, make_ptr(bid, off));
-                    let n = if *wide { 4 } else { 2 };
-                    self.put_uint(id, at + 8, n, items.len() as u64);
-                    self.put_uint(id, at + 8 + n, n, items.len() as u64);
+                    self.put_uint(id, at, 8, make_ptr(bid, off)?)?;
+                    self.put_uint(id, at + 8, n, count)?;
+                    self.put_uint(id, at + 8 + n, n, count)?;
                 }
             }
             (Kind::Bytes, Value::Bytes(bytes)) => {
@@ -531,7 +615,7 @@ impl Writer<'_> {
                     // A block of its own.
                     self.blocks.push((self.block_type("bytes"), bytes.clone()));
                     let bid = self.blocks.len() as u32;
-                    self.put_uint(id, at, 8, make_ptr(bid, 0));
+                    self.put_uint(id, at, 8, make_ptr(bid, 0)?)?;
                 }
             }
             _ => return Err(mismatch(&format!("{kind:?}"))),
@@ -543,18 +627,19 @@ impl Writer<'_> {
         let Value::Map(ty, entries) = value else { return Err(mismatch("map")) };
         let head = self.hints.map_heads.get(&(owner, field)).map(|h| h.0);
         let head = head.unwrap_or(if self.big_endian { [1, 0, 0, 0, 0, 0, 0, 0] } else { [0, 0, 0, 1, 0, 0, 0, 0] });
-        self.put_bytes(id, at, &head);
+        self.put_bytes(id, at, &head)?;
         if entries.is_empty() {
             return Ok(());
         }
+        let count = count(entries.len(), 2)?;
         let size = self.schema.info(*ty, self.names)?.size.max(1);
         let (bid, off) = self.alloc(*ty, size * entries.len(), self.schema.struct_align(*ty))?;
         for (i, entry) in entries.iter().enumerate() {
             self.write_struct(*ty, entry, bid, off + i * size)?;
         }
-        self.put_uint(id, at + 8, 8, make_ptr(bid, off));
-        self.put_uint(id, at + 16, 2, entries.len() as u64);
-        self.put_uint(id, at + 18, 2, entries.len() as u64);
+        self.put_uint(id, at + 8, 8, make_ptr(bid, off)?)?;
+        self.put_uint(id, at + 16, 2, count)?;
+        self.put_uint(id, at + 18, 2, count)?;
         Ok(())
     }
 }
@@ -588,7 +673,7 @@ impl MetaFile {
 
     pub fn parse(data: &[u8]) -> Result<Self, Error> {
         let mut names = Names::new();
-        let (container, schema, blocks, root_id) = if data.starts_with(b"PSIN") {
+        let (container, mut schema, blocks, root_id) = if data.starts_with(b"PSIN") {
             let (header, schema, blocks, root) = pso::parse(data, &mut names)?;
             (Container::Pso(header), schema, blocks, root)
         } else if data.starts_with(b"RSC7") && Self::is_meta(data) {
@@ -600,9 +685,12 @@ impl MetaFile {
         } else {
             return Err(Error::Format("not a metadata file".into()));
         };
+        schema.check(&names)?;
         let root_type = blocks.get(root_id)?.0;
-        let data_len = blocks.list.iter().map(|(_, d)| d.len()).sum();
-        let mut reader = Reader { schema: &schema, blocks: &blocks, names: &names, hints: Hints::default() };
+        let data_len: usize = blocks.list.iter().map(|(_, d)| d.len()).sum();
+        // Real files read each byte a few times at most.
+        let budget = data_len.saturating_mul(16).saturating_add(1 << 20);
+        let mut reader = Reader { schema: &schema, blocks: &blocks, names: &names, hints: Hints::default(), budget };
         let root = reader.read_struct(root_type, root_id, 0, 0)?;
         let hints = reader.hints;
         Ok(MetaFile { container, schema, root_type, root, hints, names, data_len })
@@ -665,7 +753,8 @@ impl MetaFile {
             _ => Vec::new(),
         };
         let fill = |blocks: Vec<(u32, Vec<u8>)>| -> Result<(Writer, u32), Error> {
-            let mut w = Writer { schema: &self.schema, names: &self.names, hints: &self.hints, big_endian, packed: big_endian, default_block, blocks };
+            let room = self.data_len.saturating_mul(16).saturating_add(64 << 20);
+            let mut w = Writer { schema: &self.schema, names: &self.names, hints: &self.hints, big_endian, packed: big_endian, default_block, blocks, room };
             let size = self.schema.info(self.root_type, &self.names)?.size.max(1);
             let (id, at) = w.alloc(self.root_type, size, self.schema.struct_align(self.root_type))?;
             w.write_struct(self.root_type, root, id, at)?;
