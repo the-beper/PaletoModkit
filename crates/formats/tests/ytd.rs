@@ -130,6 +130,33 @@ fn replace_texture_from_dds() {
 }
 
 #[test]
+fn x8r8g8b8_stays_opaque() {
+    // A 2x2 X8R8G8B8 DDS whose unused bytes are 0, as many tools write it.
+    let mut dds = vec![0u8; 128];
+    let mut put = |at: usize, v: u32| dds[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    put(0, u32::from_le_bytes(*b"DDS "));
+    put(4, 124);
+    put(8, 0x1007);
+    put(12, 2);
+    put(16, 2);
+    put(28, 1);
+    put(76, 32);
+    put(80, 0x40);
+    put(88, 32);
+    put(92, 0xFF_0000);
+    put(96, 0xFF00);
+    put(100, 0xFF);
+    for _ in 0..4 {
+        dds.extend_from_slice(&[0x30, 0x20, 0x10, 0]);
+    }
+    for enhanced in [false, true] {
+        let rebuilt = paleto_formats::replace_textures(&build(enhanced), &[("probe", &dds)]).unwrap();
+        let (_, _, rgba) = TextureDictionary::parse(&rebuilt).unwrap().textures[0].rgba(0).unwrap();
+        assert_eq!(rgba, [0x10, 0x20, 0x30, 255].repeat(4), "enhanced: {enhanced}");
+    }
+}
+
+#[test]
 fn replace_errors() {
     let ytd = build(false);
     let err = paleto_formats::replace_textures(&ytd, &[("missing", &bc1_dds())]).unwrap_err();

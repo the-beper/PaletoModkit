@@ -116,14 +116,14 @@ pub fn edit_textures(ytd: &[u8], edits: &[Edit]) -> Result<Vec<u8>, Error> {
                     // A picture keeps the texture's colour space.
                     image.srgb = Format::from_enhanced(tex.header[0x1F]).is_some_and(|(_, srgb)| srgb);
                 }
-                set_image(&mut tex.header, &image, enhanced)?;
+                set_image(&mut tex.header, &mut image, enhanced)?;
                 tex.data = image.data;
             }
             Edit::Add { name, file, format } => {
                 check_new(&textures, name)?;
-                let image = encode::load(file, format)?;
+                let mut image = encode::load(file, format)?;
                 let mut header = new_header(name, enhanced);
-                set_image(&mut header, &image, enhanced)?;
+                set_image(&mut header, &mut image, enhanced)?;
                 textures.push(Tex { header, name: [name.as_bytes(), &[0]].concat(), hash: joaat_lower(name), data: image.data });
             }
             Edit::Remove(name) => {
@@ -245,7 +245,7 @@ fn fields(h: &[u8], enhanced: bool) -> Result<(Format, u32, u32, u32, u64), Erro
 }
 
 /// Writes a new image's size and format into a texture header.
-fn set_image(h: &mut [u8], image: &dds::Image, enhanced: bool) -> Result<(), Error> {
+fn set_image(h: &mut [u8], image: &mut dds::Image, enhanced: bool) -> Result<(), Error> {
     let size = |n: u32| u16::try_from(n).map(u16::to_le_bytes).map_err(|_| Error::Edit(format!("{}x{} is too large for a texture", image.width, image.height)));
     let (w, h16) = (size(image.width)?, size(image.height)?);
     let levels = image.levels.min(255) as u8;
@@ -259,6 +259,10 @@ fn set_image(h: &mut [u8], image: &dds::Image, enhanced: bool) -> Result<(), Err
         h[0x1C..0x1E].copy_from_slice(&1u16.to_le_bytes());
         h[0x1F] = code;
         h[0x22] = levels;
+        // Enhanced has no X8R8G8B8: it is stored as B8G8R8A8, where the unused byte is the alpha.
+        if image.format == Format::Bgrx8 {
+            image.data.iter_mut().skip(3).step_by(4).for_each(|a| *a = 0xFF);
+        }
     } else {
         let code = image
             .format
