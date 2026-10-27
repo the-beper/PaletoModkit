@@ -206,3 +206,155 @@ fn rename_and_delete_on_disk() {
     settle(&mut harness);
     assert!(!root.join("plugin.asi").exists() && root.join("update").is_dir());
 }
+
+/// A fake game, and an archive of its own outside it, opened with
+/// `handling.meta` previewed.
+fn previewed_archive(dir: &std::path::Path) -> (Harness<'static, App>, std::path::PathBuf) {
+    let root = dir.join("game");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+    let archive = dir.join("loose.rpf");
+    let mut editor = ArchiveEditor::new("loose.rpf");
+    editor.add_file("handling.meta", b"<handling/>".to_vec()).unwrap();
+    editor.add_file("notes.txt", b"notes".to_vec()).unwrap();
+    editor.save(&archive).unwrap();
+
+    let mut harness = Harness::builder().with_size([1100.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.state_mut().open(ArchivePath::new(archive.clone()));
+    harness.state_mut().preview("handling.meta", &ctx);
+    harness.run_steps(2);
+    assert_eq!(harness.state().preview_text(), Some("<handling/>"));
+    (harness, archive)
+}
+
+/// A named pipe: a task reading it waits until the test writes to it, so it
+/// stays running for as long as the test needs, without timing.
+fn pipe(path: &std::path::Path) {
+    assert!(std::process::Command::new("mkfifo").arg(path).status().unwrap().success());
+}
+
+/// Lets the task reading the pipe finish. From a thread of its own: should no
+/// task read it, the test then fails instead of waiting forever.
+fn release(path: &std::path::Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || std::fs::write(path, b"slow"));
+}
+
+/// Whether the preview holds unsaved edits: closing it then asks first (and
+/// is cancelled). Without edits it closes.
+fn unsaved(harness: &mut Harness<'_, App>) -> bool {
+    use egui_kittest::kittest::Queryable;
+
+    let ctx = harness.ctx.clone();
+    harness.state_mut().close_preview(&ctx);
+    harness.run_steps(2);
+    let asking = harness.state().asking_unsaved();
+    if asking {
+        harness.get_by_label("Cancel").click();
+        harness.run_steps(3);
+        assert!(!harness.state().asking_unsaved());
+    }
+    asking
+}
+
+/// Asks to close the window, as its close button does; whether the app
+/// cancelled the close.
+fn close_window(harness: &mut Harness<'_, App>) -> bool {
+    harness.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    harness.step();
+    harness.output().viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose))
+}
+
+#[test]
+fn one_operation_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut harness, archive) = previewed_archive(dir.path());
+    let ctx = harness.ctx.clone();
+    harness.state_mut().edit_preview("<edited/>");
+    let slow = dir.path().join("slow.txt");
+    pipe(&slow);
+    harness.state_mut().add_files(vec![slow.clone()], &ctx);
+    harness.run_steps(2);
+    assert!(!harness.state().idle());
+
+    // Another operation is refused instead of replacing the running one, also from Ctrl+S.
+    harness.state_mut().delete_now(&["notes.txt"], &ctx);
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("Wait for the current operation")));
+    harness.state_mut().cancel_dialogs();
+    harness.run_steps(2);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    harness.run_steps(3);
+
+    // The running one carries on to its end; the others did nothing.
+    release(&slow);
+    settle(&mut harness);
+    assert_eq!(harness.state().status_error(), None);
+    assert_eq!(harness.state().names(), ["handling.meta", "notes.txt", "slow.txt"]);
+    let inside = ArchivePath::new(archive);
+    assert_eq!(inside.join("slow.txt").read(None).unwrap(), b"slow");
+    assert_eq!(inside.join("handling.meta").read(None).unwrap(), b"<handling/>");
+    assert_eq!(harness.state().preview_text(), Some("<edited/>"));
+    assert!(unsaved(&mut harness));
+}
+
+#[test]
+fn closing_while_busy_asks_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut harness, _archive) = previewed_archive(dir.path());
+    let ctx = harness.ctx.clone();
+    // Nothing to lose: the window closes at once.
+    assert!(!close_window(&mut harness));
+
+    let slow = dir.path().join("slow.txt");
+    pipe(&slow);
+    harness.state_mut().add_files(vec![slow.clone()], &ctx);
+    harness.run_steps(2);
+    // The first request only warns; a second one closes.
+    assert!(close_window(&mut harness));
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("Adding files is not finished")));
+    assert!(!close_window(&mut harness));
+
+    // Once the operation is over, closing no longer asks.
+    release(&slow);
+    settle(&mut harness);
+    assert!(!close_window(&mut harness));
+}
+
+#[test]
+fn failed_save_keeps_the_edits_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut harness, archive) = previewed_archive(dir.path());
+    let ctx = harness.ctx.clone();
+    harness.state_mut().edit_preview("<edited/>");
+    // The archive is gone by the time it is saved.
+    let original = std::fs::read(&archive).unwrap();
+    std::fs::remove_file(&archive).unwrap();
+    harness.state_mut().save_preview(&ctx);
+    settle(&mut harness);
+    assert!(harness.state().status_error().is_some());
+    assert_eq!(harness.state().preview_text(), Some("<edited/>"));
+    assert!(unsaved(&mut harness));
+
+    // Saved once it can be.
+    std::fs::write(&archive, original).unwrap();
+    harness.state_mut().save_preview(&ctx);
+    settle(&mut harness);
+    assert_eq!(harness.state().status_error(), None);
+    assert_eq!(ArchivePath::new(archive).join("handling.meta").read(None).unwrap(), b"<edited/>");
+    assert!(!unsaved(&mut harness));
+}
+
+#[test]
+fn previewing_the_edited_file_again_keeps_the_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut harness, _archive) = previewed_archive(dir.path());
+    let ctx = harness.ctx.clone();
+    harness.state_mut().edit_preview("<edited/>");
+    harness.state_mut().preview("handling.meta", &ctx);
+    harness.run_steps(2);
+    assert_eq!(harness.state().preview_text(), Some("<edited/>"));
+    assert!(unsaved(&mut harness));
+}

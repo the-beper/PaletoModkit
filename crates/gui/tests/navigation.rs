@@ -554,3 +554,49 @@ fn side_tree_can_be_hidden() {
     harness.run_steps(3);
     harness.get_by_label("⏷ Expand all");
 }
+
+#[test]
+fn enter_opens_the_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    fake_game(&root);
+    let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    assert_eq!(harness.state().names(), ["mods", "update", "x64", "zz_folder", "common.rpf", "GTA5.exe"]);
+    // The main list is drawn after the side tree.
+    let click = |harness: &mut Harness<'_, App>, label: &str, modifiers| {
+        harness.get_all_by_label(label).last().unwrap().click_modifiers(modifiers);
+        harness.run_steps(2);
+    };
+    let enter = |harness: &mut Harness<'_, App>| {
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(3);
+        let opened = folder(harness);
+        harness.state_mut().go(Location::Folder(root.clone()));
+        harness.run_steps(2);
+        opened
+    };
+    let none = egui::Modifiers::NONE;
+
+    // Among several, the row the selection started from, not the first row of the list.
+    click(&mut harness, "update", none);
+    click(&mut harness, "zz_folder", egui::Modifiers::SHIFT);
+    assert_eq!(harness.state().selected(), ["update", "x64", "zz_folder"]);
+    assert_eq!(enter(&mut harness), root.join("update"));
+
+    // Ctrl+click moves it to the row clicked.
+    click(&mut harness, "x64", none);
+    click(&mut harness, "zz_folder", egui::Modifiers::COMMAND);
+    assert_eq!(harness.state().selected(), ["x64", "zz_folder"]);
+    assert_eq!(enter(&mut harness), root.join("zz_folder"));
+
+    // When that row is no longer selected, the first selected one in the list.
+    click(&mut harness, "x64", none);
+    click(&mut harness, "zz_folder", egui::Modifiers::COMMAND);
+    click(&mut harness, "update", egui::Modifiers::COMMAND);
+    click(&mut harness, "zz_folder", egui::Modifiers::COMMAND);
+    assert_eq!(harness.state().selected(), ["update", "x64"]);
+    assert_eq!(enter(&mut harness), root.join("update"));
+}
