@@ -92,7 +92,7 @@ Text tables (`.gxt2`) open as `0xHASH = text` lines, one per string, and are con
 
 ## Textures
 
-Selecting a texture dictionary (`.ytd`) shows its textures, with their format, size and mipmaps. Textures in a format Paleto Modkit cannot read are left out, and the header says how many; such a dictionary cannot be changed. **Alpha** shows their transparency over a checkerboard. ↑/↓ move through the list, Home/End jump to the first or last texture.
+Selecting a texture dictionary (`.ytd`) shows its textures, with their format, size and mipmaps. Textures in a format Paleto Modkit cannot read are left out, and the header says how many; such a dictionary cannot be changed. **Alpha** shows their transparency over a checkerboard. ↑/↓ move through the list, Home/End jump to the first or last texture. A cube map has a **Face** menu next to the mip one; exporting it as DDS keeps all its faces, as PNG only the first.
 
 ![Texture dictionary viewer](../screenshots/texture-viewer.png)
 
@@ -107,6 +107,10 @@ New textures from PNG pictures become BC1, or BC3 when they have transparency. T
 ## 3D models
 
 Selecting a model (`.ydr`, `.yft`, `.ydd`) shows it in 3D, with its textures: its own, the ones vehicles share (`vehshare.ytd`) and the parent dictionaries the game links them to, DLC packs and tuning parts included. Drag to turn it, scroll to zoom, and **Reset view** to start over. Vehicle parts and wheels are shown in place.
+
+**⬇ Export as XML…** (for `.ydr` and `.ydd`) asks for a folder and writes the model as CodeWalker XML (`name.ydr.xml`, which Sollumz and CodeWalker import) and its textures as DDS files. Collision, joints and lights are not written. The command line does the same: [cli.md](cli.md#models).
+
+The same viewer shows collision (`.ybn`) and navigation meshes (`.ynv`) as plain surfaces, without textures. A clip dictionary (`.ycd`) shows a read-only summary: each clip's name or hash, kind, start, end and rate, and each animation's frames, duration and bone tracks.
 
 ![A model in the preview panel](../screenshots/archive-browser.png)
 

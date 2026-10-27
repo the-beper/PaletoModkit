@@ -6,6 +6,7 @@
 - [Archives](#archives)
 - [Metadata, text tables and audio](#metadata-text-tables-and-audio)
 - [Textures](#textures)
+- [Models](#models)
 - [Installing mods](#installing-mods)
 - [Legacy → Enhanced conversion](#legacy--enhanced-conversion)
 - [Checks and troubleshooting](#checks-and-troubleshooting)
@@ -103,7 +104,19 @@ paleto textures my.ytd --rename old_name=new_name --remove unused
 paleto textures update/update.rpf/x64/textures/fxdecal.ytd --replace-matching ~/Downloads/decals --add-unmatched
 ```
 
-New textures from PNG pictures become BC1, or BC3 when they have transparency. `--format` picks another one: `bc1`, `bc2`, `bc3`, `bc4`, `bc5`, `bc7`, `a8r8g8b8`, `x8r8g8b8`, `a8b8g8r8`, `a1r5g5b5`, `a8` or `l8`. Mipmaps are generated when the size is a power of two.
+New textures from PNG pictures become BC1, or BC3 when they have transparency. `--format` picks another one: `bc1`, `bc2`, `bc3`, `bc4`, `bc5`, `bc7`, `a8r8g8b8`, `x8r8g8b8`, `a8b8g8r8`, `a1r5g5b5`, `a8` or `l8`. Mipmaps are generated when the size is a power of two. Cube maps are listed as such; `--png` writes their first face only, DDS files keep all six, and a cube map DDS can replace a texture.
+
+## Models
+
+```bash
+# Export a model as CodeWalker XML (for Sollumz or CodeWalker), with its textures as DDS files
+paleto model x64e.rpf/levels/gta5/props/prop_x.rpf/prop_x.ydr -o prop_x/
+
+# Also take textures from a dictionary
+paleto model car.ydd -o car/ --dictionary car.ytd
+```
+
+This writes `prop_x.ydr.xml` and one DDS file per texture the model names. Collision, joints and lights are not exported, and only the five common textures of Enhanced shaders are.
 
 ## Installing mods
 
@@ -204,5 +217,6 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `text PATH [-o FILE] [--import FILE]` | Text tables as lines |
 | `audio PATH [-o DIR] [--replace ID=FILE…]` | Sounds of an audio container |
 | `textures PATH [options]` | Textures of a dictionary |
+| `model PATH -o DIR [--dictionary YTD…]` | A model as CodeWalker XML with its textures |
 
 Every command takes `--game FOLDER`. `paleto help COMMAND` shows all of its options.

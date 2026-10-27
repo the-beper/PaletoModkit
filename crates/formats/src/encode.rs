@@ -42,7 +42,7 @@ pub fn compress(rgba: &RgbaImage, format: Format) -> Result<Image, Error> {
         level = imageops::resize(&level, width >> i, height >> i, FilterType::Triangle);
         encode_level(&level, format, &mut data);
     }
-    Ok(Image { format, srgb: false, width, height, levels, data })
+    Ok(Image { format, srgb: false, width, height, levels, faces: 1, data })
 }
 
 /// Down to 4 pixels on the shorter side, as in the game's files. Sizes that

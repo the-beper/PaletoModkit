@@ -382,7 +382,7 @@ const TEXCOORD0: usize = 6;
 
 /// Legacy models are versions 165 (`.ydr`, `.ydd`) and 162 (`.yft`); the
 /// Enhanced edition uses others (154, 159, 171) with gen9 vertex buffers.
-fn is_enhanced(version: u32) -> bool {
+pub(crate) fn is_enhanced(version: u32) -> bool {
     !matches!(version, 162 | 165)
 }
 
@@ -396,7 +396,7 @@ const G9_TEXCOORD0: usize = 28;
 /// Where texture coordinates are in a vertex, and whether they are halves.
 type UvLayout = Option<(usize, bool)>;
 
-fn half(bits: u16) -> f32 {
+pub(crate) fn half(bits: u16) -> f32 {
     let (sign, exp, frac) = ((bits >> 15) as u32, ((bits >> 10) & 0x1F) as i32, (bits & 0x3FF) as f32);
     let v = match exp {
         0 => frac / 1024.0 * 2f32.powi(-14),

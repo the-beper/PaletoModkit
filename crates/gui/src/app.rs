@@ -280,11 +280,19 @@ struct Preview {
     codec: Codec,
     textures: Option<TextureView>,
     model: Option<ModelView>,
+    /// What exporting the model needs, for models that can be exported.
+    model_source: Option<Arc<ModelSource>>,
     audio: Option<AudioView>,
     /// Files with no other preview: their bytes.
     hex: Option<HexView>,
     /// The search bar of a text preview, while it is open.
     find: Option<Find>,
+}
+
+/// A previewed model's file and the texture dictionaries found for it, kept for exporting it.
+struct ModelSource {
+    data: Vec<u8>,
+    dictionaries: Vec<TextureDictionary>,
 }
 
 /// What loading a preview needs, taken from the app when it is asked for:
@@ -314,7 +322,7 @@ struct Loaded {
 enum Content {
     Text { text: String, codec: Codec, syntax: Syntax },
     Textures(TextureDictionary),
-    Model(Vec<paleto_formats::drawable::Drawable>),
+    Model(Vec<paleto_formats::drawable::Drawable>, Option<Arc<ModelSource>>),
     Audio(Vec<paleto_formats::awc::Sound>),
     /// The bytes, and the whole size when only the start was read.
     Hex(Vec<u8>, Option<u64>),
@@ -370,6 +378,8 @@ enum Codec {
     Gxt2,
     /// Metadata (PSO or resource) as XML.
     Meta(Arc<MetaFile>),
+    /// A summary of a file that has no text form (`.ycd`): read-only.
+    Summary,
 }
 
 impl Codec {
@@ -378,6 +388,7 @@ impl Codec {
             Codec::Plain => Ok(text.as_bytes().to_vec()),
             Codec::Gxt2 => paleto_formats::gxt2::from_text(text).map_err(|e| e.to_string()),
             Codec::Meta(meta) => meta.rebuild_from_xml(text).map_err(|e| e.to_string()),
+            Codec::Summary => Err("this is a summary of the file, not its text".into()),
         }
     }
 }
@@ -469,6 +480,7 @@ impl Action {
                 | Action::ReplaceSound(..)
                 | Action::ExportSounds(..)
                 | Action::ExportTextures(..)
+                | Action::ExportModel(_)
                 | Action::SavePreview
                 | Action::Extract(_)
                 | Action::Add(_)
@@ -564,6 +576,8 @@ enum Action {
     ClosePreview,
     /// Export textures of the previewed dictionary; asks where when `dest` is None.
     ExportTextures(Export, Option<PathBuf>),
+    /// Export the previewed model as CodeWalker XML with its textures; asks for a folder when `dest` is None.
+    ExportModel(Option<PathBuf>),
     /// Export sounds of the previewed audio container; asks where when `dest` is None.
     ExportSounds(AudioRequest, Option<PathBuf>),
     /// Replace a sound (by id) of the previewed container with a WAV or MP3 file; asks which when None.
@@ -964,6 +978,11 @@ impl App {
 
     pub fn export_textures(&mut self, export: Export, dest: &Path, ctx: &egui::Context) {
         self.apply(Action::ExportTextures(export, Some(dest.to_path_buf())), ctx);
+    }
+
+    /// Exports the previewed model as CodeWalker XML with its textures into a folder.
+    pub fn export_model(&mut self, dest: &Path, ctx: &egui::Context) {
+        self.apply(Action::ExportModel(Some(dest.to_path_buf())), ctx);
     }
 
     /// Replaces a sound of the previewed audio container with a WAV or MP3 file.
@@ -1392,7 +1411,7 @@ impl App {
         if let Some(e) = error {
             self.status = Status::Error(e);
         }
-        let (mut text, mut textures, mut model, mut audio, mut hex) = (None, None, None, None, None);
+        let (mut text, mut textures, mut model, mut model_source, mut audio, mut hex) = (None, None, None, None, None, None);
         let (mut codec, mut syntax) = (Codec::Plain, Syntax::for_file(&name));
         match content {
             Content::Text { text: t, codec: c, syntax: s } => (text, codec, syntax) = (Some((t.clone(), t)), c, s),
@@ -1404,10 +1423,11 @@ impl App {
                 }
                 textures = Some(view);
             }
-            Content::Model(drawables) => {
+            Content::Model(drawables, source) => {
                 let view = ModelView::new(drawables);
                 add_info(&mut info, view.summary());
                 model = Some(view);
+                model_source = source;
             }
             Content::Audio(sounds) => {
                 let mut view = AudioView::new(sounds);
@@ -1424,7 +1444,7 @@ impl App {
             }
             Content::Nothing => {}
         }
-        self.preview = Some(Preview { source, name, syntax, info, text, codec, textures, model, audio, hex, find: None });
+        self.preview = Some(Preview { source, name, syntax, info, text, codec, textures, model, model_source, audio, hex, find: None });
     }
 
     fn preview_dirty(&self) -> bool {
@@ -1792,6 +1812,29 @@ impl App {
                             ExportDest::File(path) => format!("exported {}", path.display()),
                             ExportDest::Folder(dir) => format!("{} textures exported to {}", indices.len(), dir.display()),
                         })
+                    };
+                    match run() {
+                        Ok(message) => Outcome::Done { message, reload: None },
+                        Err(e) => Outcome::Failed(e),
+                    }
+                }));
+            }
+            Action::ExportModel(dest) => {
+                let Some(p) = &self.preview else { return };
+                let Some(source) = p.model_source.clone() else { return };
+                let file = p.name.clone();
+                let Some(dir) = dest.or_else(|| rfd::FileDialog::new().set_title("Export model to").pick_folder()) else { return };
+                self.task = Some(Task::spawn("Exporting model", ctx, move || {
+                    let run = || -> Result<String, String> {
+                        let (stem, ext) = file.rsplit_once('.').ok_or_else(|| format!("{file}: not a model"))?;
+                        let export = paleto_formats::xml_export::export(&source.data, ext, stem, &source.dictionaries).map_err(|e| format!("{file}: {e}"))?;
+                        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                        let write = |name: &str, data: &[u8]| std::fs::write(dir.join(name), data).map_err(|e| format!("{}: {e}", dir.join(name).display()));
+                        write(&format!("{file}.xml"), export.xml.as_bytes())?;
+                        for (name, dds) in &export.textures {
+                            write(name, dds)?;
+                        }
+                        Ok(format!("exported {file}.xml and {} textures to {}", export.textures.len(), dir.display()))
                     };
                     match run() {
                         Ok(message) => Outcome::Done { message, reload: None },
@@ -3240,7 +3283,7 @@ impl App {
     fn preview_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let busy = self.busy();
         let Some(p) = &mut self.preview else { return };
-        let editable = matches!(p.source, PreviewSource::Archive(_));
+        let editable = matches!(p.source, PreviewSource::Archive(_)) && !matches!(p.codec, Codec::Summary);
         let dirty = p.text.as_ref().is_some_and(|(text, saved)| text != saved);
         let height = crate::widgets::bar_height(ui);
         let has_text = p.text.is_some();
@@ -3421,6 +3464,12 @@ impl App {
                 },
                 None => {
                     if let Some(view) = &mut p.model {
+                        if p.model_source.is_some() {
+                            let button = ui.add_enabled(!busy, egui::Button::new("⬇ Export as XML…"));
+                            if button.on_hover_text("Write CodeWalker XML (for Sollumz or CodeWalker) and the model's textures as DDS into a folder").clicked() {
+                                actions.push(Action::ExportModel(None));
+                            }
+                        }
                         view.ui(ui);
                     } else if let Some(view) = &mut p.audio {
                         if let Some(request) = view.ui(ui, busy, editable) {
@@ -4537,8 +4586,22 @@ fn load_preview(req: PreviewRequest) -> Loaded {
         Ok(data) if partial.is_some() => (Content::Hex(data, partial), None),
         Ok(data) if is_ytd(name) => TextureDictionary::parse(&data).map_or_else(fail, |dict| (Content::Textures(dict), None)),
         Ok(data) if matches!(ext.as_str(), "ydr" | "yft" | "ydd") => {
-            paleto_formats::drawable::parse(&data, &ext, &sibling_textures(&req)).map_or_else(fail, |drawables| (Content::Model(drawables), None))
+            let dictionaries = sibling_textures(&req);
+            match paleto_formats::drawable::parse(&data, &ext, &dictionaries) {
+                // Exporting as XML covers drawables and dictionaries, not fragments.
+                Ok(drawables) => (Content::Model(drawables, (ext != "yft").then(|| Arc::new(ModelSource { data, dictionaries }))), None),
+                Err(e) => fail(e),
+            }
         }
+        Ok(data) if ext == "ybn" => paleto_formats::bounds::parse(&data).map_or_else(fail, |drawables| (Content::Model(drawables, None), None)),
+        Ok(data) if ext == "ynv" => paleto_formats::navmesh::parse(&data).map_or_else(fail, |drawables| (Content::Model(drawables, None), None)),
+        Ok(data) if ext == "ycd" => match paleto_formats::clips::to_text(&data) {
+            Ok(summary) => {
+                add_info(&mut info, "animation clips, a summary (read-only)");
+                (text(summary, Codec::Summary, Syntax::Plain), None)
+            }
+            Err(e) => fail(e),
+        },
         Ok(data) if ext == "awc" => {
             let key = req.keys.as_ref().and_then(|k| k.awc);
             paleto_formats::awc::parse(&data, key.as_ref()).map_or_else(fail, |sounds| (Content::Audio(sounds), None))
@@ -4867,7 +4930,7 @@ fn is_ytd(name: &str) -> bool {
 
 /// Binary files with a preview of their own, read whatever their size.
 fn binary_preview(name: &str) -> bool {
-    matches!(extension(name).as_str(), "YTD" | "YDR" | "YFT" | "YDD" | "AWC" | "GXT2" | "YMT" | "YTYP" | "YMAP" | "PSO")
+    matches!(extension(name).as_str(), "YTD" | "YDR" | "YFT" | "YDD" | "YBN" | "YNV" | "YCD" | "AWC" | "GXT2" | "YMT" | "YTYP" | "YMAP" | "PSO")
 }
 
 fn as_text(data: &[u8]) -> Option<String> {

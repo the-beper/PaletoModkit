@@ -17,6 +17,9 @@ const DDPF_LUMINANCE: u32 = 0x2_0000;
 const DDSCAPS_COMPLEX: u32 = 0x8;
 const DDSCAPS_TEXTURE: u32 = 0x1000;
 const DDSCAPS_MIPMAP: u32 = 0x40_0000;
+/// DDSCAPS2_CUBEMAP and the six DDSCAPS2_CUBEMAP_*_ face flags.
+const DDSCAPS2_CUBEMAP: u32 = 0x200;
+const DDSCAPS2_ALLFACES: u32 = 0xFC00;
 
 /// Pixel format: flags, FourCC, bit count and R, G, B, A masks.
 type PixelFormat = (u32, &'static [u8; 4], u32, [u32; 4]);
@@ -52,7 +55,7 @@ pub fn write(tex: &Texture) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(148 + tex.data.len());
     let mut put = |v: u32| out.extend_from_slice(&v.to_le_bytes());
-    let mipmapped = tex.levels > 1;
+    let (mipmapped, cube) = (tex.levels > 1, tex.faces == 6);
     put(u32::from_le_bytes(*b"DDS "));
     put(124);
     put(DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT | DDSD_LINEARSIZE);
@@ -68,12 +71,13 @@ pub fn write(tex: &Texture) -> Vec<u8> {
     put(u32::from_le_bytes(*cc));
     put(bits);
     masks.into_iter().for_each(&mut put);
-    put(DDSCAPS_TEXTURE | if mipmapped { DDSCAPS_COMPLEX | DDSCAPS_MIPMAP } else { 0 });
-    (0..4).for_each(|_| put(0));
+    put(DDSCAPS_TEXTURE | if mipmapped { DDSCAPS_COMPLEX | DDSCAPS_MIPMAP } else { 0 } | if cube { DDSCAPS_COMPLEX } else { 0 });
+    put(if cube { DDSCAPS2_CUBEMAP | DDSCAPS2_ALLFACES } else { 0 });
+    (0..3).for_each(|_| put(0));
     if let Some(format) = dxgi {
         put(format);
         put(3); // D3D10_RESOURCE_DIMENSION_TEXTURE2D
-        put(0);
+        put(if cube { 4 } else { 0 }); // D3D10_RESOURCE_MISC_TEXTURECUBE
         put(1); // array size
         put(0);
     }
@@ -88,11 +92,13 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub levels: u32,
-    /// All mip levels, largest first.
+    /// 6 for a cube map, else 1.
+    pub faces: u32,
+    /// All mip levels, largest first; for each face in turn.
     pub data: Vec<u8>,
 }
 
-/// Reads a 2D DDS texture (no cube maps, arrays or volumes).
+/// Reads a 2D or cube map DDS texture (no arrays or volumes).
 pub fn read(dds: &[u8]) -> Result<Image, Error> {
     let bad = |what: &str| Error::Format(format!("DDS: {what}"));
     if dds.len() < 128 || &dds[..4] != b"DDS " || u32_at(dds, 4) != 124 {
@@ -110,8 +116,13 @@ pub fn read(dds: &[u8]) -> Result<Image, Error> {
     }
     let (pf_flags, fourcc, bits) = (u32_at(dds, 80), &dds[84..88], u32_at(dds, 88));
     let masks = [u32_at(dds, 92), u32_at(dds, 96), u32_at(dds, 100), u32_at(dds, 104)];
-    if u32_at(dds, 112) & 0x200 != 0 || u32_at(dds, 24) > 1 {
-        return Err(Error::Unsupported("DDS cube maps and volume textures".into()));
+    let caps2 = u32_at(dds, 112);
+    let mut cube = caps2 & DDSCAPS2_CUBEMAP != 0;
+    if cube && caps2 & DDSCAPS2_ALLFACES != DDSCAPS2_ALLFACES {
+        return Err(Error::Unsupported("DDS cube maps with missing faces".into()));
+    }
+    if u32_at(dds, 24) > 1 {
+        return Err(Error::Unsupported("DDS volume textures".into()));
     }
     let mut start = 128;
     let (format, srgb) = if pf_flags & DDPF_FOURCC != 0 {
@@ -126,9 +137,10 @@ pub fn read(dds: &[u8]) -> Result<Image, Error> {
                     return Err(bad("truncated header"));
                 }
                 start = 148;
-                if u32_at(dds, 128 + 12) > 1 || u32_at(dds, 128 + 8) & 0x4 != 0 {
-                    return Err(Error::Unsupported("DDS texture arrays and cube maps".into()));
+                if u32_at(dds, 128 + 12) > 1 {
+                    return Err(Error::Unsupported("DDS texture arrays".into()));
                 }
+                cube |= u32_at(dds, 128 + 8) & 0x4 != 0;
                 match u32_at(dds, 128) {
                     28 => (Format::Rgba8, false),
                     29 => (Format::Rgba8, true),
@@ -157,6 +169,9 @@ pub fn read(dds: &[u8]) -> Result<Image, Error> {
     } else {
         let alpha = pf_flags & DDPF_ALPHAPIXELS != 0;
         if (bits, masks) == (24, [0xFF_0000, 0xFF00, 0xFF, 0]) {
+            if cube {
+                return Err(Error::Unsupported("24-bit DDS cube maps".into()));
+            }
             return read_rgb24(dds, width, height, levels);
         }
         let format = match (bits, masks, alpha) {
@@ -170,9 +185,10 @@ pub fn read(dds: &[u8]) -> Result<Image, Error> {
         };
         (format, false)
     };
-    let len: usize = (0..levels).map(|i| format.level_size((width >> i).max(1), (height >> i).max(1))).sum();
+    let faces = if cube { 6 } else { 1 };
+    let len: usize = faces * (0..levels).map(|i| format.level_size((width >> i).max(1), (height >> i).max(1))).sum::<usize>();
     let data = dds.get(start..start + len).ok_or_else(|| bad("data is shorter than its mip levels"))?;
-    Ok(Image { format, srgb, width, height, levels, data: data.to_vec() })
+    Ok(Image { format, srgb, width, height, levels, faces: faces as u32, data: data.to_vec() })
 }
 
 /// 24-bit RGB has no game equivalent: it is widened to A8R8G8B8.
@@ -180,7 +196,7 @@ fn read_rgb24(dds: &[u8], width: u32, height: u32, levels: u32) -> Result<Image,
     let pixels: usize = (0..levels).map(|i| ((width >> i).max(1) * (height >> i).max(1)) as usize).sum();
     let rgb = dds.get(128..128 + pixels * 3).ok_or_else(|| Error::Format("DDS: data is shorter than its mip levels".into()))?;
     let data = rgb.as_chunks::<3>().0.iter().flat_map(|&[b, g, r]| [b, g, r, 255]).collect();
-    Ok(Image { format: Format::Bgra8, srgb: false, width, height, levels, data })
+    Ok(Image { format: Format::Bgra8, srgb: false, width, height, levels, faces: 1, data })
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {

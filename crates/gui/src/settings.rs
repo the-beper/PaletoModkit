@@ -196,8 +196,8 @@ impl FileClass {
         match ext.as_str() {
             "rpf" | "oiv" => Self::Archive,
             "ytd" | "dds" | "png" | "jpg" | "jpeg" | "bmp" | "gfx" => Self::Texture,
-            "ydr" | "ydd" | "yft" | "ybn" | "ycd" | "ypt" | "ymf" => Self::Model,
-            "ymap" | "ytyp" | "ynd" | "ynv" | "ymt" => Self::Map,
+            "ydr" | "ydd" | "yft" | "ybn" | "ynv" | "ycd" | "ypt" | "ymf" => Self::Model,
+            "ymap" | "ytyp" | "ynd" | "ymt" => Self::Map,
             "awc" | "rel" | "dat151" | "dat54" | "bik" => Self::Audio,
             "ysc" | "asi" | "dll" | "exe" => Self::Script,
             "xml" | "meta" | "dat" | "txt" | "ini" | "json" | "gxt2" | "log" | "toml" | "cfg" | "lua" => Self::Text,

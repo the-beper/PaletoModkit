@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use paleto_core::{ArchivePath, Game, Package, vfs};
+use paleto_formats::xml_export;
 use paleto_formats::{Edit, Format, MetaFile, TextureDictionary, edit_textures};
 use paleto_rpf::{Archive, ArchiveEditor, EntryKind, Keys};
 
@@ -242,6 +243,17 @@ enum Command {
         /// (repeatable). Archives are edited in their mods folder copy.
         #[arg(long, value_name = "ID=FILE", conflicts_with = "output")]
         replace: Vec<String>,
+    },
+    /// Export a model (.ydr or .ydd) as CodeWalker XML, with its textures as DDS files.
+    Model {
+        /// A .ydr or .ydd file, on disk or inside an archive.
+        path: String,
+        /// The folder to write into: the XML as <name>.<ext>.xml, and the DDS files.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// A texture dictionary the model's textures may be in (repeatable).
+        #[arg(long, value_name = "YTD")]
+        dictionary: Vec<String>,
     },
     /// List the textures of a texture dictionary (.ytd), optionally exporting them.
     Textures {
@@ -511,6 +523,26 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Model { path, output, dictionary } => {
+            let load = |p: &str| -> Result<Vec<u8>> {
+                if Path::new(p).is_file() {
+                    return Ok(std::fs::read(p)?);
+                }
+                let (archive, keys, idx) = resolve(p, cli.game.as_deref())?;
+                Ok(archive.read(idx, keys.as_ref())?)
+            };
+            let data = load(&path)?;
+            let dictionaries = dictionary.iter().map(|d| TextureDictionary::parse(&load(d)?).with_context(|| format!("reading {d}"))).collect::<Result<Vec<_>>>()?;
+            let file = Path::new(&path).file_name().and_then(|n| n.to_str()).with_context(|| format!("no file name in {path}"))?;
+            let (stem, ext) = file.rsplit_once('.').with_context(|| format!("{path}: not a model"))?;
+            let export = xml_export::export(&data, ext, stem, &dictionaries).with_context(|| format!("reading {path}"))?;
+            write_file(&output.join(format!("{file}.xml")), export.xml.as_bytes())?;
+            println!("wrote {}", output.join(format!("{file}.xml")).display());
+            for (name, dds) in &export.textures {
+                write_file(&output.join(name), dds)?;
+                println!("wrote {}", output.join(name).display());
+            }
+        }
         Command::Textures { path, output, png, .. } => {
             let data = if Path::new(&path).is_file() {
                 std::fs::read(&path)?
@@ -521,7 +553,8 @@ fn main() -> Result<()> {
             let ytd = TextureDictionary::parse(&data).with_context(|| format!("reading {path}"))?;
             for tex in &ytd.textures {
                 let srgb = if tex.srgb { " sRGB" } else { "" };
-                println!("{:>5}x{:<5} {:>2} mips  {:<11} {}", tex.width, tex.height, tex.levels, format!("{}{srgb}", tex.format.name()), tex.name);
+                let cube = if tex.faces > 1 { " cube map" } else { "" };
+                println!("{:>5}x{:<5} {:>2} mips  {:<11} {}", tex.width, tex.height, tex.levels, format!("{}{srgb}{cube}", tex.format.name()), tex.name);
                 if let Some(dir) = &output {
                     let data = if png { tex.to_png()? } else { tex.to_dds() };
                     write_file(&dir.join(tex.file_name(png)), &data)?;

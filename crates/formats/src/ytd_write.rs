@@ -16,7 +16,7 @@ use crate::encode;
 use crate::hash::joaat_lower;
 use crate::pages::{self, MAX_PAGES};
 use crate::rsc::{Resource, u16_at, u64_at};
-use crate::ytd::Format;
+use crate::ytd::{Format, cube_faces};
 
 const SYS: u64 = 0x5000_0000;
 const GFX: u64 = 0x6000_0000;
@@ -89,7 +89,10 @@ pub fn edit_textures(ytd: &[u8], edits: &[Edit]) -> Result<Vec<u8>, Error> {
         name.push(0);
         let (format, width, height, levels, data_ptr) = fields(&header, enhanced)?;
         let len: usize = (0..levels.clamp(1, 16)).map(|i| format.level_size((width >> i).max(1), (height >> i).max(1))).sum();
-        let data = res.bytes(data_ptr, len)?.to_vec();
+        // A cube map keeps its faces; short data is a flat texture, as when reading.
+        let all = len * cube_faces(&header, enhanced) as usize;
+        let data = res.bytes(data_ptr, all)?;
+        let data = if data.len() < all { &data[..data.len().min(len)] } else { data }.to_vec();
         textures.push(Tex { header, name, hash, data });
     }
 
@@ -251,12 +254,18 @@ fn set_image(h: &mut [u8], image: &mut dds::Image, enhanced: bool) -> Result<(),
     let levels = image.levels.min(255) as u8;
     if enhanced {
         let code = image.format.enhanced_code(image.srgb);
-        let (blocks, stride) = block_count(image.format, image.width, image.height, image.levels);
+        let (blocks, stride) = block_count(image.format, image.width, image.height, image.levels, image.faces);
         h[0x08..0x0C].copy_from_slice(&blocks.to_le_bytes());
         h[0x0C..0x10].copy_from_slice(&stride.to_le_bytes());
         h[0x18..0x1A].copy_from_slice(&w);
         h[0x1A..0x1C].copy_from_slice(&h16);
-        h[0x1C..0x1E].copy_from_slice(&1u16.to_le_bytes());
+        h[0x1C..0x1E].copy_from_slice(&(image.faces as u16).to_le_bytes());
+        // The dimension byte stays as it was unless the texture becomes, or stops being, a cube map.
+        if image.faces == 6 {
+            h[0x1E] = 2;
+        } else if h[0x1E] == 2 {
+            h[0x1E] = 1;
+        }
         h[0x1F] = code;
         h[0x22] = levels;
         // Enhanced has no X8R8G8B8: it is stored as B8G8R8A8, where the unused byte is the alpha.
@@ -270,7 +279,7 @@ fn set_image(h: &mut [u8], image: &mut dds::Image, enhanced: bool) -> Result<(),
             .ok_or_else(|| Error::Unsupported(format!("{} textures in Legacy dictionaries", image.format.name())))?;
         h[0x50..0x52].copy_from_slice(&w);
         h[0x52..0x54].copy_from_slice(&h16);
-        h[0x54..0x56].copy_from_slice(&1u16.to_le_bytes());
+        h[0x54..0x56].copy_from_slice(&(image.faces as u16).to_le_bytes());
         h[0x56..0x58].copy_from_slice(&(image.format.stride(image.width) as u16).to_le_bytes());
         h[0x58..0x5C].copy_from_slice(&code.to_le_bytes());
         h[0x5D] = levels;
@@ -281,7 +290,7 @@ fn set_image(h: &mut [u8], image: &mut dds::Image, enhanced: bool) -> Result<(),
 /// Enhanced headers count the data in blocks (pixels for uncompressed
 /// formats); with mips, sizes are rounded up to powers of two first.
 /// Follows CodeWalker's `TextureBase.GetBlockCount`.
-fn block_count(format: Format, width: u32, height: u32, levels: u32) -> (u32, u32) {
+fn block_count(format: Format, width: u32, height: u32, levels: u32, faces: u32) -> (u32, u32) {
     let (side, bytes) = format.block();
     let (mut w, mut h) = if levels > 1 { (width.next_power_of_two(), height.next_power_of_two()) } else { (width, height) };
     let mut count = 0;
@@ -290,5 +299,5 @@ fn block_count(format: Format, width: u32, height: u32, levels: u32) -> (u32, u3
         w /= 2;
         h /= 2;
     }
-    (count, bytes as u32)
+    (count * faces, bytes as u32)
 }

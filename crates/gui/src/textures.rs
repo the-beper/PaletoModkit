@@ -39,27 +39,33 @@ pub enum Request {
     Remove(String),
 }
 
+/// Names of the faces of a cube map, in file order.
+const FACES: [&str; 6] = ["Face +X", "Face −X", "Face +Y", "Face −Y", "Face +Z", "Face −Z"];
+
 pub struct TextureView {
     pub dict: Arc<TextureDictionary>,
     pub selected: usize,
     mip: u32,
+    /// The face of a cube map shown.
+    face: u32,
     /// Show the alpha channel (over a checkerboard) instead of opaque colours.
     alpha: bool,
-    /// The uploaded image and the (texture, mip, alpha) it shows.
-    shown: Option<((usize, u32, bool), egui::TextureHandle)>,
+    /// The uploaded image and the (texture, mip, face, alpha) it shows.
+    shown: Option<((usize, u32, u32, bool), egui::TextureHandle)>,
     /// Scroll the list to this index on the next frame (set by keyboard nav).
     scroll_to: Option<usize>,
 }
 
 impl TextureView {
     pub fn new(dict: TextureDictionary) -> Self {
-        TextureView { dict: Arc::new(dict), selected: 0, mip: 0, alpha: true, shown: None, scroll_to: None }
+        TextureView { dict: Arc::new(dict), selected: 0, mip: 0, face: 0, alpha: true, shown: None, scroll_to: None }
     }
 
     pub fn select(&mut self, index: usize) {
         if index != self.selected {
             self.selected = index;
             self.mip = 0;
+            self.face = 0;
         }
     }
 
@@ -133,6 +139,15 @@ impl TextureView {
                 });
             });
             ui.checkbox(&mut self.alpha, "Alpha").on_hover_text("Show transparency over a checkerboard");
+            if tex.faces > 1 {
+                let name = |f: u32| FACES[f as usize % FACES.len()];
+                crate::widgets::fit_combo(ui, name(self.face));
+                egui::ComboBox::from_id_salt("face").selected_text(name(self.face)).show_ui(ui, |ui| {
+                    for f in 0..tex.faces {
+                        ui.selectable_value(&mut self.face, f, name(f));
+                    }
+                });
+            }
             if levels > 1 {
                 let dims = |m: u32| format!("Mip {m}: {}×{}", (tex.width >> m).max(1), (tex.height >> m).max(1));
                 crate::widgets::fit_combo(ui, &dims(self.mip));
@@ -216,10 +231,10 @@ impl TextureView {
 
     /// The selected texture, decoded and uploaded on first use.
     fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        let key = (self.selected, self.mip, self.alpha);
+        let tex = &self.dict.textures[self.selected];
+        let key = (self.selected, self.mip, self.face.min(tex.faces - 1), self.alpha);
         if self.shown.as_ref().map(|s| s.0) != Some(key) {
-            let tex = &self.dict.textures[self.selected];
-            let (w, h, mut rgba) = tex.rgba(self.mip)?;
+            let (w, h, mut rgba) = tex.rgba_face(key.2, self.mip)?;
             if !self.alpha {
                 rgba.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
             }

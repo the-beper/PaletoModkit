@@ -268,7 +268,7 @@ fn joaat(name: &str) -> u32 {
 
 #[test]
 fn export_names_stay_in_their_folder() {
-    let tex = |name: &str| paleto_formats::Texture { name: name.into(), width: 4, height: 4, levels: 1, format: Format::Bgra8, srgb: false, data: vec![0; 64] };
+    let tex = |name: &str| paleto_formats::Texture { name: name.into(), width: 4, height: 4, levels: 1, format: Format::Bgra8, srgb: false, faces: 1, data: vec![0; 64] };
     assert_eq!(tex("../../evil").file_name(true), ".._.._evil.png");
     assert_eq!(tex("a\\b").file_name(false), "a_b.dds");
     assert_eq!(tex("").file_name(false), "texture.dds");
@@ -303,4 +303,46 @@ fn damaged_textures() {
     let mut dds = bc1_dds();
     dds[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(paleto_formats::read_dds(&dds).is_err());
+}
+
+/// A DDS cube map of 4x4 A8R8G8B8 faces, one level, face `i` filled with the grey `10 * (i + 1)`.
+fn cube_dds(caps2: u32) -> Vec<u8> {
+    let mut dds = vec![0u8; 128];
+    let mut put = |at: usize, v: u32| dds[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    for (at, v) in [(0, u32::from_le_bytes(*b"DDS ")), (4, 124), (8, 0x1007), (12, 4), (16, 4), (76, 32), (80, 0x41), (88, 32), (92, 0xFF_0000), (96, 0xFF00), (100, 0xFF), (104, 0xFF00_0000), (108, 0x1008), (112, caps2)] {
+        put(at, v);
+    }
+    for face in 0..6u8 {
+        dds.extend(std::iter::repeat_n([10 * (face + 1); 4], 16).flatten());
+    }
+    dds
+}
+
+#[test]
+fn cube_maps() {
+    for enhanced in [false, true] {
+        let file = paleto_formats::replace_textures(&build(enhanced), &[("probe", &cube_dds(0x200 | 0xFC00))]).unwrap();
+        let check = |file: &[u8]| {
+            let ytd = TextureDictionary::parse(file).unwrap();
+            let tex = &ytd.textures[0];
+            assert_eq!((tex.faces, tex.levels, tex.data.len()), (6, 1, 6 * 64));
+            for face in 0..6 {
+                assert_eq!(&tex.rgba_face(face, 0).unwrap().2[..4], &[10 * (face as u8 + 1); 4]);
+            }
+            assert!(tex.rgba_face(6, 0).is_none());
+            tex.to_dds()
+        };
+        let dds = check(&file);
+        let word = |at: usize| u32::from_le_bytes(dds[at..at + 4].try_into().unwrap());
+        assert_eq!((word(108) & 0x8, word(112)), (0x8, 0x200 | 0xFC00), "complex, cube map with all faces");
+        assert_eq!(&dds[128..], &cube_dds(0x200 | 0xFC00)[128..]);
+        // Editing another part of the dictionary leaves the faces whole.
+        let renamed = paleto_formats::edit_textures(&file, &[paleto_formats::Edit::Rename { from: "probe", to: "sky" }]).unwrap();
+        assert_eq!(check(&renamed), dds);
+        // A flat picture in its place makes it a flat texture again.
+        let flat = paleto_formats::replace_textures(&renamed, &[("sky", &bc1_dds())]).unwrap();
+        assert_eq!(TextureDictionary::parse(&flat).unwrap().textures[0].faces, 1);
+    }
+    // Faces missing from the file.
+    assert!(paleto_formats::replace_textures(&build(false), &[("probe", &cube_dds(0x200 | 0x400))]).is_err());
 }

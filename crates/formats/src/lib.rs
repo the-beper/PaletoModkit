@@ -1,7 +1,9 @@
-//! GTA V resource formats: RSC7 containers and texture dictionaries (`.ytd`).
+//! GTA V resource formats: RSC7 containers, texture dictionaries (`.ytd`), models, collision, navmeshes and clip dictionaries.
 
 pub mod awc;
 mod bc7;
+pub mod bounds;
+pub mod clips;
 mod dds;
 mod decode;
 pub mod drawable;
@@ -10,9 +12,11 @@ pub mod gxt2;
 pub mod hash;
 mod meta;
 pub mod names;
+pub mod navmesh;
 mod pages;
 pub mod rsc;
 pub mod ytd;
+pub mod xml_export;
 mod ytd_write;
 
 pub use dds::{Image, read as read_dds};

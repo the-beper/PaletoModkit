@@ -2,7 +2,7 @@
 //! folder (nested archives included), as a smoke test:
 //! - metadata: XML → file → XML must give the same XML; PSO checksums must match;
 //! - text tables: text → file → entries must give the same entries;
-//! - audio and models: they must decode.
+//! - audio, models, collision, navmeshes and clip dictionaries: they must decode.
 //!
 //! cargo run --release -p paleto-formats --example scan_formats -- <game dir> [kinds...]
 //! where kinds are some of: meta gxt2 awc model (all by default).
@@ -37,7 +37,7 @@ fn main() {
                     "ymt" | "ytyp" | "ymap" | "pso" => "meta",
                     "gxt2" => "gxt2",
                     "awc" => "awc",
-                    "ydr" | "yft" | "ydd" => "model",
+                    "ydr" | "yft" | "ydd" | "ybn" | "ynv" | "ycd" => "model",
                     _ => continue,
                 };
                 if !kinds.contains(&kind) {
@@ -48,6 +48,9 @@ fn main() {
                     "meta" => check_meta(&data),
                     "gxt2" => check_gxt2(&data),
                     "awc" => paleto_formats::awc::parse(&data, keys.awc.as_ref()).map(|_| ()).map_err(|e| e.to_string()),
+                    _ if ext == "ybn" => paleto_formats::bounds::parse(&data).map(|_| ()).map_err(|e| e.to_string()),
+                    _ if ext == "ynv" => paleto_formats::navmesh::parse(&data).map(|_| ()).map_err(|e| e.to_string()),
+                    _ if ext == "ycd" => paleto_formats::clips::to_text(&data).map(|_| ()).map_err(|e| e.to_string()),
                     _ => paleto_formats::drawable::parse(&data, &ext, &[]).map(|_| ()).map_err(|e| e.to_string()),
                 };
                 let entry = stats.entry(ext.clone()).or_default();

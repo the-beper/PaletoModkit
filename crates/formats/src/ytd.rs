@@ -226,7 +226,9 @@ pub struct Texture {
     pub levels: u32,
     pub format: Format,
     pub srgb: bool,
-    /// All mip levels, largest first.
+    /// 6 for a cube map (faces +X, -X, +Y, -Y, +Z, -Z), else 1.
+    pub faces: u32,
+    /// All mip levels, largest first; for each face in turn.
     pub data: Vec<u8>,
 }
 
@@ -281,6 +283,7 @@ fn read_legacy(res: &Resource, ptr: u64) -> Result<Texture, Error> {
         levels: b[0x5D] as u32,
         data: u64_at(b, 0x70),
         data_len: None,
+        faces: cube_faces(b, false),
     };
     header.load(res, format, false)
 }
@@ -299,6 +302,7 @@ fn read_enhanced(res: &Resource, ptr: u64) -> Result<Texture, Error> {
         levels: b[0x22] as u32,
         data: u64_at(b, 0x38),
         data_len: Some(block_count * block_stride).filter(|&n| n > 0),
+        faces: cube_faces(b, true),
     };
     header.load(res, format, srgb)
 }
@@ -310,6 +314,16 @@ struct Header {
     levels: u32,
     data: u64,
     data_len: Option<usize>,
+    /// Faces the header announces ([`cube_faces`]); the data must hold them.
+    faces: u32,
+}
+
+/// Faces a texture header announces: 6 for a cube map, else 1. A Legacy cube
+/// map has a depth of 6 and an Enhanced one dimension 2 (unverified: no game
+/// file has one; taken from the header fields of the other dimensions).
+pub(crate) fn cube_faces(header: &[u8], enhanced: bool) -> u32 {
+    let cube = if enhanced { header[0x1E] == 2 } else { u16_at(header, 0x54) == 6 };
+    if cube { 6 } else { 1 }
 }
 
 impl Header {
@@ -319,8 +333,14 @@ impl Header {
         let sizes: Vec<usize> = (0..self.levels.clamp(1, 16))
             .map(|i| format.level_size((self.width >> i).max(1), (self.height >> i).max(1)))
             .collect();
-        let wanted = self.data_len.unwrap_or(0).max(sizes.iter().sum());
+        let face_len: usize = sizes.iter().sum();
+        let wanted = self.data_len.unwrap_or(0).max(face_len * self.faces as usize);
         let available = res.bytes(self.data, wanted)?;
+        // A cube map needs every level of every face; short data is read as a flat texture.
+        if self.faces > 1 && available.len() >= face_len * self.faces as usize {
+            let data = available[..face_len * self.faces as usize].to_vec();
+            return Ok(Texture { name, width: self.width, height: self.height, levels: sizes.len() as u32, format, srgb, faces: self.faces, data });
+        }
         // Keep the levels that are fully present.
         let mut len = 0;
         let mut levels = 0;
@@ -334,7 +354,7 @@ impl Header {
         if levels == 0 {
             return Err(Error::Format(format!("texture {name}: data is truncated")));
         }
-        Ok(Texture { name, width: self.width, height: self.height, levels, format, srgb, data: available[..len].to_vec() })
+        Ok(Texture { name, width: self.width, height: self.height, levels, format, srgb, faces: 1, data: available[..len].to_vec() })
     }
 }
 
@@ -346,20 +366,36 @@ impl Texture {
         format!("{}.{}", name.replace(['/', '\\'], "_"), if png { "png" } else { "dds" })
     }
 
-    /// Data and size of a mip level.
+    /// Data and size of a mip level of the first face.
     pub fn level(&self, level: u32) -> Option<(&[u8], u32, u32)> {
-        if level >= self.levels {
+        self.face_level(0, level)
+    }
+
+    /// Bytes of all the mip levels of one face.
+    fn face_len(&self) -> usize {
+        (0..self.levels).map(|i| self.format.level_size((self.width >> i).max(1), (self.height >> i).max(1))).sum()
+    }
+
+    /// Data and size of a mip level of a face.
+    pub fn face_level(&self, face: u32, level: u32) -> Option<(&[u8], u32, u32)> {
+        if level >= self.levels || face >= self.faces {
             return None;
         }
         let dims = |i: u32| ((self.width >> i).max(1), (self.height >> i).max(1));
-        let start: usize = (0..level).map(|i| self.format.level_size(dims(i).0, dims(i).1)).sum();
+        let before: usize = (0..level).map(|i| self.format.level_size(dims(i).0, dims(i).1)).sum();
+        let start = face as usize * self.face_len() + before;
         let (w, h) = dims(level);
         Some((&self.data[start..start + self.format.level_size(w, h)], w, h))
     }
 
-    /// Decodes a mip level to 8-bit RGBA.
+    /// Decodes a mip level of the first face to 8-bit RGBA.
     pub fn rgba(&self, level: u32) -> Option<(u32, u32, Vec<u8>)> {
-        let (data, w, h) = self.level(level)?;
+        self.rgba_face(0, level)
+    }
+
+    /// Decodes a mip level of a face to 8-bit RGBA.
+    pub fn rgba_face(&self, face: u32, level: u32) -> Option<(u32, u32, Vec<u8>)> {
+        let (data, w, h) = self.face_level(face, level)?;
         Some((w, h, crate::decode::to_rgba(self.format, data, w, h)))
     }
 
