@@ -40,6 +40,7 @@ fn preview_select_and_export() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().open(ArchivePath::new(root.join("update/update.rpf")).join("textures"));
+    settle(&mut harness);
     harness.state_mut().preview("probe.ytd", &ctx);
     settle(&mut harness);
 
@@ -105,6 +106,7 @@ fn add_rename_and_remove_textures() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().open(ArchivePath::new(root.join("update/update.rpf")).join("textures"));
+    settle(&mut harness);
     harness.state_mut().preview("probe.ytd", &ctx);
     settle(&mut harness);
 
@@ -219,6 +221,7 @@ fn replace_textures_from_a_folder() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().open(ArchivePath::new(root.join("update/update.rpf")).join("textures"));
+    settle(&mut harness);
     harness.state_mut().preview("probe.ytd", &ctx);
     settle(&mut harness);
 

@@ -59,6 +59,7 @@ fn controls_fit_the_window() {
             harness.state_mut().select_game_folder(&root, &ctx);
             settle(&mut harness);
             harness.state_mut().open(data.clone());
+            settle(&mut harness);
             harness.state_mut().preview(file, &ctx);
             settle(&mut harness);
             let outside = overflowing(&harness, width);

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -75,6 +75,8 @@ pub struct App {
     legacy_files: usize,
     /// The search for copies of game files left unchanged in the mods folder.
     copies_task: Option<Task<Vec<paleto_core::cleanup::Copy>>>,
+    /// The location being listed; the one shown stays until it is ready.
+    listing_task: Option<(PendingListing, Task<Listed>)>,
     /// The preview being read; the one shown stays until it is ready.
     preview_task: Option<Task<Loaded>>,
     /// The texture or sound to select in the next preview loaded.
@@ -88,6 +90,10 @@ pub struct App {
     settings: Settings,
     /// Folder listings for the side tree, cached until the next refresh.
     tree: HashMap<PathBuf, Vec<FsEntry>>,
+    /// Side tree folders asked for and not read yet; those of `tree_queue` wait for `tree_task`.
+    tree_loading: HashSet<PathBuf>,
+    tree_queue: Vec<PathBuf>,
+    tree_task: Option<Task<TreeRead>>,
     /// Expand the side tree down to the current location on the next frame.
     reveal: bool,
     /// Folders expanded in the side tree.
@@ -172,6 +178,38 @@ struct FsEntry {
     /// An original archive with a modified copy in the mods folder.
     modded: bool,
 }
+
+/// What to do once a location's listing is shown.
+#[derive(Default)]
+struct AfterListing {
+    /// The row to select.
+    select: Option<String>,
+    /// Read the preview again (it was edited), selecting this texture or sound.
+    reload_preview: Option<String>,
+}
+
+/// How the history moved for a location asked for: undone if it is never shown.
+#[derive(Clone, Copy)]
+enum HistoryMove {
+    Go,
+    Back,
+    Forward,
+}
+
+/// A location being listed in the background.
+struct PendingListing {
+    /// As asked for: the original archive when the mods copy is what is shown.
+    requested: Location,
+    location: Location,
+    from_mods: bool,
+    redirected: bool,
+    after: AfterListing,
+    history: Option<HistoryMove>,
+}
+
+type Listed = Result<(Option<Encryption>, Vec<Row>), String>;
+/// Side tree folders read, with their entries.
+type TreeRead = Vec<(PathBuf, Vec<FsEntry>)>;
 
 struct Browser {
     location: Location,
@@ -579,11 +617,15 @@ impl App {
             copies_task: None,
             expand_task: None,
             preview_task: None,
+            listing_task: None,
             preview_select: None,
             load_delay: std::time::Duration::ZERO,
             shared: Arc::default(),
             settings: Settings::default(),
             tree: HashMap::new(),
+            tree_loading: HashSet::new(),
+            tree_queue: Vec::new(),
+            tree_task: None,
             reveal: false,
             open_dirs: BTreeSet::new(),
             info: None,
@@ -671,6 +713,8 @@ impl App {
             && self.export_task.is_none()
             && self.expand_task.is_none()
             && self.preview_task.is_none()
+            && self.listing_task.is_none()
+            && self.tree_task.is_none()
             && !self.startup.running()
             && !self.mods_check.as_ref().is_some_and(ModsCheck::checking)
             && !self.crash.as_ref().is_some_and(CrashWindow::loading)
@@ -690,14 +734,28 @@ impl App {
 
     /// Goes to a folder or archive, recording it in the history.
     pub fn go(&mut self, location: Location) {
-        if let Some(b) = &self.browser
-            && self.opened(b) != location
+        self.go_then(location, AfterListing::default());
+    }
+
+    fn go_then(&mut self, location: Location, after: AfterListing) {
+        let mut history = None;
+        if let Some(current) = self.current()
+            && current != location
         {
-            self.back.push(self.opened(b));
+            self.back.push(current);
             self.forward.clear();
+            history = Some(HistoryMove::Go);
         }
         self.reveal = true;
-        self.show(location);
+        self.show_moving(location, after, history);
+    }
+
+    /// Where the user is: the location being listed, else the one shown.
+    fn current(&self) -> Option<Location> {
+        match &self.listing_task {
+            Some((pending, _)) => Some(pending.requested.clone()),
+            None => self.browser.as_ref().map(|b| self.opened(b)),
+        }
     }
 
     /// Opens an archive location.
@@ -1053,7 +1111,7 @@ impl App {
     // ---- State changes -----------------------------------------------------
 
     fn select_game(&mut self, game: Game, ctx: &egui::Context) {
-        self.tree.clear();
+        self.clear_tree();
         self.browser = None;
         self.clear_preview();
         self.back.clear();
@@ -1076,6 +1134,7 @@ impl App {
         self.mods_check = None;
         self.script_hook = None;
         self.expand_task = None;
+        self.listing_task = None;
         let root = game.root.clone();
         self.game = Some(game);
         self.startup.begin(self.game.as_ref(), ctx);
@@ -1109,15 +1168,26 @@ impl App {
     /// Shows a location without touching the history. Archives show their
     /// mods copy when there is one.
     fn show(&mut self, location: Location) {
+        self.show_then(location, AfterListing::default());
+    }
+
+    /// Lists a location in the background; it is shown, and `after` done, once listed.
+    /// A newer request drops this one.
+    fn show_then(&mut self, location: Location, after: AfterListing) {
+        self.show_moving(location, after, None);
+    }
+
+    fn show_moving(&mut self, location: Location, after: AfterListing, history: Option<HistoryMove>) {
         if self.peek_original.as_ref().is_some_and(|d| !matches!(&location, Location::Archive(a) if &a.disk == d)) {
             self.peek_original = None;
         }
         let peeking = self.peek_original.is_some();
+        let requested = location.clone();
         let mut redirected = false;
-        let shown = match location {
+        let (location, from_mods) = match location {
             Location::Folder(path) => {
                 let in_mods = self.game.as_ref().is_some_and(|g| path.starts_with(g.mods_dir()));
-                self.folder_rows(&path).map(|rows| (Location::Folder(path), in_mods, None, rows))
+                (Location::Folder(path), in_mods)
             }
             Location::Archive(path) => {
                 let (path, from_mods) = match &self.game {
@@ -1137,16 +1207,54 @@ impl App {
                     }
                     None => (path, false),
                 };
-                self.archive_rows(&path).map(|(enc, rows)| (Location::Archive(path), from_mods, Some(enc), rows))
+                (Location::Archive(path), from_mods)
             }
         };
-        let (location, from_mods, encryption, mut rows) = match shown {
-            Ok(s) => s,
+        let name = match &requested {
+            Location::Folder(p) => p.file_name(),
+            Location::Archive(a) => a.inner.last().map(std::ffi::OsStr::new).or_else(|| a.disk.file_name()),
+        };
+        let label = format!("Reading {}", name.unwrap_or_default().to_string_lossy());
+        let (target, game, originals, keys, delay) = (location.clone(), self.game.clone(), self.show_originals, self.keys.clone(), self.load_delay);
+        let task = Task::spawn_cancellable(label, &self.ctx, move |_| {
+            std::thread::sleep(delay);
+            match &target {
+                Location::Folder(dir) => folder_rows(dir, game.as_ref(), originals).map(|rows| (None, rows)),
+                Location::Archive(path) => archive_rows(path, keys.as_deref()).map(|(enc, rows)| (Some(enc), rows)),
+            }
+        });
+        self.listing_task = Some((PendingListing { requested, location, from_mods, redirected, after, history }, task));
+    }
+
+    /// Puts the history back as it was before asking for a place never shown.
+    fn undo_history(&mut self, pending: &PendingListing) {
+        match pending.history {
+            Some(HistoryMove::Go) => {
+                self.back.pop();
+            }
+            Some(HistoryMove::Back) => {
+                self.forward.pop();
+                self.back.push(pending.requested.clone());
+            }
+            Some(HistoryMove::Forward) => {
+                self.back.pop();
+                self.forward.push(pending.requested.clone());
+            }
+            None => {}
+        }
+    }
+
+    /// Shows a location once listed.
+    fn show_listed(&mut self, pending: PendingListing, listed: Listed, ctx: &egui::Context) {
+        let (encryption, mut rows) = match listed {
+            Ok(listed) => listed,
             Err(e) => {
                 self.status = Status::Error(e);
+                self.undo_history(&pending);
                 return;
             }
         };
+        let PendingListing { location, from_mods, redirected, after, .. } = pending;
         sort_rows(&mut rows, &self.settings);
         // In a mods copy, mark what differs from the original game files.
         if from_mods && let Location::Archive(path) = &location {
@@ -1181,6 +1289,11 @@ impl App {
 
         let previous = self.browser.take().filter(|b| b.location == location);
         let moved = previous.is_none();
+        // A delete or rename asked about names of the place shown before.
+        if moved {
+            self.confirm_delete = None;
+            self.name_dialog = None;
+        }
         let (filter, selected) = previous.map(|b| (b.filter, b.selected)).unwrap_or_default();
         let selected = selected.into_iter().filter(|s| rows.iter().any(|r| &r.name == s)).collect();
         self.browser = Some(Browser {
@@ -1197,59 +1310,18 @@ impl App {
             last_click: None,
             scroll_to: None,
         });
-    }
-
-    fn folder_rows(&self, dir: &Path) -> Result<Vec<Row>, String> {
-        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let mut rows = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            let meta = std::fs::metadata(&path).ok();
-            let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
-            let is_archive = !is_dir && name.to_ascii_lowercase().ends_with(".rpf");
-            let kind = if is_dir {
-                RowKind::Folder
-            } else if is_archive {
-                RowKind::Archive
-            } else {
-                RowKind::File
-            };
-            let modded = !is_dir && self.has_mods_copy(&path);
-            rows.push(Row { name, kind, size: meta.map_or(0, |m| m.len()), modded, added: false });
+        if let (Some(name), Some(b)) = (after.select, &mut self.browser)
+            && let Some(pos) = b.rows.iter().position(|r| r.name == name)
+        {
+            b.selected = BTreeSet::from([name]);
+            b.anchor = Some(pos);
+            b.scroll_to = Some(pos);
         }
-        Ok(rows)
-    }
-
-    fn archive_rows(&self, path: &ArchivePath) -> Result<(Encryption, Vec<Row>), String> {
-        let (archive, dir) = path.open(self.keys.as_deref()).map_err(|e| format!("{}: {e}", path.disk.display()))?;
-        let rows = archive
-            .children(dir)
-            .map(|i| {
-                let e = &archive.entries[i];
-                let kind = match e.kind {
-                    EntryKind::Directory { .. } => RowKind::Folder,
-                    EntryKind::Binary { .. } if e.is_archive() => RowKind::Archive,
-                    EntryKind::Binary { .. } => RowKind::File,
-                    EntryKind::Resource { .. } => RowKind::Resource(e.resource_version().unwrap_or_default()),
-                };
-                Row { name: e.name.clone(), kind, size: e.size(), modded: false, added: false }
-            })
-            .collect();
-        Ok((archive.encryption, rows))
-    }
-
-    fn has_mods_copy(&self, path: &Path) -> bool {
-        let Some(game) = &self.game else { return false };
-        if self.show_originals {
-            return false;
-        }
-        match path.strip_prefix(&game.root) {
-            Ok(rel) if !rel.starts_with("mods") => game::resolve_ci(&game.mods_dir(), &rel.to_string_lossy()).is_file(),
-            _ => false,
+        if let (Some(selected), Some(name)) = (after.reload_preview, self.previewing().map(str::to_string)) {
+            self.preview_select = Some(selected);
+            self.apply(Action::Preview(name), ctx);
+            // Not left for another file when the reload did not start.
+            self.preview_select = None;
         }
     }
 
@@ -1491,32 +1563,25 @@ impl App {
             Action::Go(location) => self.go(location),
             Action::Reveal(path) => {
                 let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
-                self.go(Location::Folder(dir.to_path_buf()));
-                if let Some(b) = &mut self.browser {
-                    let name = name.to_string_lossy().into_owned();
-                    if let Some(pos) = b.rows.iter().position(|r| r.name == name) {
-                        b.selected = BTreeSet::from([name]);
-                        b.anchor = Some(pos);
-                        b.scroll_to = Some(pos);
-                    }
-                }
+                let select = Some(name.to_string_lossy().into_owned());
+                self.go_then(Location::Folder(dir.to_path_buf()), AfterListing { select, ..Default::default() });
             }
             Action::Back => {
                 if let Some(location) = self.back.pop() {
-                    if let Some(b) = &self.browser {
-                        self.forward.push(self.opened(b));
+                    if let Some(current) = self.current() {
+                        self.forward.push(current);
                     }
                     self.reveal = true;
-                    self.show(location);
+                    self.show_moving(location, AfterListing::default(), Some(HistoryMove::Back));
                 }
             }
             Action::Forward => {
                 if let Some(location) = self.forward.pop() {
-                    if let Some(b) = &self.browser {
-                        self.back.push(self.opened(b));
+                    if let Some(current) = self.current() {
+                        self.back.push(current);
                     }
                     self.reveal = true;
-                    self.show(location);
+                    self.show_moving(location, AfterListing::default(), Some(HistoryMove::Forward));
                 }
             }
             Action::Enter(name) => {
@@ -1546,7 +1611,7 @@ impl App {
                     name,
                 };
                 // Replacing a load drops it: its result never comes.
-                self.preview_task = Some(Task::spawn(format!("Loading {}", request.name), ctx, move || load_preview(request)));
+                self.preview_task = Some(Task::spawn_cancellable(format!("Loading {}", request.name), ctx, move |_| load_preview(request)));
             }
             Action::ClosePreview => self.clear_preview(),
             Action::PickTexture(replace) => {
@@ -1961,9 +2026,9 @@ impl App {
             }
             Action::ToggleOriginals => {
                 self.show_originals = !self.show_originals;
-                self.tree.clear();
-                if let Some(b) = &self.browser {
-                    let location = self.original_of(&b.location);
+                self.clear_tree();
+                if let Some(current) = self.current() {
+                    let location = self.original_of(&current);
                     self.show(location);
                 }
             }
@@ -1978,9 +2043,17 @@ impl App {
                 self.open_dirs.clear();
             }
             Action::CancelTask => {
-                // Dropping the task tells its worker to stop.
-                if let Some(task) = self.expand_task.take() {
-                    self.status = Status::Info(format!("{}: cancelled", task.label));
+                // Dropping a task tells its worker to stop.
+                let mut stopped = Vec::new();
+                stopped.extend(self.expand_task.take().map(|t| t.label.clone()));
+                if let Some((pending, task)) = self.listing_task.take() {
+                    stopped.push(task.label.clone());
+                    // The place shown stays, and the history as it was.
+                    self.undo_history(&pending);
+                }
+                stopped.extend(self.preview_task.take().map(|t| t.label.clone()));
+                if !stopped.is_empty() {
+                    self.status = Status::Info(format!("{}: cancelled", stopped.join(", ")));
                 }
             }
             Action::ShowInfo(info) => self.info = info,
@@ -2181,7 +2254,7 @@ impl App {
             Action::Refresh => self.refresh(),
             Action::Settings(settings) => {
                 if settings.tree_all_files != self.settings.tree_all_files {
-                    self.tree.clear();
+                    self.clear_tree();
                 }
                 settings.apply(ctx);
                 self.settings = settings;
@@ -2257,9 +2330,13 @@ impl App {
     /// Reads the side tree and the location shown again; when the location
     /// is gone, shows the closest folder still there.
     fn refresh(&mut self) {
-        self.tree.clear();
-        let Some(b) = &self.browser else { return };
-        let location = match self.opened(b) {
+        self.refresh_then(AfterListing::default());
+    }
+
+    fn refresh_then(&mut self, after: AfterListing) {
+        self.clear_tree();
+        let Some(current) = self.current() else { return };
+        let location = match current {
             Location::Archive(a) if a.disk.is_file() => Location::Archive(a),
             Location::Archive(a) => Location::Folder(a.disk),
             Location::Folder(dir) => Location::Folder(dir),
@@ -2271,7 +2348,7 @@ impl App {
             },
             archive => archive,
         };
-        self.show(location);
+        self.show_then(location, after);
     }
 
     fn poll_tasks(&mut self, ctx: &egui::Context) {
@@ -2332,6 +2409,17 @@ impl App {
                     self.status = Status::Error(format!("comparing the mods folder: {e}"));
                 }
             }
+        }
+        if let Some(read) = self.tree_task.as_ref().and_then(Task::poll) {
+            self.tree_task = None;
+            for (dir, entries) in read {
+                self.tree_loading.remove(&dir);
+                self.tree.insert(dir, entries);
+            }
+        }
+        if let Some(listed) = self.listing_task.as_ref().and_then(|(_, t)| t.poll()) {
+            let (pending, _) = self.listing_task.take().unwrap();
+            self.show_listed(pending, listed, ctx);
         }
         if let Some(loaded) = self.preview_task.as_ref().and_then(Task::poll) {
             self.preview_task = None;
@@ -2407,32 +2495,19 @@ impl App {
                     if let Some(window) = &mut self.crash {
                         window.reload(None);
                     }
+                    let after = AfterListing { select: self.select_after.take(), reload_preview: self.refresh_preview.take() };
                     match reload {
                         Some(location) => {
-                            self.tree.clear();
-                            self.show(Location::Archive(location));
+                            self.clear_tree();
+                            self.show_then(Location::Archive(location), after);
                         }
                         // The task may have changed what is shown (added packs, moved or deleted files).
-                        None => self.refresh(),
-                    }
-                    if let (Some(name), Some(b)) = (self.select_after.take(), &mut self.browser)
-                        && let Some(pos) = b.rows.iter().position(|r| r.name == name)
-                    {
-                        b.selected = BTreeSet::from([name]);
-                        b.anchor = Some(pos);
-                        b.scroll_to = Some(pos);
-                    }
-                    if let (Some(selected), Some(name)) = (self.refresh_preview.take(), self.previewing().map(str::to_string)) {
-                        self.preview_select = Some(selected);
-                        self.apply(Action::Preview(name), ctx);
-                        // Not left for another file when the reload did not start.
-                        self.preview_select = None;
+                        None => self.refresh_then(after),
                     }
                 }
                 Outcome::Installed(result) => {
-                    self.tree.clear();
-                    if let Some(b) = &self.browser {
-                        let location = self.opened(b);
+                    self.clear_tree();
+                    if let Some(location) = self.current() {
                         self.show(location);
                     }
                     if let Some(d) = &mut self.install {
@@ -2451,29 +2526,39 @@ impl App {
         }
     }
 
+    /// A folder of the side tree; empty while it is read in the background.
     fn listing(&mut self, dir: &Path) -> &[FsEntry] {
         if !self.tree.contains_key(dir) {
-            let all_files = self.settings.tree_all_files;
-            let mut entries: Vec<FsEntry> = std::fs::read_dir(dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|e| {
-                    let path = e.path();
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    let is_dir = path.is_dir();
-                    let is_archive = name.to_ascii_lowercase().ends_with(".rpf");
-                    if name.starts_with('.') || (!is_dir && !is_archive && !all_files) {
-                        return None;
-                    }
-                    let modded = !is_dir && self.has_mods_copy(&path);
-                    Some(FsEntry { path, name, is_dir, modded })
-                })
-                .collect();
-            entries.sort_by_key(|e| (!e.is_dir, e.name.to_ascii_lowercase()));
-            self.tree.insert(dir.to_path_buf(), entries);
+            if self.tree_loading.insert(dir.to_path_buf()) {
+                self.tree_queue.push(dir.to_path_buf());
+            }
+            return &[];
         }
         &self.tree[dir]
+    }
+
+    /// Reads the side tree folders asked for in this frame, all in one task.
+    fn read_tree(&mut self) {
+        if self.tree_task.is_some() || self.tree_queue.is_empty() {
+            return;
+        }
+        let dirs = std::mem::take(&mut self.tree_queue);
+        let (game, originals, all_files, delay) = (self.game.clone(), self.show_originals, self.settings.tree_all_files, self.load_delay);
+        self.tree_task = Some(Task::spawn_cancellable("Reading folders", &self.ctx, move |cancel| {
+            std::thread::sleep(delay);
+            dirs.into_iter().take_while(|_| !cancel.is_set()).map(|dir| {
+                let entries = tree_entries(&dir, game.as_ref(), originals, all_files);
+                (dir, entries)
+            }).collect()
+        }));
+    }
+
+    /// Forgets the side tree, to read it again; folders still being read are dropped.
+    fn clear_tree(&mut self) {
+        self.tree.clear();
+        self.tree_loading.clear();
+        self.tree_queue.clear();
+        self.tree_task = None;
     }
 
     // ---- UI ----------------------------------------------------------------
@@ -2702,7 +2787,11 @@ impl App {
             });
             self.tree_dir(ui, &root, current.as_deref(), actions);
         });
-        self.reveal = false;
+        self.read_tree();
+        // Until the location asked for is shown, and the folders above it read, it is still to reveal.
+        if self.listing_task.is_none() && self.tree_task.is_none() && self.tree_loading.is_empty() {
+            self.reveal = false;
+        }
     }
 
     /// One folder of the side tree: clicking a name opens it, the arrow
@@ -2710,6 +2799,12 @@ impl App {
     fn tree_dir(&mut self, ui: &mut egui::Ui, dir: &Path, current: Option<&Path>, actions: &mut Vec<Action>) {
         let entries: Vec<(PathBuf, String, bool, bool)> =
             self.listing(dir).iter().map(|e| (e.path.clone(), e.name.clone(), e.is_dir, e.modded)).collect();
+        if self.tree_loading.contains(dir) {
+            ui.horizontal(|ui| {
+                ui.add_space(ui.spacing().indent);
+                ui.spinner();
+            });
+        }
         for (path, name, is_dir, modded) in entries {
             let selected = current == Some(path.as_path());
             if is_dir {
@@ -2863,15 +2958,31 @@ impl App {
 
     fn browser_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let busy = self.busy();
+        // A listing that takes long enough to notice: the old rows stay, dimmed and inert.
+        if let Some((_, task)) = &self.listing_task {
+            if task.elapsed() >= LOADING_SHOWN {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.add(egui::Label::new(RichText::new(format!("{}…", task.label)).weak()).truncate());
+                });
+                ui.disable();
+            } else {
+                ui.ctx().request_repaint_after(LOADING_SHOWN.saturating_sub(task.elapsed()));
+            }
+        }
         let Some(b) = &self.browser else {
-            ui.centered_and_justified(|ui| ui.label("Select a folder or an archive on the left."));
+            if self.listing_task.is_none() {
+                ui.centered_and_justified(|ui| ui.label("Select a folder or an archive on the left."));
+            }
             return;
         };
         let crumbs = self.breadcrumbs(b);
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + self.settings.density.row_padding();
         let settings = self.settings.clone();
         let colored = settings.colored_icons;
-        let modal_open = self.dialog_open();
+        // Keys and tools act on the rows shown: not while another place is being read.
+        let modal_open = self.dialog_open() || self.listing_task.is_some();
+        let busy = busy || self.listing_task.is_some();
         let b = self.browser.as_mut().unwrap();
         let in_archive = matches!(b.location, Location::Archive(_));
 
@@ -4109,6 +4220,9 @@ impl eframe::App for App {
                         self.copies_task.as_ref().map(|t| (&t.label, t.cancellable())),
                         self.export_task.as_ref().map(|t| (&t.label, t.cancellable())),
                         self.expand_task.as_ref().map(|t| (&t.label, t.cancellable())),
+                        // Reads that take long enough to notice.
+                        self.listing_task.as_ref().map(|(_, t)| t).filter(|t| t.elapsed() >= LOADING_SHOWN).map(|t| (&t.label, t.cancellable())),
+                        self.preview_task.as_ref().filter(|t| t.elapsed() >= LOADING_SHOWN).map(|t| (&t.label, t.cancellable())),
                     ];
                     if let Some((t, cancellable)) = running.into_iter().flatten().next() {
                         ui.spinner();
@@ -4143,8 +4257,8 @@ impl eframe::App for App {
             }
             // A load shows in the panel once it takes long enough to notice.
             let loading = self.preview_task.as_ref().filter(|t| t.elapsed() >= LOADING_SHOWN).map(|t| t.label.clone());
-            if self.preview_task.as_ref().is_some_and(|t| t.elapsed() < LOADING_SHOWN) {
-                ctx.request_repaint_after(LOADING_SHOWN);
+            if let Some(t) = self.preview_task.as_ref().filter(|t| t.elapsed() < LOADING_SHOWN) {
+                ctx.request_repaint_after(LOADING_SHOWN.saturating_sub(t.elapsed()));
             }
             if self.preview.is_some() || loading.is_some() {
                 let preview_max = (ui.available_width() - LIST_MIN).max(240.0);
@@ -4302,6 +4416,84 @@ fn add_info(info: &mut String, part: impl std::fmt::Display) {
         info.push_str(" · ");
     }
     info.push_str(&part.to_string());
+}
+
+/// The rows of a folder on disk; files with a copy in the mods folder are marked.
+fn folder_rows(dir: &Path, game: Option<&Game>, show_originals: bool) -> Result<Vec<Row>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut rows = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let meta = std::fs::metadata(&path).ok();
+        let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+        let is_archive = !is_dir && name.to_ascii_lowercase().ends_with(".rpf");
+        let kind = if is_dir {
+            RowKind::Folder
+        } else if is_archive {
+            RowKind::Archive
+        } else {
+            RowKind::File
+        };
+        let modded = !is_dir && has_mods_copy(game, show_originals, &path);
+        rows.push(Row { name, kind, size: meta.map_or(0, |m| m.len()), modded, added: false });
+    }
+    Ok(rows)
+}
+
+fn archive_rows(path: &ArchivePath, keys: Option<&Keys>) -> Result<(Encryption, Vec<Row>), String> {
+    let (archive, dir) = path.open(keys).map_err(|e| format!("{}: {e}", path.disk.display()))?;
+    let rows = archive
+        .children(dir)
+        .map(|i| {
+            let e = &archive.entries[i];
+            let kind = match e.kind {
+                EntryKind::Directory { .. } => RowKind::Folder,
+                EntryKind::Binary { .. } if e.is_archive() => RowKind::Archive,
+                EntryKind::Binary { .. } => RowKind::File,
+                EntryKind::Resource { .. } => RowKind::Resource(e.resource_version().unwrap_or_default()),
+            };
+            Row { name: e.name.clone(), kind, size: e.size(), modded: false, added: false }
+        })
+        .collect();
+    Ok((archive.encryption, rows))
+}
+
+fn has_mods_copy(game: Option<&Game>, show_originals: bool, path: &Path) -> bool {
+    let Some(game) = game else { return false };
+    if show_originals {
+        return false;
+    }
+    match path.strip_prefix(&game.root) {
+        Ok(rel) if !rel.starts_with("mods") => game::resolve_ci(&game.mods_dir(), &rel.to_string_lossy()).is_file(),
+        _ => false,
+    }
+}
+
+/// The entries of a side tree folder: folders and archives, other files too
+/// with `all_files`; archives with a copy in the mods folder are marked.
+fn tree_entries(dir: &Path, game: Option<&Game>, show_originals: bool, all_files: bool) -> Vec<FsEntry> {
+    let mut entries: Vec<FsEntry> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = path.is_dir();
+            let is_archive = name.to_ascii_lowercase().ends_with(".rpf");
+            if name.starts_with('.') || (!is_dir && !is_archive && !all_files) {
+                return None;
+            }
+            let modded = !is_dir && has_mods_copy(game, show_originals, &path);
+            Some(FsEntry { path, name, is_dir, modded })
+        })
+        .collect();
+    entries.sort_by_key(|e| (!e.is_dir, e.name.to_ascii_lowercase()));
+    entries
 }
 
 /// How long a preview load runs before the panel shows that it is loading.

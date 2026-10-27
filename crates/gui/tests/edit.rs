@@ -31,15 +31,18 @@ fn add_and_delete() {
     settle(&mut harness);
     let ctx = harness.ctx.clone();
     harness.state_mut().open(ArchivePath::new(archive.clone()));
+    settle(&mut harness);
     harness.state_mut().add_files(vec![dir.path().join("one.txt"), dir.path().join("pack")], &ctx);
     settle(&mut harness);
     assert_eq!(harness.state().names(), ["pack", "one.txt"]); // folders first
 
     harness.state_mut().open(ArchivePath::new(archive.clone()).join("pack").join("sub"));
+    settle(&mut harness);
     assert_eq!(harness.state().names(), ["two.xml"]);
     assert_eq!(ArchivePath::new(archive.clone()).join("pack").join("sub").join("two.xml").read(None).unwrap(), b"<two/>");
 
     harness.state_mut().open(ArchivePath::new(archive.clone()));
+    settle(&mut harness);
     harness.state_mut().delete_now(&["pack"], &ctx);
     settle(&mut harness);
     assert_eq!(harness.state().names(), ["one.txt"]);
@@ -65,7 +68,7 @@ fn rename_and_new_folder() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().open(ArchivePath::new(root.join("update/update.rpf")).join("common").join("data"));
-    harness.run_steps(2);
+    settle(&mut harness);
 
     // F2 on the selected file selects the name without its extension, so
     // typing replaces just that part.
@@ -123,6 +126,7 @@ fn format_xml() {
     settle(&mut harness);
     let ctx = harness.ctx.clone();
     harness.state_mut().open(ArchivePath::new(archive.clone()));
+    settle(&mut harness);
     harness.state_mut().preview("dlclist.xml", &ctx);
     settle(&mut harness);
     harness.state_mut().format_preview(&ctx);
@@ -155,7 +159,7 @@ fn rename_and_delete_on_disk() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().go(Location::Folder(folder.clone()));
-    harness.run_steps(2);
+    settle(&mut harness);
     assert_eq!(harness.state().names(), ["old", "notes.txt"]);
 
     // On disk, a change of case alone is a rename.
@@ -192,7 +196,7 @@ fn rename_and_delete_on_disk() {
     std::fs::write(root.join("x64a.rpf"), b"rpf").unwrap();
     std::fs::write(root.join("plugin.asi"), b"asi").unwrap();
     harness.state_mut().go(Location::Folder(root.clone()));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.state_mut().delete_now(&["plugin.asi", "x64a.rpf"], &ctx);
     settle(&mut harness);
     assert!(harness.state().status_error().is_some_and(|e| e.contains("x64a.rpf is an original game file")));
@@ -224,6 +228,7 @@ fn previewed_archive(dir: &std::path::Path) -> (Harness<'static, App>, std::path
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().open(ArchivePath::new(archive.clone()));
+    settle(&mut harness);
     harness.state_mut().preview("handling.meta", &ctx);
     settle(&mut harness);
     assert_eq!(harness.state().preview_text(), Some("<handling/>"));
@@ -315,6 +320,7 @@ fn switching_game_waits_for_the_operation() {
 
     // The operation's result would land in the other game.
     harness.state_mut().select_game_folder(&other, &ctx);
+    settle(&mut harness);
     assert!(harness.state().status_error().is_some_and(|e| e.contains("Wait for the current operation")));
     release(&slow);
     settle(&mut harness);

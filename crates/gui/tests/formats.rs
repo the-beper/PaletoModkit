@@ -39,6 +39,7 @@ fn open(harness: &mut Harness<'_, App>, root: &std::path::Path, file: &str) {
     harness.state_mut().select_game_folder(root, &ctx);
     settle(harness);
     harness.state_mut().open(ArchivePath::new(root.join("update/update.rpf")).join("data"));
+    settle(harness);
     harness.state_mut().preview(file, &ctx);
     settle(harness);
 }

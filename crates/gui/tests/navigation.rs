@@ -64,11 +64,11 @@ fn navigation() {
 
     // Typing filters and selects the first match; Enter opens it.
     harness.event(egui::Event::Text("upd".into()));
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(harness.state().filter(), "upd");
     assert_eq!(harness.state().selected(), ["update"]);
     harness.key_press(egui::Key::Enter);
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root.join("update"));
     assert_eq!(harness.state().filter(), "");
 
@@ -81,30 +81,31 @@ fn navigation() {
     };
     harness.event(pointer(egui::PointerButton::Extra1, true));
     harness.event(pointer(egui::PointerButton::Extra1, false));
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root);
     harness.event(pointer(egui::PointerButton::Extra2, true));
     harness.event(pointer(egui::PointerButton::Extra2, false));
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root.join("update"));
 
     // Clicking a folder name in the side tree opens it.
     harness.get_all_by_label("x64").next().expect("x64 in the tree").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root.join("x64"));
 
     // ...without expanding it: its subfolder shows up once, in the main view.
     harness.get_all_by_label("mods").next().unwrap().click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root.join("mods"));
     assert_eq!(harness.get_all_by_label("inner_dir").count(), 1);
 
     // Opening an archive from the folder view, then a folder inside it.
     harness.state_mut().go(Location::Folder(root.join("update")));
+    settle(&mut harness);
     harness.event(egui::Event::Text("update.rpf".into()));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.key_press(egui::Key::Enter);
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(harness.state().names(), ["common"]);
 }
 
@@ -116,6 +117,7 @@ fn tree_all_files() {
     let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
     let ctx = harness.ctx.clone();
     harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
     harness.state_mut().go(Location::Folder(root.join("x64")));
     settle(&mut harness);
 
@@ -124,9 +126,9 @@ fn tree_all_files() {
     let mut s = harness.state().settings().clone();
     s.tree_all_files = true;
     harness.state_mut().set_settings(s, &ctx);
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_all_by_label("GTA5.exe").next().expect("exe in the tree").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root);
     assert_eq!(harness.state().selected(), ["GTA5.exe"]);
 }
@@ -143,24 +145,25 @@ fn unsaved_changes() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().go(Location::Archive(data.clone()));
+    settle(&mut harness);
     harness.state_mut().preview("handling.meta", &ctx);
     settle(&mut harness);
     harness.state_mut().edit_preview("<changed/>");
-    harness.run_steps(2);
+    settle(&mut harness);
 
     // Leaving asks first; Cancel stays.
     harness.get_all_by_label("x64").next().unwrap().click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(harness.state().asking_unsaved());
     harness.get_by_label("Cancel").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(!harness.state().asking_unsaved());
     assert_eq!(harness.state().previewing(), Some("handling.meta"));
     assert!(matches!(harness.state().location(), Some(Location::Archive(_))));
 
     // Save writes the file (to the mods copy), then carries on.
     harness.get_all_by_label("x64").next().unwrap().click();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_all_by_label("💾 Save").last().unwrap().click();
     settle(&mut harness);
     assert_eq!(folder(&harness), root.join("x64"));
@@ -169,14 +172,15 @@ fn unsaved_changes() {
 
     // Discard drops the edit and carries on.
     harness.state_mut().go(Location::Archive(data));
+    settle(&mut harness);
     harness.state_mut().preview("handling.meta", &ctx);
     settle(&mut harness);
     harness.state_mut().edit_preview("<lost/>");
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.get_all_by_label("x64").next().unwrap().click();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("Discard").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root.join("x64"));
     assert_eq!(saved.read(None).unwrap(), b"<changed/>");
 }
@@ -193,7 +197,8 @@ fn double_click(harness: &mut Harness<'_, App>, label: &str) {
             harness.step();
         }
     }
-    harness.step();
+    // The folder opened is listed in the background.
+    settle(harness);
 }
 
 #[test]
@@ -225,10 +230,13 @@ fn open_from_command_line() {
     let ctx = harness.ctx.clone();
 
     harness.state_mut().open_path(&root.join("update"), &ctx);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root.join("update"));
     harness.state_mut().open_path(&root.join("update/update.rpf"), &ctx);
+    settle(&mut harness);
     assert_eq!(harness.state().names(), ["common"]);
     harness.state_mut().open_path(&root.join("GTA5.exe"), &ctx);
+    settle(&mut harness);
     assert_eq!(folder(&harness), root);
     assert_eq!(harness.state().selected(), ["GTA5.exe"]);
 }
@@ -282,6 +290,7 @@ fn expand_collapse_and_remember() {
     let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
     let ctx = harness.ctx.clone();
     harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
     harness.state_mut().go(Location::Folder(root.join("x64")));
     settle(&mut harness);
     assert_eq!(harness.query_all_by_label("deeper").count(), 0);
@@ -291,7 +300,7 @@ fn expand_collapse_and_remember() {
     settle(&mut harness);
     assert_eq!(harness.query_all_by_label("deeper").count(), 1);
     harness.get_by_label("⏶ Collapse all").click();
-    harness.run_steps(10);
+    settle(&mut harness);
     assert_eq!(harness.query_all_by_label("deeper").count(), 0);
     assert!(harness.state().open_folders().is_empty());
 
@@ -317,20 +326,20 @@ fn expand_collapse_and_remember() {
 #[test]
 fn help_and_about() {
     let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.get_by_label("Help").click();
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.get_by_label("About").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
     harness.key_press(egui::Key::Escape);
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(harness.query_by_label(&format!("Version {}", env!("CARGO_PKG_VERSION"))).is_none());
 
     harness.get_by_label("Help").click();
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.get_by_label("Keyboard and mouse shortcuts").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("Ctrl+S");
 }
 
@@ -349,6 +358,7 @@ fn preview_follows_selection() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().go(Location::Archive(data));
+    settle(&mut harness);
     harness.state_mut().preview("handling.meta", &ctx);
     settle(&mut harness);
 
@@ -370,12 +380,12 @@ fn preview_follows_selection() {
     harness.get_by_label("handling.meta").click();
     settle(&mut harness);
     harness.state_mut().edit_preview("<edited/>");
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.get_by_label("dlclist.xml").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(harness.state().asking_unsaved());
     harness.get_by_label("Cancel").click();
-    harness.run_steps(5);
+    settle(&mut harness);
     assert!(!harness.state().asking_unsaved());
     assert_eq!(harness.state().previewing(), Some("handling.meta"));
 }
@@ -405,7 +415,7 @@ fn tree_highlights_the_archive_opened() {
     assert_eq!(shown(&harness), copy);
     assert_eq!(harness.state().tree_selection(), Some(original.clone()));
     harness.event(egui::Event::Text("common".into()));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.key_press(egui::Key::Enter);
     settle(&mut harness);
     assert_eq!(harness.state().names(), ["data"]);
@@ -421,7 +431,7 @@ fn tree_highlights_the_archive_opened() {
     assert_eq!(shown(&harness), copy);
     assert_eq!(harness.state().tree_selection(), Some(copy.clone()));
     harness.event(egui::Event::Text("common".into()));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.key_press(egui::Key::Enter);
     settle(&mut harness);
     assert_eq!(harness.state().names(), ["data"]);
@@ -448,17 +458,17 @@ fn tree_highlights_the_archive_opened() {
 #[test]
 fn menus_follow_the_pointer() {
     let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
-    harness.run_steps(2);
+    settle(&mut harness);
     // Pointing at a menu title opens nothing until a menu is open.
     harness.get_by_label("Help").hover();
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(harness.query_by_label("About").is_none());
 
     harness.get_by_label("File").click();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("Open archive…");
     harness.get_by_label("Help").hover();
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("About");
     assert!(harness.query_by_label("Open archive…").is_none());
 }
@@ -479,7 +489,7 @@ fn show_original_of_one_archive() {
     settle(&mut harness);
     // The game's update.rpf is marked as read from the mods folder.
     harness.state_mut().go(Location::Folder(root.join("update")));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.get_by_label("↪");
 
     harness.state_mut().go(Location::Archive(paleto_core::ArchivePath::new(root.join("update/update.rpf")).join("common").join("data")));
@@ -503,10 +513,88 @@ fn show_original_of_one_archive() {
     harness.get_by_label("↩ Show original").click();
     settle(&mut harness);
     harness.state_mut().go(Location::Folder(root.join("update")));
-    harness.run_steps(2);
+    settle(&mut harness);
     harness.state_mut().go(Location::Archive(paleto_core::ArchivePath::new(root.join("update/update.rpf"))));
     settle(&mut harness);
     harness.get_by_label("MODS");
+}
+
+#[test]
+fn folders_load_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    fake_game(&root);
+    std::fs::write(root.join("x64/a.txt"), b"a").unwrap();
+    let mut harness = Harness::builder().with_size([1000.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.state_mut().delay_loads(Duration::from_millis(400));
+
+    // A slow folder says so; the one shown stays until it is read.
+    harness.state_mut().go(Location::Folder(root.join("update")));
+    std::thread::sleep(Duration::from_millis(200));
+    harness.run_steps(2);
+    // Above the list, and in the status bar with a Cancel button.
+    assert_eq!(harness.query_all_by_label("Reading update…").count(), 2);
+    assert_eq!(folder(&harness), root);
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root.join("update"));
+    assert!(harness.query_by_label("Reading update…").is_none());
+
+    // Cancelled, it stays where it was, and Back does not lead to the same place.
+    harness.state_mut().go(Location::Folder(root.join("x64")));
+    std::thread::sleep(Duration::from_millis(200));
+    harness.run_steps(2);
+    harness.get_by_label("✖ Cancel").click();
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root.join("update"));
+    harness.get_by_label("Reading x64: cancelled");
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root);
+    harness.state_mut().go(Location::Folder(root.join("update")));
+    settle(&mut harness);
+
+    // The last place asked for wins, and each one asked for is in the history.
+    harness.state_mut().go(Location::Archive(paleto_core::ArchivePath::new(root.join("update/update.rpf"))));
+    harness.run_steps(1);
+    harness.state_mut().go(Location::Folder(root.join("x64")));
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root.join("x64"));
+    assert_eq!(harness.state().names(), ["a.txt"]);
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    settle(&mut harness);
+    assert_eq!(harness.state().names(), ["common"]);
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root.join("update"));
+
+    // A place that cannot be read leaves the one shown, and the history, as they were.
+    std::fs::write(root.join("broken.rpf"), b"not an archive").unwrap();
+    harness.state_mut().go(Location::Archive(paleto_core::ArchivePath::new(root.join("broken.rpf"))));
+    settle(&mut harness);
+    assert!(harness.state().status_error().is_some());
+    assert_eq!(folder(&harness), root.join("update"));
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowLeft);
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root);
+
+    // Keys do nothing to the rows of the place shown while another is read.
+    harness.state_mut().go(Location::Folder(root.join("x64")));
+    harness.run_steps(1);
+    harness.key_press(egui::Key::ArrowDown);
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+    assert_eq!(folder(&harness), root.join("x64"));
+
+    // Going deep from a side tree not read yet still opens the folders above it there.
+    std::fs::create_dir_all(root.join("mods/inner_dir/deeper")).unwrap();
+    harness.state_mut().go(Location::Folder(root.join("mods/inner_dir/deeper")));
+    settle(&mut harness);
+    assert!(harness.state().open_folders().contains(&root.join("mods/inner_dir")));
+    // In the location bar, and in the side tree.
+    assert_eq!(harness.query_all_by_label("deeper").count(), 2);
 }
 
 #[test]
@@ -530,7 +618,8 @@ fn previews_load_in_the_background() {
     harness.state_mut().preview("notes.txt", &ctx);
     std::thread::sleep(Duration::from_millis(200));
     harness.run_steps(2);
-    harness.get_by_label("Loading notes.txt…");
+    // In the panel, and in the status bar with a Cancel button.
+    assert_eq!(harness.query_all_by_label("Loading notes.txt…").count(), 2);
     assert_eq!(harness.state().previewing(), None);
     settle(&mut harness);
     assert_eq!(harness.state().preview_text(), Some("notes"));
@@ -582,6 +671,7 @@ fn search_in_a_text() {
     harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     harness.state_mut().go(Location::Archive(data));
+    settle(&mut harness);
     harness.state_mut().preview("notes.txt", &ctx);
     settle(&mut harness);
     // A plain file has nothing to add to what the list says.
@@ -589,23 +679,23 @@ fn search_in_a_text() {
 
     // Ctrl+F opens the search with the keyboard in it; the matches count either case.
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.event(egui::Event::Text("beta".into()));
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("1 of 3");
     harness.key_press(egui::Key::Enter);
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("2 of 3");
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("1 of 3");
 
     // Nothing found says so; Esc closes the search, and the text is untouched.
     harness.event(egui::Event::Text("zzz".into()));
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("No match");
     harness.key_press(egui::Key::Escape);
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(harness.query_by_label("No match").is_none());
     assert_eq!(harness.state().preview_text(), Some("alpha beta\nBeta gamma\nlast\nbeta"));
     assert_eq!(harness.state_mut().search_preview("gamma"), Some(1));
@@ -625,7 +715,7 @@ fn side_tree_can_be_hidden() {
     let mut s = harness.state().settings().clone();
     s.show_tree = false;
     harness.state_mut().set_settings(s, &ctx);
-    harness.run_steps(3);
+    settle(&mut harness);
     assert!(harness.query_by_label("⏷ Expand all").is_none());
     // The file list is still there.
     harness.get_by_label("update");
@@ -633,7 +723,7 @@ fn side_tree_can_be_hidden() {
     let mut s = harness.state().settings().clone();
     s.show_tree = true;
     harness.state_mut().set_settings(s, &ctx);
-    harness.run_steps(3);
+    settle(&mut harness);
     harness.get_by_label("⏷ Expand all");
 }
 
@@ -650,14 +740,14 @@ fn enter_opens_the_selection() {
     // The main list is drawn after the side tree.
     let click = |harness: &mut Harness<'_, App>, label: &str, modifiers| {
         harness.get_all_by_label(label).last().unwrap().click_modifiers(modifiers);
-        harness.run_steps(2);
+        settle(harness);
     };
     let enter = |harness: &mut Harness<'_, App>| {
         harness.key_press(egui::Key::Enter);
-        harness.run_steps(3);
+        settle(harness);
         let opened = folder(harness);
         harness.state_mut().go(Location::Folder(root.clone()));
-        harness.run_steps(2);
+        settle(harness);
         opened
     };
     let none = egui::Modifiers::NONE;

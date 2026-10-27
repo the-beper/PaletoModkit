@@ -189,6 +189,7 @@ fn screens() {
     save(&mut harness, &dir, "3-preview");
 
     harness.state_mut().open(ArchivePath::new(game.root.join("x64e.rpf")).join("levels").join("gta5").join("vehicles.rpf"));
+    settle(&mut harness);
     harness.event(egui::Event::Text("adder".into()));
     settle(&mut harness);
     save(&mut harness, &dir, "4-type-to-search");
@@ -208,6 +209,7 @@ fn screens() {
 
     let mut s = Settings { text_size: TextSize::Small, density: Density::Compact, ..Default::default() };
     harness.state_mut().open(data.clone());
+    settle(&mut harness);
     harness.state_mut().set_settings(s.clone(), &ctx);
     settle(&mut harness);
     save(&mut harness, &dir, "5-small-compact");
@@ -243,6 +245,7 @@ fn dialogs() {
 
     // Unsaved-changes prompt (discarded, nothing is written).
     harness.state_mut().open(ArchivePath::new(game.root.join("update/update.rpf")).join("common").join("data"));
+    settle(&mut harness);
     harness.state_mut().preview("handling.meta", &ctx);
     harness.run_steps(2);
     harness.state_mut().edit_preview("<CHandlingDataMgr>\n  <!-- edited -->\n</CHandlingDataMgr>\n");
