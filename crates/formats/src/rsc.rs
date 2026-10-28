@@ -33,8 +33,22 @@ impl Resource {
         // The sizes come from the file (up to gigabytes): never more than they
         // say, and memory taken as the data proves it, beyond a first guess.
         let total = system_size + graphics_size;
-        let mut all = Vec::with_capacity(total.min(data.len() * 8));
-        DeflateDecoder::new(&data[16..]).take(total as u64).read_to_end(&mut all)?;
+        let inflate = |start: usize| -> Result<Vec<u8>, Error> {
+            let mut all = Vec::with_capacity(total.min(data.len() * 8));
+            DeflateDecoder::new(&data[start..]).take(total as u64).read_to_end(&mut all)?;
+            Ok(all)
+        };
+        // A few Legacy resources (24 in destruction archives) carry 8 more bytes
+        // before the stream: tried only when the stream at 16 fails or falls short
+        // of the size the flags announce, and taken only when it gives exactly that.
+        let first = inflate(16);
+        let mut all = match first {
+            Ok(all) if all.len() == total => all,
+            first => match data.get(24..).map(|_| inflate(24)) {
+                Some(Ok(all)) if all.len() == total => all,
+                _ => first?,
+            },
+        };
         let split = system_size.min(all.len());
         let graphics = all.split_off(split);
         Ok(Resource { version, system: all, graphics })
@@ -109,6 +123,23 @@ mod tests {
         deflate.write_all(payload).unwrap();
         out.extend(deflate.finish().unwrap());
         out
+    }
+
+    /// Some Legacy resources have 8 more bytes before the deflate stream.
+    #[test]
+    fn stream_starting_at_24() {
+        // One page of 512 bytes (0x0800_0000: 1 << 27 is the 512-byte page count flag).
+        let payload = vec![3u8; 512];
+        let plain = resource(0x0800_0000, &payload);
+        let mut shifted = plain[..16].to_vec();
+        shifted.extend([0xA5; 8]);
+        shifted.extend(&plain[16..]);
+        assert_eq!(Resource::parse(&plain).unwrap().system, payload);
+        assert_eq!(Resource::parse(&shifted).unwrap().system, payload);
+        // Garbage that inflates at neither place stays an error.
+        let mut broken = plain[..16].to_vec();
+        broken.extend([0xFF; 40]);
+        assert!(Resource::parse(&broken).is_err());
     }
 
     /// Page sizes from the header are believed only as far as the data goes.

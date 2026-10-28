@@ -238,13 +238,27 @@ fn compare(ext: &str, original: &[u8], built: &[u8]) -> Result<(), String> {
             if m.positions.len() != n.positions.len() {
                 return Err(format!("vertices{who} {lod}: {} → {}", m.positions.len(), n.positions.len()));
             }
-            let worst = m.positions.iter().zip(&n.positions).map(|(p, q)| (0..3).map(|k| (p[k] - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+            // CodeWalker rebuilds the BVH of collision and reorders its vertices: compare those as sets.
+            let worst = if ext == "ybn" { set_distance(&m.positions, &n.positions) } else { m.positions.iter().zip(&n.positions).map(|(p, q)| (0..3).map(|k| (p[k] - q[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max) };
             if worst > TOLERANCE {
                 return Err(format!("positions{who} {lod}: off by up to {worst}"));
             }
         }
     }
     Ok(())
+}
+
+/// How far apart two vertex sets are, whatever their order: the bounding boxes, and
+/// for up to 5000 vertices each vertex's distance to the nearest one of the other set.
+fn set_distance(a: &[[f32; 3]], b: &[[f32; 3]]) -> f32 {
+    let bounds = |v: &[[f32; 3]]| (0..3).map(|k| (v.iter().map(|p| p[k]).fold(f32::MAX, f32::min), v.iter().map(|p| p[k]).fold(f32::MIN, f32::max))).collect::<Vec<_>>();
+    let (x, y) = (bounds(a), bounds(b));
+    let mut worst = x.iter().zip(&y).map(|(p, q)| (p.0 - q.0).abs().max((p.1 - q.1).abs())).fold(0.0, f32::max);
+    if a.len() <= 5000 {
+        let nearest = |from: &[[f32; 3]], to: &[[f32; 3]]| from.iter().map(|p| to.iter().map(|q| (0..3).map(|k| (p[k] - q[k]).powi(2)).sum::<f32>()).fold(f32::MAX, f32::min).sqrt()).fold(0.0, f32::max);
+        worst = worst.max(nearest(a, b)).max(nearest(b, a));
+    }
+    worst
 }
 
 /// The cached keys.

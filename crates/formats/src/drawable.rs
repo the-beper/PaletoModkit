@@ -380,10 +380,11 @@ const FLOAT2: u64 = 5;
 /// The first texture coordinates' component.
 const TEXCOORD0: usize = 6;
 
-/// Legacy models are versions 165 (`.ydr`, `.ydd`) and 162 (`.yft`); the
-/// Enhanced edition uses others (154, 159, 171) with gen9 vertex buffers.
+/// Legacy models are versions 165 (`.ydr`, `.ydd`) and 162 (`.yft`), and 160 for
+/// a few fragments (66 in the Legacy game); the Enhanced edition uses others
+/// (154, 159, 171) with gen9 vertex buffers.
 pub(crate) fn is_enhanced(version: u32) -> bool {
-    !matches!(version, 162 | 165)
+    !matches!(version, 160 | 162 | 165)
 }
 
 /// Gen9 vertex element formats: R32G32B32_FLOAT, R16G16_FLOAT, R32G32 (floats).
@@ -493,6 +494,12 @@ fn geometry(res: &Resource, ptr: u64, mesh: &mut Mesh, transform: Option<&Transf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_and_enhanced_versions() {
+        assert!([160, 162, 165].into_iter().all(|v| !is_enhanced(v)));
+        assert!([154, 159, 171].into_iter().all(is_enhanced));
+    }
 
     #[test]
     fn half_floats() {

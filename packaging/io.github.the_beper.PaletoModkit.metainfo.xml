@@ -91,6 +91,16 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.5.1" date="2026-10-28">
+      <description>
+        <p>Fixes for model export and for a few Legacy files that would not open.</p>
+        <ul>
+          <li>Exporting a model as XML no longer exhausts memory on damaged files, and the textures never land outside the chosen folder.</li>
+          <li>Legacy fragments of resource version 160 (66 files) export and preview correctly.</li>
+          <li>24 Legacy resources in the destruction archives, which failed to open, now open.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-10-27">
       <description>
         <p>Model export as CodeWalker XML, more files in the preview, and a window that no longer blocks.</p>
