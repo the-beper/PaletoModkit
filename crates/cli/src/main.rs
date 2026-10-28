@@ -540,7 +540,7 @@ fn main() -> Result<()> {
             println!("wrote {}", output.join(format!("{file}.xml")).display());
             // The textures go in a folder named after the model, where CodeWalker looks for them.
             for (name, dds) in &export.textures {
-                let dest = output.join(stem).join(name);
+                let dest = output.join(xml_export::texture_folder(stem)).join(name);
                 write_file(&dest, dds)?;
                 println!("wrote {}", dest.display());
             }

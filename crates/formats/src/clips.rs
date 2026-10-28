@@ -110,7 +110,7 @@ pub fn parse(data: &[u8]) -> Result<ClipDictionary, Error> {
     Ok(dict)
 }
 
-/// Tracks of all animations, and members of all clip groups, at most.
+/// Most tracks of all animations, and most members of all clip groups; each count is checked against it separately.
 const MAX_TRACKS: usize = 4_000_000;
 
 /// Entries (key, value pointer) of a chained hash map: `capacity` bucket

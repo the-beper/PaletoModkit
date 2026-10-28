@@ -103,6 +103,11 @@ fn shatter_line(start1: u8, data1: Option<&[u8]>, start2: u8, data2: Option<&[u8
     line
 }
 
+/// Cells per shatter map row, and rows per map, read from a file; more is refused.
+const MAX_SHATTER_CELLS: usize = 4096;
+/// Text of all the shatter maps of one vehicle glass block.
+const MAX_SHATTER_BYTES: usize = 16 << 20;
+
 struct Writer<'a> {
     res: &'a Resource,
     names: &'a Names,
@@ -229,30 +234,31 @@ impl Writer<'_> {
         let glass = u64_at(f, 0xE0);
         if glass != 0 {
             let windows = self.pointers(glass, f[0xD9] as usize)?;
-            self.items("GlassWindows", &windows, |w, p| w.glass_window(p))?;
+            self.items("GlassWindows", &windows, |w, _, p| w.glass_window(p))?;
         }
         let lights = read_lights(res, u64_at(f, 0x110), u16_at(f, 0x118), self.names)?;
         self.xml.lights(&lights);
         if !cloths.is_empty() {
-            self.items("Cloths", &cloths, |w, p| w.environment_cloth(p))?;
+            self.items("Cloths", &cloths, |w, _, p| w.environment_cloth(p))?;
         }
         self.xml.close("Fragment");
         Ok(())
     }
 
     /// CodeWalker's `WriteItemArray` of blocks by pointer: `<name />` for none, `<Item />` for a null one.
-    fn items(&mut self, name: &str, pointers: &[u64], mut item: impl FnMut(&mut Self, u64) -> Result<(), Error>) -> Result<(), Error> {
+    /// `item` gets the index in `pointers`, nulls included.
+    fn items(&mut self, name: &str, pointers: &[u64], mut item: impl FnMut(&mut Self, usize, u64) -> Result<(), Error>) -> Result<(), Error> {
         if pointers.is_empty() {
             self.xml.empty(name, "");
             return Ok(());
         }
         self.xml.open(name);
-        for &p in pointers {
+        for (i, &p) in pointers.iter().enumerate() {
             if p == 0 {
                 self.xml.empty("Item", "");
             } else {
                 self.xml.open("Item");
-                item(self, p)?;
+                item(self, i, p)?;
                 self.xml.close("Item");
             }
         }
@@ -321,10 +327,8 @@ impl Writer<'_> {
             let list = self.pointers(groups, count)?;
             // Group names come from their own list when there is one (CodeWalker's fix for edited files).
             let group_names = self.pointers(u64_at(l, 0xC0), count)?;
-            let mut i = 0;
-            self.items("Groups", &list, |w, p| {
-                let name = group_names.get(i).copied().filter(|&n| n != 0).unwrap_or(p + 0x80);
-                i += 1;
+            self.items("Groups", &list, |w, i, p| {
+                let name = group_names.get(i).copied().filter(|&n| n != 0).unwrap_or(p.wrapping_add(0x80));
                 w.group(p, name)
             })?;
         }
@@ -495,16 +499,24 @@ impl Writer<'_> {
         let count = u16_at(res.block(ptr, 0x10)?, 6) as usize;
         // The header, the (even) list of offsets and a word.
         let mut at = 16 + (count + (count & 1)) as u64 * 8;
+        let mut shatter_bytes = 0;
         for _ in 0..count {
             let w = res.block(ptr + at, 0x70)?;
             let (width, rows, bytes) = (u16_at(w, 0x48) as usize, u16_at(w, 0x4A) as usize, u16_at(w, 0x4C));
             let mut pos = at + 0x70;
             let mut map = None;
             if bytes != 0 {
+                if width > MAX_SHATTER_CELLS || rows > MAX_SHATTER_CELLS {
+                    return Err(Error::Format("vehicle glass shatter map too large".into()));
+                }
                 pos += rows as u64 * 2;
                 let mut lines = Vec::with_capacity(rows);
                 for _ in 0..rows {
                     let (line, len) = self.shatter_row(ptr + pos, width)?;
+                    shatter_bytes += line.len();
+                    if shatter_bytes > MAX_SHATTER_BYTES {
+                        return Err(Error::Format("vehicle glass shatter maps too large".into()));
+                    }
                     lines.push(line);
                     pos += len;
                 }

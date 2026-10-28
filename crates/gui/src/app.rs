@@ -1832,7 +1832,7 @@ impl App {
                         let write = |path: PathBuf, data: &[u8]| std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()));
                         write(dir.join(format!("{file}.xml")), export.xml.as_bytes())?;
                         // The textures go in a folder named after the model, where CodeWalker looks for them.
-                        let textures = dir.join(stem);
+                        let textures = dir.join(paleto_formats::xml_export::texture_folder(stem));
                         if !export.textures.is_empty() {
                             std::fs::create_dir_all(&textures).map_err(|e| format!("{}: {e}", textures.display()))?;
                         }

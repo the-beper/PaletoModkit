@@ -264,11 +264,11 @@ impl<'a> Writer<'a> {
         // CodeWalker writes the materials whenever the pointer is set, even none of them.
         let (materials, material_count) = (u64_at(g, 0xF0), g[0x120] as usize);
         if materials != 0 {
-            let list = array(res, materials, material_count, 8)?;
-            self.spend(material_count)?;
-            if list.is_empty() {
+            if material_count == 0 {
                 self.empty("Materials", "");
             } else {
+                let list = array(res, materials, material_count, 8)?;
+                self.spend(material_count)?;
                 self.open("Materials");
                 for m in list.as_chunks::<8>().0 {
                     self.material(u32_at(m, 0), u32_at(m, 4));

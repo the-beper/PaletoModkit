@@ -53,3 +53,21 @@ fn model_refuses_files_that_are_not_models() {
     }
     assert!(!out.join("broken.ydr.xml").exists() && !out.join("notes.txt.xml").exists());
 }
+
+#[test]
+fn model_named_with_dots_writes_only_inside_output() {
+    // The stem is "..": its textures folder must not be the parent of the output folder.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    let model = src.join("...ydr");
+    std::fs::write(&model, empty_drawable()).unwrap();
+    let out = dir.path().join("out");
+    let run = paleto(dir.path()).arg("model").arg(&model).arg("-o").arg(&out).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(out.join("...ydr.xml").is_file());
+    // Nothing next to the output folder but the source (hidden entries, if any, are the home's).
+    let mut names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| !n.starts_with('.')).collect();
+    names.sort();
+    assert_eq!(names, ["out", "src"]);
+}

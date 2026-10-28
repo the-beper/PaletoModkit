@@ -124,3 +124,85 @@ fn damaged_dictionaries_are_errors() {
         let _ = paleto_formats::xml_export::export(&data[..n], "ydd", "dict", &[]);
     }
 }
+
+/// A Legacy `.ydd` with one drawable whose `models` high-detail models all point at one list of
+/// `geometries_each` geometries (the same triangle each time), in a system page of 1 MiB.
+fn shared_models_ydd(models: u16, geometries_each: u16) -> Vec<u8> {
+    let mut s = vec![0u8; 0x10_0000];
+    let mut put = |at: u64, bytes: &[u8]| s[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    let ptr = |at: u64| (SYS + at).to_le_bytes();
+    let floats = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    // Dictionary and drawable as in `ydd`, the drawable's high-detail model list at 0x100.
+    put(0x20, &ptr(0x40));
+    put(0x28, &1u16.to_le_bytes());
+    put(0x30, &ptr(0x48));
+    put(0x38, &1u16.to_le_bytes());
+    put(0x40, &0x1234_5678u32.to_le_bytes());
+    put(0x48, &ptr(0x50));
+    let d = 0x50;
+    put(d + 0x20, &floats(&[0.5, 0.5, 0.0, 1.0]));
+    put(d + 0x40, &floats(&[1.0, 1.0, 0.0]));
+    put(d + 0x50, &ptr(0x100));
+    put(d + 0x70, &floats(&[9998.0; 4]));
+    put(d + 0x80, &0xFFu32.to_le_bytes());
+    // The model list at 0x100 points at `models` entries from 0x1000, all of one model at 0x9_0000.
+    const MODEL: u64 = 0x9_0000;
+    put(0x100, &ptr(0x1000));
+    put(0x108, &models.to_le_bytes());
+    for i in 0..models as u64 {
+        put(0x1000 + i * 8, &ptr(MODEL));
+    }
+    // The model: its geometry list at +0x100, shaders at +0x200, the geometry at +0x300.
+    put(MODEL + 0x08, &ptr(MODEL + 0x100));
+    put(MODEL + 0x10, &geometries_each.to_le_bytes());
+    put(MODEL + 0x20, &ptr(MODEL + 0x200));
+    put(MODEL + 0x2C, &0x00FFu16.to_le_bytes());
+    for i in 0..geometries_each as u64 {
+        put(MODEL + 0x100 + i * 8, &ptr(MODEL + 0x300));
+    }
+    // Geometry: vertex buffer at +0x400, index buffer at +0x500.
+    put(MODEL + 0x300 + 0x18, &ptr(MODEL + 0x400));
+    put(MODEL + 0x300 + 0x38, &ptr(MODEL + 0x500));
+    // Vertex buffer (Legacy layout): stride 20, data at +0x800, three vertices, declaration at +0x600.
+    put(MODEL + 0x400 + 0x08, &20u16.to_le_bytes());
+    put(MODEL + 0x400 + 0x10, &ptr(MODEL + 0x800));
+    put(MODEL + 0x400 + 0x18, &3u32.to_le_bytes());
+    put(MODEL + 0x400 + 0x30, &ptr(MODEL + 0x600));
+    put(MODEL + 0x600, &(1u32 | 1 << 4 | 1 << 6).to_le_bytes());
+    put(MODEL + 0x608, &(6u64 | 8 << 16 | 1 << 24).to_le_bytes());
+    // Index buffer: three indices at +0x700.
+    put(MODEL + 0x500 + 0x08, &3u32.to_le_bytes());
+    put(MODEL + 0x500 + 0x10, &ptr(MODEL + 0x700));
+    put(MODEL + 0x700, &[0, 0, 1, 0, 2, 0]);
+
+    // Header: system page of 0x800 bytes x 512 blocks = 1 MiB (flags: shift 2, count field 32 << 4), version 165.
+    let version = 165u32;
+    let system_flags = ((version >> 4) << 28) | (32 << 17) | 2;
+    let mut out = Vec::new();
+    for w in [0x3743_5352, version, system_flags, (version & 0xF) << 28] {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    let mut z = DeflateEncoder::new(out, Compression::default());
+    z.write_all(&s).unwrap();
+    z.finish().unwrap()
+}
+
+#[test]
+fn models_sharing_one_geometry_list_are_bounded() {
+    // 65535 models x 2 geometries = 131070 visits, over the per-drawable budget: refused, and quickly.
+    let data = shared_models_ydd(65535, 2);
+    let start = std::time::Instant::now();
+    let result = paleto_formats::xml_export::export(&data, "ydd", "dict", &[]);
+    assert!(start.elapsed() < std::time::Duration::from_secs(60));
+    let Err(err) = result else { panic!("the geometry budget should refuse the dictionary") };
+    assert!(err.to_string().contains("too many geometries"), "{err}");
+}
+
+#[test]
+fn texture_folder_never_leaves_the_output() {
+    use paleto_formats::xml_export::texture_folder;
+    assert_eq!(texture_folder(".."), "textures");
+    assert_eq!(texture_folder("."), "textures");
+    assert_eq!(texture_folder(""), "textures");
+    assert_eq!(texture_folder("prop_probe"), "prop_probe");
+}

@@ -371,8 +371,9 @@ fn read_base(res: &Resource, ptr: u64, name: String, names: &Names) -> Result<Dr
         (embedded, read_shaders(res, group, enhanced, names)?, true)
     };
     let mut lods: [Option<Vec<Model>>; 4] = Default::default();
+    let mut budget = Budget::default();
     for (i, lod) in lods.iter_mut().enumerate() {
-        *lod = read_models(res, u64_at(base, 0x50 + i * 8), enhanced)?;
+        *lod = read_models(res, u64_at(base, 0x50 + i * 8), enhanced, &mut budget)?;
     }
     Ok(Drawable {
         name,
@@ -478,13 +479,13 @@ fn read_shader(res: &Resource, ptr: u64, enhanced: bool, names: &Names) -> Resul
                         if base == 0 || floats == 0 {
                             Value::Missing(if vectors > 1 { "Array" } else { "Vector" })
                         } else if floats <= 4 {
-                            let b = res.block(base + offset, floats * 4)?;
+                            let b = res.block(base.wrapping_add(offset), floats * 4)?;
                             Value::Vector(std::array::from_fn(|i| if i < floats { f32_at(b, i * 4) } else { 0.0 }))
                         } else if vectors == 1 {
                             // Between 5 and 7 floats: CodeWalker writes the item without values.
                             Value::Missing("Vector")
                         } else {
-                            let b = res.block(base + offset, vectors * 16)?;
+                            let b = res.block(base.wrapping_add(offset), vectors * 16)?;
                             Value::Array(b.as_chunks::<16>().0.iter().map(|v| std::array::from_fn(|i| f32_at(v, i * 4))).collect())
                         }
                     }
@@ -548,7 +549,25 @@ fn read_skeleton(res: &Resource, ptr: u64) -> Result<Option<Skeleton>, Error> {
     Ok(Some(Skeleton { unknown, bones }))
 }
 
-fn read_models(res: &Resource, list: u64, enhanced: bool) -> Result<Option<Vec<Model>>, Error> {
+/// Work limits shared by all the models of one drawable: models may point at the same geometry list,
+/// so the counts are of visits, not of distinct data.
+struct Budget {
+    geometries: usize,
+    vertices: usize,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Budget { geometries: 0, vertices: MAX_VERTICES }
+    }
+}
+
+/// Geometry visits allowed per drawable.
+const MAX_GEOMETRIES: usize = 100_000;
+/// Vertices read per drawable.
+const MAX_VERTICES: usize = 8_000_000;
+
+fn read_models(res: &Resource, list: u64, enhanced: bool, budget: &mut Budget) -> Result<Option<Vec<Model>>, Error> {
     if list == 0 {
         return Ok(None);
     }
@@ -563,9 +582,13 @@ fn read_models(res: &Resource, list: u64, enhanced: bool) -> Result<Option<Vec<M
             let shaders = if mapping == 0 || count == 0 { &[][..] } else { res.block(mapping, count * 2)? };
             let mut list = Vec::new();
             if geometries != 0 && count != 0 {
+                budget.geometries += count;
+                if budget.geometries > MAX_GEOMETRIES {
+                    return Err(Error::Format("model with too many geometries".into()));
+                }
                 for (gi, g) in res.block(geometries, count * 8)?.as_chunks::<8>().0.iter().enumerate() {
                     let shader = shaders.get(gi * 2..gi * 2 + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
-                    if let Some(geometry) = read_geometry(res, u64::from_le_bytes(*g), shader, enhanced)? {
+                    if let Some(geometry) = read_geometry(res, u64::from_le_bytes(*g), shader, enhanced, budget)? {
                         list.push(geometry);
                     }
                 }
@@ -577,7 +600,7 @@ fn read_models(res: &Resource, list: u64, enhanced: bool) -> Result<Option<Vec<M
 }
 
 /// A geometry with its buffers; `None` when it has none to draw.
-fn read_geometry(res: &Resource, ptr: u64, shader: u16, enhanced: bool) -> Result<Option<Geometry>, Error> {
+fn read_geometry(res: &Resource, ptr: u64, shader: u16, enhanced: bool, budget: &mut Budget) -> Result<Option<Geometry>, Error> {
     let geom = res.block(ptr, 0x98)?;
     let (vb, ib) = (u64_at(geom, 0x18), u64_at(geom, 0x38));
     if vb == 0 || ib == 0 {
@@ -589,7 +612,7 @@ fn read_geometry(res: &Resource, ptr: u64, shader: u16, enhanced: bool) -> Resul
         return Ok(None);
     }
     let indices: Vec<u16> = res.block(indices, count * 2)?.as_chunks::<2>().0.iter().map(|i| u16::from_le_bytes(*i)).collect();
-    let (kind, layout, vertices) = read_vertices(res, vb, enhanced)?;
+    let (kind, layout, vertices) = read_vertices(res, vb, enhanced, budget)?;
     let (mut min, mut max) = ([0.0f32; 3], [0.0f32; 3]);
     for (i, v) in vertices.iter().enumerate() {
         for c in 0..3 {
@@ -683,7 +706,7 @@ fn declaration_name(types: u64) -> String {
 /// The declaration type to write, the components present (as bits) and the values
 /// of each vertex. Vertices are written as GTAV1 when their values fit it (whatever
 /// they are stored as), else in the cloth types GTAV2 to GTAV4 that store them so.
-fn read_vertices(res: &Resource, vb: u64, enhanced: bool) -> Result<(&'static str, u32, Vertices), Error> {
+fn read_vertices(res: &Resource, vb: u64, enhanced: bool, budget: &mut Budget) -> Result<(&'static str, u32, Vertices), Error> {
     let unsupported = || Error::Unsupported("this vertex layout".into());
     // Each component: its GTAV1 bit, source, and byte offset in the vertex; and the Legacy declaration type.
     let (count, stride, data, mut parts, types) = if enhanced {
@@ -738,6 +761,7 @@ fn read_vertices(res: &Resource, vb: u64, enhanced: bool) -> Result<(&'static st
     if count == 0 {
         return Ok((kind, layout, Vec::new()));
     }
+    budget.vertices = budget.vertices.checked_sub(count).ok_or_else(|| Error::Format("too many vertices".into()))?;
     let raw = res.block(data, stride * count)?;
     let vertices = raw.chunks_exact(stride).map(|v| parts.iter().map(|&(_, source, at)| source.read(&v[at..])).collect()).collect();
     Ok((kind, layout, vertices))
@@ -752,6 +776,12 @@ pub(crate) fn fl(v: f32) -> String {
     } else {
         v.to_string()
     }
+}
+
+/// The folder under the export folder that holds the textures of a model `stem`. A stem that would
+/// leave the export folder (`""`, `.`, `..`) gets `textures` instead.
+pub fn texture_folder(stem: &str) -> String {
+    if matches!(stem, "" | "." | "..") { "textures".into() } else { stem.into() }
 }
 
 /// Escapes text for XML, quotes included; control characters, which XML cannot hold, are left out.
@@ -1367,14 +1397,14 @@ mod tests {
             v.extend([0x3800u16, 0x3C00, 0, 0x3C00, 0xBC00, 0x3400].iter().flat_map(|h| h.to_le_bytes()));
         }
         let res = vertex_buffer(flags, 0x0300_0000_0199_A006, 32, &v);
-        let (kind, layout, vertices) = read_vertices(&res, ROOT + 0x40, false).unwrap();
+        let (kind, layout, vertices) = read_vertices(&res, ROOT + 0x40, false, &mut Budget::default()).unwrap();
         assert_eq!((kind, layout), ("GTAV2", flags));
         assert_eq!(vertices[1], [vec![1.0, 2.0, 1.0], vec![1.0, -1.0, 0.0, 0.0], vec![10.0, 20.0, 30.0, 255.0], vec![0.5, 1.0], vec![0.0, 1.0, -1.0, 0.25]]);
         // The same values in an unnamed declaration still become GTAV1 where they fit, and are refused where not.
-        assert!(read_vertices(&vertex_buffer(flags, 0x0300_0000_0199_A007, 32, &v), ROOT + 0x40, false).is_err());
+        assert!(read_vertices(&vertex_buffer(flags, 0x0300_0000_0199_A007, 32, &v), ROOT + 0x40, false, &mut Budget::default()).is_err());
         let gtav3 = vertex_buffer(1 | 1 << 6, 0x0300_0000_0199_6006, 16, &[0; 32]);
-        assert_eq!(read_vertices(&gtav3, ROOT + 0x40, false).unwrap().0, "GTAV3");
+        assert_eq!(read_vertices(&gtav3, ROOT + 0x40, false, &mut Budget::default()).unwrap().0, "GTAV3");
         let gtav1 = vertex_buffer(1 | 1 << 6, 0x7755_5555_5599_6996, 20, &[0; 40]);
-        assert_eq!(read_vertices(&gtav1, ROOT + 0x40, false).unwrap().0, "GTAV1");
+        assert_eq!(read_vertices(&gtav1, ROOT + 0x40, false, &mut Budget::default()).unwrap().0, "GTAV1");
     }
 }
