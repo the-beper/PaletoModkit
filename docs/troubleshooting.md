@@ -54,7 +54,7 @@ For a game that crashes when you do not know which mod causes it:
 
 The culprit stays turned off, so you can play to confirm it; then remove or update that mod. **Turn everything back on** (or **Stop**, at any time) puts everything back where it was.
 
-Turned-off parts are moved to the game folder's `mods_disabled/` folder and back; the search survives closing the app.
+Turned-off parts are moved to the game folder's `mods_disabled/` folder and back; the search survives closing the app. Each move is a single rename that never replaces anything (atomic, but outside the journaled change that records the state of the hunt and the files turned off inside an archive: if that change fails after parts were moved, the message says so, the next answer is refused because the state no longer matches what is on disk, and **Stop** puts them back).
 
 **Look inside it**: when the culprit is an archive that holds several mods (the mods copy of `update.rpf` often does), the search can go on among its changed files. Files are turned off by putting the game's own version back in the archive, and restored afterwards. On a real Enhanced `update.rpf` with 621 changed files, this takes about 10 game runs, under half a second per step.
 

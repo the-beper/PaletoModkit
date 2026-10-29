@@ -476,3 +476,86 @@ fn renaming_and_creating_a_folder_in_a_game_folder_are_refused_while_the_game_is
     new_folder(&mut harness, "extra");
     assert!(root.join("scripts/extra").is_dir());
 }
+
+fn identity(path: &std::path::Path) -> (u64, u64, Vec<u8>) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).unwrap();
+    (m.dev(), m.ino(), std::fs::read(path).unwrap())
+}
+
+/// F2 on the item, as a user renames it: true if the rename box opened.
+fn ask_rename(harness: &mut Harness<'_, App>, label: &str) -> bool {
+    use egui_kittest::kittest::Queryable;
+    // A folder is also in the side tree: the first match is enough.
+    // (Not every kind of file is listed.)
+    let Some(item) = harness.query_all_by_label(label).next() else { return false };
+    item.click();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::F2);
+    harness.run_steps(2);
+    harness.state().name_dialog().is_some()
+}
+
+#[test]
+fn a_path_through_a_link_from_mods_to_the_originals_is_neither_deleted_nor_renamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    std::fs::create_dir_all(root.join("x64")).unwrap();
+    std::fs::create_dir_all(root.join("mods")).unwrap();
+    std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+    std::fs::write(root.join("x64/a.rpf"), b"original archive").unwrap();
+    std::os::unix::fs::symlink("../x64", root.join("mods/x64")).unwrap();
+    let original = identity(&root.join("x64/a.rpf"));
+
+    let mut harness = Harness::builder().with_size([1100.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.state_mut().go(paleto_modkit::Location::Folder(root.join("mods/x64")));
+    settle(&mut harness);
+    assert_eq!(harness.state().names(), ["a.rpf"]);
+
+    harness.state_mut().delete_now(&["a.rpf"], &ctx);
+    settle(&mut harness);
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("a.rpf") && e.contains("leads outside")), "{:?}", harness.state().status_error());
+    assert!(!ask_rename(&mut harness, "a.rpf"), "the rename box opened");
+    settle(&mut harness);
+    assert_eq!(identity(&root.join("x64/a.rpf")), original);
+    assert!(root.join("mods/x64").is_symlink());
+}
+
+#[test]
+fn the_originals_of_another_game_folder_are_neither_deleted_nor_renamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (open, other) = (dir.path().join("open"), dir.path().join("other"));
+    for root in [&open, &other] {
+        std::fs::create_dir_all(root.join("update")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+    }
+    for name in ["x64a.rpf", "steam_api64.dll", "commandline.txt", "plugin.asi"] {
+        std::fs::write(other.join(name), name.as_bytes()).unwrap();
+    }
+    let mut harness = Harness::builder().with_size([1100.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&open, &ctx);
+    settle(&mut harness);
+    // The file browser is on the other game's folder: its data, programs and libraries are as safe as the open game's.
+    harness.state_mut().go(paleto_modkit::Location::Folder(other.clone()));
+    settle(&mut harness);
+    for name in ["x64a.rpf", "update", "GTA5.exe", "steam_api64.dll", "commandline.txt"] {
+        harness.state_mut().go(paleto_modkit::Location::Folder(other.clone()));
+        settle(&mut harness);
+        harness.state_mut().delete_now(&[name, "plugin.asi"], &ctx);
+        settle(&mut harness);
+        assert!(harness.state().status_error().is_some_and(|e| e.starts_with(name)), "{name}: {:?}", harness.state().status_error());
+        assert!(!ask_rename(&mut harness, name), "{name}: the rename box opened");
+        settle(&mut harness);
+        assert!(other.join(name).exists() && other.join("plugin.asi").exists(), "{name}");
+    }
+    // Its plugins are not refused: they go through that game's own lock and folders (the tree click may have entered a folder).
+    harness.state_mut().go(paleto_modkit::Location::Folder(other.clone()));
+    settle(&mut harness);
+    harness.state_mut().delete_now(&["plugin.asi"], &ctx);
+    settle(&mut harness);
+    assert!(!other.join("plugin.asi").exists() && other.join("x64a.rpf").exists(), "{:?}", harness.state().status_error());
+}

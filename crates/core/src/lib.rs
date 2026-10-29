@@ -27,6 +27,8 @@ pub mod xml;
 #[cfg(test)]
 pub(crate) mod fixtures;
 #[cfg(test)]
+mod edit_txn_tests;
+#[cfg(test)]
 mod link_matrix_tests;
 #[cfg(test)]
 mod oiv_txn_tests;

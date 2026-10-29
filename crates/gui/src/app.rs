@@ -2146,16 +2146,18 @@ impl App {
                 if let Some(dir) = self.disk_folder() {
                     self.select_after = Some(to.clone());
                     self.task = Some(Task::spawn("Renaming", ctx, move || {
-                        // In a game folder, one change at a time: busy while another runs.
-                        let locked = vfs::locked_in_game(&dir, "renaming a file", || {
-                            let target = dir.join(&to);
-                            // Names differing only in case are the same item for the game.
-                            let clash = !from.eq_ignore_ascii_case(&to) && std::fs::symlink_metadata(&target).is_ok();
-                            Ok(if clash { Err(std::io::ErrorKind::AlreadyExists.into()) } else { std::fs::rename(dir.join(&from), &target) })
-                        });
-                        match locked {
-                            Ok(Ok(())) => Outcome::Done { message: format!("renamed {from} to {to}"), reload: None },
-                            Ok(Err(e)) => Outcome::Failed(format!("renaming {from}: {e}")),
+                        let renamed = match vfs::owner_of(&dir) {
+                            // In a game folder: under its lock, through its confined folders, never over what is at the new name.
+                            Some(game) => vfs::local_rel(&dir.join(&from), &game).and_then(|rel| vfs::rename_local(&game, &rel, &to)).map_err(|e| e.to_string()),
+                            None => {
+                                let target = dir.join(&to);
+                                // Names differing only in case are the same item for the game.
+                                let clash = !from.eq_ignore_ascii_case(&to) && std::fs::symlink_metadata(&target).is_ok();
+                                if clash { Err(std::io::ErrorKind::AlreadyExists.into()) } else { std::fs::rename(dir.join(&from), &target) }.map_err(|e: std::io::Error| e.to_string())
+                            }
+                        };
+                        match renamed {
+                            Ok(()) => Outcome::Done { message: format!("renamed {from} to {to}"), reload: None },
                             Err(e) => Outcome::Failed(format!("renaming {from}: {e}")),
                         }
                     }));
@@ -2172,10 +2174,16 @@ impl App {
             Action::CreateFolder(name) => {
                 if let Some(dir) = self.disk_folder() {
                     self.select_after = Some(name.clone());
-                    self.task = Some(Task::spawn("Creating folder", ctx, move || match vfs::locked_in_game(&dir, "creating a folder", || Ok(std::fs::create_dir(dir.join(&name)))) {
-                        Ok(Ok(())) => Outcome::Done { message: format!("created folder {name}"), reload: None },
-                        Ok(Err(e)) => Outcome::Failed(format!("creating {name}: {e}")),
-                        Err(e) => Outcome::Failed(format!("creating {name}: {e}")),
+                    self.task = Some(Task::spawn("Creating folder", ctx, move || {
+                        let made = match vfs::owner_of(&dir) {
+                            // In a game folder: under its lock, through its confined folders.
+                            Some(game) => vfs::local_rel(&dir.join(&name), &game).and_then(|rel| vfs::mkdir_local(&game, &rel)).map_err(|e| e.to_string()),
+                            None => std::fs::create_dir(dir.join(&name)).map_err(|e| e.to_string()),
+                        };
+                        match made {
+                            Ok(()) => Outcome::Done { message: format!("created folder {name}"), reload: None },
+                            Err(e) => Outcome::Failed(format!("creating {name}: {e}")),
+                        }
                     }));
                     return;
                 }
@@ -2196,22 +2204,25 @@ impl App {
                 }
                 if let Some(dir) = self.disk_folder() {
                     self.task = Some(Task::spawn("Deleting", ctx, move || {
-                        // In a game folder, one change at a time. A link is removed itself, never followed
-                        // (`symlink_metadata` does not follow, and `remove_dir_all` leaves links inside alone).
-                        let deleted = vfs::locked_in_game(&dir, "deleting files", || {
-                            for name in &names {
+                        let deleted = match vfs::owner_of(&dir) {
+                            // In a game folder: one transaction under its lock, through its confined folders. A link is
+                            // removed itself, never followed, and folders go with all they hold.
+                            Some(game) => names
+                                .iter()
+                                .map(|name| vfs::local_rel(&dir.join(name), &game))
+                                .collect::<Result<Vec<_>, _>>()
+                                .and_then(|rels| vfs::delete_local(&game, &rels))
+                                .map_err(|e| format!("deleting: {e}")),
+                            // Elsewhere, a link is removed itself too (`symlink_metadata` does not follow, and `remove_dir_all` leaves links inside alone).
+                            None => names.iter().try_for_each(|name| {
                                 let path = dir.join(name);
                                 let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
-                                if let Err(e) = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) } {
-                                    return Ok(Err(format!("deleting {name}: {e}")));
-                                }
-                            }
-                            Ok(Ok(()))
-                        });
+                                if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }.map_err(|e| format!("deleting {name}: {e}"))
+                            }),
+                        };
                         match deleted {
-                            Ok(Ok(())) => Outcome::Done { message: format!("{} deleted", names.len()), reload: None },
-                            Ok(Err(e)) => Outcome::Failed(e),
-                            Err(e) => Outcome::Failed(format!("deleting: {e}")),
+                            Ok(()) => Outcome::Done { message: format!("{} deleted", names.len()), reload: None },
+                            Err(e) => Outcome::Failed(e),
                         }
                     }));
                     return;
@@ -3702,17 +3713,17 @@ impl App {
         }
     }
 
-    /// The first of `names` in the open disk folder that is original game
-    /// data, which is never renamed or deleted on disk.
-    fn original_data<'a>(&self, names: &'a [String]) -> Option<&'a String> {
-        let (dir, game) = (self.disk_folder()?, self.game.as_ref()?);
-        names.iter().find(|n| vfs::is_original_data(&dir.join(n), game))
+    /// The first of `names` in the open disk folder that is not renamed or deleted on disk, with why:
+    /// original game data, programs, the game's own files and this tool's folders, of whichever game the
+    /// folder is in (not only the one that is open), or a path through a link that leaves the game and mods folders.
+    fn original_data(&self, names: &[String]) -> Option<(String, String)> {
+        vfs::local_refusal(&self.disk_folder()?, names)
     }
 
     /// Refuses, with a message, to change original game data on disk.
     fn refuse_original(&mut self, names: &[String]) -> bool {
-        let Some(name) = self.original_data(names) else { return false };
-        self.status = Status::Error(format!("{name} is an original game file: it is not renamed or deleted (its copy in the mods folder can be)"));
+        let Some((name, why)) = self.original_data(names) else { return false };
+        self.status = Status::Error(format!("{name} {why}"));
         true
     }
 
@@ -4266,7 +4277,7 @@ impl App {
     fn delete_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let Some(names) = &self.confirm_delete else { return };
         let dir = self.disk_folder();
-        let original = self.original_data(names).cloned();
+        let original = self.original_data(names);
         // Files of the game itself, outside the mods folder.
         let game_files = match (&dir, &self.game) {
             (Some(dir), Some(game)) => dir.starts_with(&game.root) && !dir.starts_with(game.mods_dir()) && !(dir == &game.root && names.iter().all(|n| n == "mods")),
@@ -4288,10 +4299,8 @@ impl App {
                     let what = if names.len() == 1 { "It is" } else { "They are" };
                     ui.label(RichText::new(format!("{what} deleted from the disk for good, folders with all they hold.")).color(theme::warning(dark)));
                 }
-                if let Some(name) = &original {
-                    ui.label(
-                        RichText::new(format!("{name} is an original game file: it is not deleted. Its copy in the mods folder can be.")).color(theme::error(dark)),
-                    );
+                if let Some((name, why)) = &original {
+                    ui.label(RichText::new(format!("{name} {why}")).color(theme::error(dark)));
                 } else if game_files {
                     ui.label(
                         RichText::new("These are game files: the game may not start until Steam downloads them again (Verify integrity of game files).")

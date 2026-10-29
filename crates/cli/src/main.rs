@@ -740,8 +740,17 @@ fn main() -> Result<()> {
                 bail!("{} already exists", path.display());
             }
             let name = path.file_name().context("missing file name")?.to_string_lossy();
-            ArchiveEditor::new(&name).save(&path)?;
-            println!("created {}", path.display());
+            // In a game folder, through the confined transaction (a game's data goes to its mods folder, never over a file).
+            match owner(&path, cli.game.as_deref())? {
+                Some((game, rel)) => {
+                    let made = vfs::new_archive(&game, &paleto_core::relpath::RelPath::parse(&rel.to_string_lossy())?)?;
+                    println!("created {}", made.display());
+                }
+                None => {
+                    ArchiveEditor::new(&name).save(&path)?;
+                    println!("created {}", path.display());
+                }
+            }
         }
         Command::Install { package, no_convert, name } if !package.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv")) => {
             use paleto_core::addon;
@@ -1409,10 +1418,12 @@ mod tests {
 
         assert!(editable(&path, Some(&a)).is_err());
         assert_eq!(editable(&path, Some(&b)).unwrap().disk, b.join("mods/x.rpf"));
-        std::fs::remove_dir_all(b.join("mods")).unwrap();
+        assert!(!b.join("mods").exists(), "editable makes no copy: the edit does, when it saves");
         assert_eq!(editable(&path, None).unwrap().disk, b.join("mods/x.rpf"));
         assert_eq!(find_game(None, Some(&b.join("x.rpf"))).unwrap().root, b);
         // Its mods copy is not an original: editing it is fine whatever --game says.
+        std::fs::create_dir_all(b.join("mods")).unwrap();
+        std::fs::copy(b.join("x.rpf"), b.join("mods/x.rpf")).unwrap();
         assert_eq!(editable(&format!("{}/mods/x.rpf/f.txt", b.display()), Some(&a)).unwrap().disk, b.join("mods/x.rpf"));
         // Through a link, from outside every game folder.
         std::os::unix::fs::symlink(b.join("x.rpf"), dir.path().join("link.rpf")).unwrap();

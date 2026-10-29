@@ -227,6 +227,22 @@ pub(crate) fn without_leaked_dirs(mut now: BTreeMap<String, Entry>, want: &BTree
     }
 }
 
+/// `state` without the empty folders at or below one of `pruned` (paths of the game folder): the folders an
+/// operation tidies after its commit (or makes below a tool-owned folder), which may be there empty or gone
+/// depending on where it stopped. Only those paths are loosened; a file in them, or any other folder, still counts.
+pub(crate) fn without_pruned_dirs(mut state: BTreeMap<String, Entry>, pruned: &[&str]) -> BTreeMap<String, Entry> {
+    let under = |k: &str| pruned.iter().any(|p| k == *p || k.starts_with(&format!("{p}/")));
+    loop {
+        let empty: Vec<String> = state.iter().filter(|(k, e)| **e == Entry::Dir && under(k) && !state.keys().any(|o| o.starts_with(&format!("{k}/")))).map(|(k, _)| k.clone()).collect();
+        if empty.is_empty() {
+            return state;
+        }
+        for k in empty {
+            state.remove(&k);
+        }
+    }
+}
+
 /// An error that claims nothing false: the plain cause (nothing had been changed), or a failure that says the undo was complete.
 pub(crate) fn honest(e: &Error) -> bool {
     match e {
@@ -243,6 +259,14 @@ pub(crate) fn honest(e: &Error) -> bool {
 /// context, what, done)` runs after each point, `done` telling whether the operation had reached every file;
 /// it is where a test runs the operation again. Returns the number of points hit.
 pub(crate) fn exhaust<C>(mode: Fault, setup: impl Fn(&Path) -> (Game, C), op: impl Fn(&Game, &C) -> Result<Vec<String>, Error>, check: impl Fn(&Game, &C, &str, bool)) -> u64 {
+    exhaust_pruning(mode, &[], setup, op, check)
+}
+
+/// [`exhaust`] for an operation that tidies folders after its commit, or makes them below a tool-owned folder:
+/// the empty folders at or below `pruned` (paths of the game folder) are not compared, so they may be there or gone;
+/// a file in them, and every other folder, still must be exactly as the rule says.
+pub(crate) fn exhaust_pruning<C>(mode: Fault, pruned: &[&str], setup: impl Fn(&Path) -> (Game, C), op: impl Fn(&Game, &C) -> Result<Vec<String>, Error>, check: impl Fn(&Game, &C, &str, bool)) -> u64 {
+    let state = |game: &Game| without_pruned_dirs(state(game), pruned);
     let (old, new) = {
         let dir = tempfile::tempdir().unwrap();
         let (game, context) = setup(dir.path());
@@ -289,7 +313,7 @@ pub(crate) fn exhaust<C>(mode: Fault, setup: impl Fn(&Path) -> (Game, C), op: im
                 }
                 Ok(_) => {
                     // The fault hit the cleanup after the commit: the files are in place and recovery finishes it.
-                    assert_same(&what, &new, &without_temps(state(&game)));
+                    assert_same(&what, &new, &without_pruned_dirs(without_temps(self::state(&game)), pruned));
                     done = true;
                     txn::recover(&game).unwrap();
                 }

@@ -73,7 +73,7 @@ Each time, a dialog says how many files were made for Legacy and lets you instal
 
 The app also checks the mods folder in the background when it starts, and warns in the status bar when it finds Legacy files. Only archives changed since the last check are read again, so this takes a moment the first time only.
 
-**Undo**: the Legacy files replaced in `mods/` are kept in `mods_legacy/<time>/`. **Undo the last conversion** in the Maintenance section of **Mods in game** puts them back.
+**Undo**: the Legacy files replaced in `mods/` are kept in `mods_legacy/<time>/`. **Undo the last conversion** in the Maintenance section of **Mods in game** puts them back: all of them or none (one journaled change), and the folder of that conversion is removed. A conversion keeps the Legacy files and rewrites the archives as one journaled change too.
 
 **Limits**:
 

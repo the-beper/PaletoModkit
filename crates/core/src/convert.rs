@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -14,7 +15,11 @@ use std::time::{Duration, Instant};
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
 use crate::budget::{Budget, Limits, Scratch};
+use crate::fsroot::{Dir, GameRoots, Kind, Owned};
 use crate::loader::enhanced_version;
+use crate::relpath::RelPath;
+use crate::txn::{Staged, Txn};
+use crate::vfs::{prune_empty, scratch_file, transact};
 use crate::{Error, Game};
 
 /// The file name of the converter.
@@ -195,41 +200,82 @@ pub fn backups(game: &Game) -> Vec<(String, usize)> {
 }
 
 /// Undoes a conversion: puts the Legacy files kept in `mods_legacy/<time>/`
-/// back into the mods folder's archives, then removes that folder (when every
-/// file went back). Report paths are relative to the mods folder.
+/// back into the mods folder's archives, then removes what is left of that folder
+/// (the files that went back, and the folders left empty). All or nothing: one
+/// transaction under the game's lock puts every archive back and deletes the backups, so an
+/// error (or a crash, which the next run undoes) leaves the mods folder and the backups as they were.
+/// Report paths are relative to the mods folder; only a backup that is not inside an archive stays, with its reason.
 pub fn undo(game: &Game, keys: Option<&Keys>, time: &str) -> Result<Vec<Converted>, Error> {
-    let dir = game.root.join("mods_legacy").join(time);
-    if time.parse::<u64>().is_err() || !dir.is_dir() {
-        return Err(Error::Convert(format!("no conversion {time} to undo in {}", game.root.join("mods_legacy").display())));
-    }
     let roots = game.roots()?;
+    let missing = || Error::Convert(format!("no conversion {time} to undo in {}", game.root.join("mods_legacy").display()));
+    if time.parse::<u64>().is_err() {
+        return Err(missing());
+    }
     let _lock = crate::txn::guard(&roots, "undoing a conversion")?;
-    let mut by_archive: BTreeMap<String, Vec<(Placed, PathBuf)>> = BTreeMap::new();
-    let mut report = Vec::new();
-    for (local, _) in crate::vfs::local_files(&dir)? {
-        let path = local.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/");
-        match split_archives(&path) {
-            Some((top, nested, file)) => by_archive.entry(top).or_default().push(((nested, file, path), local)),
-            None => report.push(Converted { path, error: Some("not inside an archive".into()) }),
+    let Some(kept) = roots.owned_folder("mods_legacy", &[time], false)? else { return Err(missing()) };
+    let (mut files, mut odd) = (Vec::new(), Vec::new());
+    kept_files(&kept, "", 0, &mut files, &mut odd)?;
+    files.sort();
+    let mut by_archive: BTreeMap<String, Vec<(Placed, String)>> = BTreeMap::new();
+    let mut report: Vec<Converted> = odd.into_iter().map(|path| Converted { path, error: Some("not a plain file".into()) }).collect();
+    for local in files {
+        match split_archives(&local) {
+            Some((top, nested, file)) => by_archive.entry(top).or_default().push(((nested, file, local.clone()), local)),
+            None => report.push(Converted { path: local, error: Some("not inside an archive".into()) }),
         }
     }
-    for (top, files) in by_archive {
-        let disk = game.mods_dir().join(&top);
-        let result = (|| -> Result<(), Error> {
-            let mut editor = ArchiveEditor::open(&disk, keys)?;
-            for ((nested, file, _), local) in &files {
-                inner(&mut editor, nested, keys)?.add_file(file, std::fs::read(local)?)?;
+    transact(&roots, "undoing a conversion", keys, |txn| {
+        let budget = Budget::new(Limits::PACKAGE);
+        let cap = budget.limits().in_memory;
+        let mut staged = Vec::new();
+        for (top, files) in &by_archive {
+            let rel = RelPath::parse(top)?;
+            let mut dest = roots.mods_dest(&rel)?;
+            let base = roots.read_dest(&dest)?.ok_or_else(|| Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{top} is not in the mods folder"))))?;
+            let len = base.metadata()?.len();
+            let mut editor = ArchiveEditor::open_file(base, rel.name(), keys)?;
+            for ((nested, file, _), local) in files {
+                let mut backup = open_in(&kept, local)?;
+                let size = backup.metadata()?.len();
+                inner(&mut editor, nested, keys)?.add_file(file, budget.read(&mut backup, size, cap, local)?)?;
             }
-            Ok(editor.save(&disk)?)
-        })();
-        let error = result.err().map(|e| e.to_string());
-        report.extend(files.into_iter().map(|((_, _, path), _)| Converted { path, error: error.clone() }));
-    }
-    if report.iter().all(|r| r.error.is_none()) {
-        std::fs::remove_dir_all(&dir)?;
+            staged.push((txn.stage_sized(&mut dest, len, move |out| editor.save_to(out, &mut scratch_file).map(drop).map_err(std::io::Error::other))?, rel.name().to_string()));
+            for (_, local) in files {
+                txn.delete(&roots.owned_dest(Owned::Legacy, &RelPath::parse(&format!("{time}/{local}"))?)?)?;
+            }
+        }
+        Ok(((), staged))
+    })?;
+    report.extend(by_archive.into_values().flatten().map(|((_, _, path), _)| Converted { path, error: None }));
+    // What is left is only folders, and what could not go back: the folders left empty are removed, no more.
+    if let Ok(Some(legacy)) = roots.owned_folder("mods_legacy", &[], false) {
+        let _ = prune_empty(&legacy, time, 0);
     }
     report.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(report)
+}
+
+/// The files below `dir` (paths with `/`) and the entries that are neither files nor folders (links, pipes).
+fn kept_files(dir: &Dir, prefix: &str, depth: usize, files: &mut Vec<String>, odd: &mut Vec<String>) -> Result<(), Error> {
+    for name in dir.names()? {
+        let path = format!("{prefix}{name}");
+        match dir.kind(&name)? {
+            Some(Kind::File) => files.push(path),
+            Some(Kind::Dir) if depth < 64 => kept_files(&dir.open_dir(&name)?, &format!("{path}/"), depth + 1, files, odd)?,
+            _ => odd.push(path),
+        }
+    }
+    Ok(())
+}
+
+/// A file below `dir` by its path with `/`, opened for reading without following a link on the way.
+fn open_in(dir: &Dir, path: &str) -> Result<File, Error> {
+    let (name, folders) = path.rsplit_once('/').map_or((path, ""), |(folders, name)| (name, folders));
+    let mut at = dir.try_clone()?;
+    for folder in folders.split('/').filter(|f| !f.is_empty()) {
+        at = at.open_dir(folder)?;
+    }
+    Ok(at.open_read(name)?)
 }
 
 /// What happened to one file of the mods folder.
@@ -241,13 +287,23 @@ pub struct Converted {
     pub error: Option<String>,
 }
 
+/// The names below `mods_legacy/` that `backup` (a folder of the game folder) is, for [`GameRoots::owned_dest`].
+fn legacy_parts(game: &Game, backup: &Path) -> Result<Vec<String>, Error> {
+    let rel = crate::vfs::in_game(backup, game).filter(|rel| rel.starts_with("mods_legacy"));
+    let rel = rel.ok_or_else(|| Error::Convert(format!("the Legacy files are kept in {}, not in {}", game.root.join("mods_legacy").display(), backup.display())))?;
+    Ok(rel.components().skip(1).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect())
+}
+
 /// Converts files inside the mods folder's archives; `paths` are relative to
 /// the mods folder with '/' separators, as [`crate::loader::foreign_files`]
 /// gives them. The Legacy originals are kept under `backup` (same relative
-/// paths) when given. Each archive is saved once, after all its files.
+/// paths; a folder of `mods_legacy/`) when given. One transaction under the game's
+/// lock: each archive is rewritten as a new file once, after all its files, and the backups are
+/// new files too (one that exists is kept), all put in place together or all undone (recoverable
+/// after a crash, not atomic for a reader). An error converts nothing.
 pub fn convert_in_mods(game: &Game, keys: Option<&Keys>, tool: &Path, paths: &[String], backup: Option<&Path>) -> Result<Vec<Converted>, Error> {
     let roots = game.roots()?;
-    let _lock = crate::txn::guard(&roots, "converting files in the mods folder")?;
+    let backup = backup.map(|b| legacy_parts(game, b)).transpose()?;
     // Top-level archive -> [(nested archives, file inside the innermost), full path].
     let mut by_archive: BTreeMap<String, Vec<Placed>> = BTreeMap::new();
     let mut report = Vec::new();
@@ -257,46 +313,71 @@ pub fn convert_in_mods(game: &Game, keys: Option<&Keys>, tool: &Path, paths: &[S
             None => report.push(Converted { path: path.clone(), error: Some("not inside an archive".into()) }),
         }
     }
-    for (top, files) in by_archive {
-        report.extend(convert_archive(&game.mods_dir().join(&top), keys, tool, &files, backup)?);
-    }
+    report.extend(transact(&roots, "converting files in the mods folder", keys, |txn| {
+        let (mut report, mut staged) = (Vec::new(), Vec::new());
+        for (top, files) in &by_archive {
+            report.extend(convert_archive(&roots, txn, keys, tool, top, files, backup.as_deref(), &mut staged)?);
+        }
+        Ok((report, staged))
+    })?);
     report.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(report)
 }
 
-/// Converts files of one archive on disk; `files` are (nested archives, file
-/// inside the innermost, path for the report and the backup).
+/// Converts files of one archive of the mods folder (`top`, relative to it) in `txn`: its backups and the
+/// archive are staged; `files` are (nested archives, file inside the innermost, path for the report and the
+/// backup), `backup` the names below `mods_legacy/` of the folder the Legacy files go to.
+#[allow(clippy::too_many_arguments)]
 fn convert_archive(
-    disk: &Path,
+    roots: &GameRoots,
+    txn: &mut Txn<'_>,
     keys: Option<&Keys>,
     tool: &Path,
+    top: &str,
     files: &[Placed],
-    backup: Option<&Path>,
+    backup: Option<&[String]>,
+    staged: &mut Vec<(Staged, String)>,
 ) -> Result<Vec<Converted>, Error> {
-    let mut editor = ArchiveEditor::open(disk, keys)?;
+    let rel = RelPath::parse(top)?;
+    let mut dest = roots.mods_dest(&rel)?;
+    let base = roots.read_dest(&dest)?.ok_or_else(|| Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{top} is not in the mods folder"))))?;
+    let len = base.metadata()?.len();
+    let mut editor = ArchiveEditor::open_file(base, rel.name(), keys)?;
+    let (report, originals, changed) = convert_files(&mut editor, keys, tool, files)?;
+    if changed {
+        if let Some(prefix) = backup {
+            for (path, original) in originals {
+                let names: Vec<&str> = prefix.iter().map(String::as_str).chain([path.as_str()]).collect();
+                let mut kept = roots.owned_dest(Owned::Legacy, &RelPath::parse(&names.join("/"))?)?;
+                // The Legacy original that is kept there is never overwritten.
+                if kept.existing.is_none() {
+                    txn.stage_sized(&mut kept, original.len() as u64, |out| out.write_all(&original))?;
+                }
+            }
+        }
+        let name = rel.name().to_string();
+        staged.push((txn.stage_sized(&mut dest, len, move |out| editor.save_to(out, &mut scratch_file).map(drop).map_err(std::io::Error::other))?, name));
+    }
+    Ok(report)
+}
+
+/// Converts the `files` of `editor` (see [`convert_archive`]) in memory: the report, the Legacy original of
+/// each file converted with its path, and whether anything was.
+#[allow(clippy::type_complexity)]
+fn convert_files(editor: &mut ArchiveEditor, keys: Option<&Keys>, tool: &Path, files: &[Placed]) -> Result<(Vec<Converted>, Vec<(String, Vec<u8>)>, bool), Error> {
     let mut data = Vec::new();
     for (nested, file, _) in files {
-        data.push(inner(&mut editor, nested, keys)?.read(file, keys)?);
+        data.push(inner(editor, nested, keys)?.read(file, keys)?);
     }
     let inputs: Vec<(&str, &[u8])> = files.iter().zip(&data).map(|((_, f, _), d)| (f.as_str(), d.as_slice())).collect();
     let outcomes = convert(tool, &inputs)?;
-    let mut changed = false;
+    let mut originals = Vec::new();
     let mut report = Vec::new();
-    for (((nested, file, path), original), outcome) in files.iter().zip(&data).zip(outcomes) {
+    for (((nested, file, path), original), outcome) in files.iter().zip(data).zip(outcomes) {
         let error = match outcome {
             Outcome::Converted(new) => {
-                if let Some(dir) = backup {
-                    let dest = dir.join(path);
-                    std::fs::create_dir_all(dest.parent().unwrap())?;
-                    // Exclusively: the Legacy original that is kept there is never overwritten (nor written through a link).
-                    match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
-                        Ok(mut file) => std::io::Write::write_all(&mut file, original)?,
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-                inner(&mut editor, nested, keys)?.add_file(file, new)?;
-                changed = true;
+                inner(editor, nested, keys)?.add_file(file, new)?;
+                originals.push((path.clone(), original));
                 None
             }
             Outcome::Unchanged => Some("already in the Enhanced format".into()),
@@ -304,10 +385,8 @@ fn convert_archive(
         };
         report.push(Converted { path: path.clone(), error });
     }
-    if changed {
-        editor.save(disk)?;
-    }
-    Ok(report)
+    let changed = !originals.is_empty();
+    Ok((report, originals, changed))
 }
 
 /// The files of an archive (nested archives too) that the Enhanced game needs
@@ -336,6 +415,8 @@ pub fn legacy_in_archive(archive: &Archive, keys: Option<&Keys>) -> Vec<String> 
 
 /// Converts every file of an archive on disk that the Enhanced game needs
 /// converted, saving the archive in place. Report paths are inside the archive.
+/// Only for a copy of this program's own in its scratch folder (see [`prepare`]), never a file of a game
+/// or mods folder: the save here is a plain rename of a new file over the archive, not a transaction.
 pub fn convert_whole_archive(disk: &Path, keys: Option<&Keys>, tool: &Path) -> Result<Vec<Converted>, Error> {
     let paths = legacy_in_archive(&Archive::open(disk, keys)?, keys);
     if paths.is_empty() {
@@ -346,7 +427,12 @@ pub fn convert_whole_archive(disk: &Path, keys: Option<&Keys>, tool: &Path) -> R
         .iter()
         .filter_map(|p| split_archives(&format!("{name}/{p}")).map(|(_, nested, file)| (nested, file, p.clone())))
         .collect();
-    convert_archive(disk, keys, tool, &files, None)
+    let mut editor = ArchiveEditor::open(disk, keys)?;
+    let (report, _, changed) = convert_files(&mut editor, keys, tool, &files)?;
+    if changed {
+        editor.save(disk)?;
+    }
+    Ok(report)
 }
 
 /// Files on disk about to be added to an archive (as [`crate::vfs::local_files`]
@@ -556,7 +642,7 @@ done
 
         let game = Game::open(&root).unwrap();
         let tool = fake_tool(dir.path());
-        let backup = dir.path().join("backup");
+        let backup = root.join("mods_legacy/1700000000");
         let base = "update/x64/dlcpacks/car/dlc.rpf";
         let paths = [format!("{base}/x64/vehicles.rpf/car.yft"), format!("{base}/x64/vehicles.rpf/car_hi.yft"), format!("{base}/x64/odd.ydr")];
         let report = convert_in_mods(&game, None, &tool, &paths, Some(&backup)).unwrap();
@@ -571,9 +657,7 @@ done
         assert!(!backup.join(&paths[1]).exists());
 
         // Undoing a conversion kept in the game folder puts the Legacy file back.
-        let kept = root.join("mods_legacy/1700000000");
-        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
-        std::fs::rename(&backup, &kept).unwrap();
+        let kept = backup;
         assert_eq!(backups(&game), [("1700000000".to_string(), 1)]);
         let report = undo(&game, None, "1700000000").unwrap();
         assert_eq!(report, [Converted { path: paths[0].clone(), error: None }]);
