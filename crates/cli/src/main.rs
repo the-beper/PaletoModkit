@@ -1185,7 +1185,7 @@ fn editable(path: &str, game: Option<&Path>) -> Result<ArchivePath> {
 fn editable_file(path: &str, game: Option<&Path>) -> Result<PathBuf> {
     if let Some((game, rel)) = owner(Path::new(path), game)?
         && !rel.starts_with("mods")
-        && game.target(&rel.to_string_lossy()).starts_with(game.mods_dir())
+        && game.routes_to_mods(&rel.to_string_lossy())
     {
         let copy = game.mods_copy(&rel.to_string_lossy())?.with_context(|| format!("{path} not found"))?;
         println!("editing mods copy {}", copy.display());

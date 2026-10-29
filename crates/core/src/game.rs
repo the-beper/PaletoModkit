@@ -6,6 +6,8 @@ use paleto_rpf::Keys;
 use sha2::{Digest, Sha256};
 
 use crate::Error;
+use crate::fsroot::{Dir, GameRoots};
+use crate::relpath::RelPath;
 
 /// CodeWalker's magic.dat, pinned. It has not changed since 2018.
 const MAGIC_URL: &str =
@@ -48,15 +50,19 @@ impl Game {
         self.root.join("mods")
     }
 
-    /// Where a game-relative path lives: data files the game streams (archives,
-    /// `update/`, `x64/`) go to the mods folder, everything else (ASI plugins,
-    /// scripts, configs) to the game folder.
-    pub fn target(&self, rel: &str) -> PathBuf {
-        let base = if is_game_data(rel) { self.mods_dir() } else { self.root.clone() };
-        resolve_ci(&base, rel)
+    /// The game folder and its mods folder, open for confined writes (see [`crate::fsroot`]).
+    pub fn roots(&self) -> Result<GameRoots, Error> {
+        GameRoots::open(&self.root)
     }
 
-    /// The original, unmodded file for a game-relative path.
+    /// Whether a game-relative path is data the game streams (archives, `update/`,
+    /// `x64/`): such files are changed in the mods folder, everything else
+    /// (ASI plugins, scripts, configs) in the game folder.
+    pub fn routes_to_mods(&self, rel: &str) -> bool {
+        is_game_data(rel)
+    }
+
+    /// The original, unmodded file for a game-relative path (read-only lookup).
     pub fn original(&self, rel: &str) -> PathBuf {
         resolve_ci(&self.root, rel)
     }
@@ -64,21 +70,10 @@ impl Game {
     /// The copy of a game data file inside the mods folder, created from the
     /// original when missing. Returns `None` if neither exists. Copies are
     /// edited in place, so a copy that is a link (to the original or to
-    /// anything else) is first made a file of its own.
+    /// anything else) is first made a file of its own. Refused if the copy
+    /// would land anywhere but the mods folder (a link that leads out of it).
     pub fn mods_copy(&self, rel: &str) -> Result<Option<PathBuf>, Error> {
-        let dest = resolve_ci(&self.mods_dir(), rel);
-        let src = self.original(rel);
-        if dest.is_file() {
-            unlink_copy(&dest, &src)?;
-            return Ok(Some(dest));
-        }
-        if !src.is_file() {
-            return Ok(None);
-        }
-        std::fs::create_dir_all(dest.parent().unwrap())?;
-        // On btrfs/XFS this is a reflink: instant and takes no extra space.
-        replace_file(&dest, |tmp| std::fs::copy(&src, tmp).map(drop))?;
-        Ok(Some(dest))
+        self.roots()?.mods_copy(&RelPath::parse(rel)?)
     }
 
     /// Keys for this game, extracted on first use and then cached.
@@ -101,36 +96,17 @@ impl Game {
     }
 }
 
-/// Replaces `dest` with a copy of its content if it is a symbolic link or
-/// shares its data with another name (a hard link, or the original `src`).
-/// Refuses when `dest` is the original itself, reached through a linked folder.
-fn unlink_copy(dest: &Path, src: &Path) -> Result<(), Error> {
-    use std::os::unix::fs::MetadataExt;
-    let link = std::fs::symlink_metadata(dest)?;
-    let target = std::fs::metadata(dest)?;
-    let same_as_src = std::fs::metadata(src).is_ok_and(|m| (m.dev(), m.ino()) == (target.dev(), target.ino()));
-    if !link.file_type().is_symlink() && link.nlink() == 1 && !same_as_src {
-        return Ok(());
-    }
-    let parent = |p: &Path| p.parent().and_then(|p| std::fs::canonicalize(p).ok());
-    if parent(dest).is_some() && parent(dest) == parent(src) {
-        return Err(Error::Io(std::io::Error::other(format!("{} is the original game file (the mods folder links to the game folder)", dest.display()))));
-    }
-    // The copy follows the link; the rename replaces the link, not what it points to.
-    Ok(replace_file(dest, |tmp| std::fs::copy(dest, tmp).map(drop))?)
-}
-
-/// Writes `dest` through `write` into a temporary name next to it, then
-/// renames that over `dest`: a link at `dest` is replaced, never written through.
-pub fn replace_file(dest: &Path, write: impl FnOnce(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
-    let name = dest.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = dest.with_file_name(format!(".{name}.paleto-tmp"));
-    let _ = std::fs::remove_file(&tmp);
-    let result = write(&tmp).and_then(|()| std::fs::rename(&tmp, dest));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+/// Writes `dest` through `write` into a new file of an unpredictable name next
+/// to it, then renames that over `dest`: a link at `dest` is replaced, never
+/// written through. For files outside a game folder; inside one, use
+/// [`GameRoots::replace`].
+pub fn replace_file(dest: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
+    let name = dest.file_name().and_then(|n| n.to_str()).ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    crate::fsroot::replace_file(&Dir::open_path(parent)?, name, write)
 }
 
 /// GTA V installations in the Steam libraries of this user.
@@ -166,20 +142,27 @@ pub fn detect_installs() -> Vec<Game> {
 
 /// Whether two files hold the same bytes (read whole, unless sizes differ).
 pub fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::File::open(a), std::fs::File::open(b)) {
+        (Ok(a), Ok(b)) => same_content(a, b),
+        _ => false,
+    }
+}
+
+/// [`same_file`] for files already open.
+pub fn same_content(mut a: std::fs::File, mut b: std::fs::File) -> bool {
     use std::io::Read;
-    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
+    let (Ok(ma), Ok(mb)) = (a.metadata(), b.metadata()) else { return false };
     if ma.len() != mb.len() {
         return false;
     }
-    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else { return false };
     let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     loop {
-        let n = match fa.read(&mut ba) {
+        let n = match a.read(&mut ba) {
             Ok(0) => return true,
             Ok(n) => n,
             Err(_) => return false,
         };
-        if fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+        if b.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
             return false;
         }
     }
@@ -278,11 +261,12 @@ mod tests {
         }
         assert_eq!(std::fs::read(&elsewhere).unwrap(), b"modded");
         assert!(!dangling.exists());
-        assert_eq!(std::fs::read_dir(root.join("mods/x64")).unwrap().count(), 4, "no temporary file left");
+        assert_eq!(std::fs::read_dir(root.join("mods/x64")).unwrap().count(), 5, "only the planted link beside the four copies: no temporary file left, none removed");
+        assert!(std::fs::symlink_metadata(root.join("mods/x64/.a.rpf.paleto-tmp")).unwrap().is_symlink(), "a link at the old temporary name is not ours to touch");
 
         // Files written whole (packages, add-on packs) replace a link too.
         std::os::unix::fs::symlink(root.join("x64/a.rpf"), root.join("mods/x64/e.rpf")).unwrap();
-        replace_file(&root.join("mods/x64/e.rpf"), |tmp| std::fs::write(tmp, b"new")).unwrap();
+        replace_file(&root.join("mods/x64/e.rpf"), |tmp| std::io::Write::write_all(tmp, b"new")).unwrap();
         assert_eq!(std::fs::read(root.join("mods/x64/e.rpf")).unwrap(), b"new");
         assert_eq!(std::fs::read(root.join("x64/a.rpf")).unwrap(), b"original");
 

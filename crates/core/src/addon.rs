@@ -3,11 +3,13 @@
 //! DLC list (`update.rpf/common/data/dlclist.xml`), which the game reads to
 //! know which packs to load.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
 use crate::game::{Edition, Game, resolve_ci};
+use crate::relpath::RelPath;
 use crate::loader::{DLC_LIST, add_dlc_packs, dlc_pack_order};
 use crate::{Error, convert};
 
@@ -65,7 +67,8 @@ pub fn valid_name(name: &str) -> bool {
 
 /// Where a pack of this name goes in the mods folder.
 pub fn pack_path(game: &Game, name: &str) -> PathBuf {
-    resolve_ci(&game.mods_dir(), &format!("update/x64/dlcpacks/{name}/dlc.rpf"))
+    let rel = format!("update/x64/dlcpacks/{name}/dlc.rpf");
+    RelPath::parse(&rel).and_then(|p| game.roots()?.mods_dest(&p)).map_or_else(|_| resolve_ci(&game.mods_dir(), &rel), |dest| dest.path())
 }
 
 /// Installs a pack under `name` (replacing one of that name) and names it in
@@ -77,6 +80,8 @@ pub fn install_pack(game: &Game, keys: Option<&Keys>, dlc: &Path, name: &str, to
     if !valid_name(&name) {
         return Err(Error::Package(format!("\"{name}\" is not a pack name: use letters, digits, '_' and '-'")));
     }
+    let roots = game.roots()?;
+    let mut dest = roots.mods_dest(&RelPath::parse(&format!("update/x64/dlcpacks/{name}/dlc.rpf"))?)?;
     let mut log = Vec::new();
     let data = match tool.filter(|_| game.edition == Edition::Enhanced) {
         Some(tool) => {
@@ -86,13 +91,11 @@ pub fn install_pack(game: &Game, keys: Option<&Keys>, dlc: &Path, name: &str, to
         }
         None => std::fs::read(dlc)?,
     };
-    let dest = pack_path(game, &name);
-    std::fs::create_dir_all(dest.parent().unwrap())?;
-    crate::game::replace_file(&dest, |tmp| std::fs::write(tmp, data))?;
-    log.push(format!("installed {}", dest.display()));
+    roots.replace(&mut dest, |f| f.write_all(&data))?;
+    log.push(format!("installed {}", dest.path().display()));
 
     let (rel, inner) = DLC_LIST;
-    let update = game.mods_copy(rel)?.ok_or_else(|| Error::Package(format!("{rel} not found in the game folder")))?;
+    let update = roots.mods_copy(&RelPath::parse(rel)?)?.ok_or_else(|| Error::Package(format!("{rel} not found in the game folder")))?;
     let mut editor = ArchiveEditor::open(&update, keys)?;
     let xml = String::from_utf8_lossy(&editor.read(inner, keys)?).into_owned();
     if dlc_pack_order(&xml).contains(&name) {

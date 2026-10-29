@@ -6,14 +6,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use paleto_rpf::{ArchiveEditor, Keys};
 use zip::ZipArchive;
 
 use crate::convert;
+use crate::fsroot::{GameRoots, Resolved, RootKind};
 use crate::game::Game;
+use crate::relpath::RelPath;
 use crate::text::{self, Condition, TextOp};
 use crate::xml::{self, Append, XmlOp};
 use crate::Error;
@@ -200,7 +202,8 @@ impl Package {
     /// [`Package::install`], with keys only needed for encrypted archives.
     pub(crate) fn install_with(&mut self, game: &Game, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
         self.check(&self.content.clone())?;
-        let mut inst = Installer { game, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
+        let roots = game.roots()?;
+        let mut inst = Installer { roots, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
         if let Err(e) = self.content.clone().iter().try_for_each(|cmd| inst.run_root(cmd)) {
             // Archives are only saved at the end: putting the loose files back undoes it all.
             inst.undo.roll_back();
@@ -230,7 +233,8 @@ impl Package {
 }
 
 struct Installer<'a> {
-    game: &'a Game,
+    /// Where files may be written: every destination is resolved through it.
+    roots: GameRoots,
     keys: Option<&'a Keys>,
     zip: &'a mut ZipArchive<File>,
     converted: &'a HashMap<String, Vec<u8>>,
@@ -307,28 +311,30 @@ impl Installer<'_> {
     fn run_root(&mut self, cmd: &Command) -> Result<(), Error> {
         match cmd {
             Command::Add { source, target } => {
-                let dest = self.game.target(target);
-                if is_exe(&dest) {
-                    self.log.push(format!("warning: refusing to replace {}", dest.display()));
+                let mut dest = self.roots.dest(&RelPath::parse(target)?)?;
+                if let Some(why) = self.refused(&dest) {
+                    self.log.push(format!("warning: refusing to replace {}{why}", dest.path().display()));
                     return Ok(());
                 }
                 let data = self.source(source)?;
-                self.archives.remove(&dest);
-                std::fs::create_dir_all(dest.parent().unwrap())?;
-                self.undo.keep(&dest)?;
+                self.roots.ensure_parent(&mut dest)?;
+                let path = dest.path();
+                self.archives.remove(&path);
+                self.undo.keep(&path)?;
                 // A copy in the mods folder may be a link to an original: replace it, never write through it.
-                crate::game::replace_file(&dest, |tmp| std::fs::write(tmp, data))?;
-                self.log.push(format!("add {}", dest.display()));
+                self.roots.replace(&mut dest, |f| f.write_all(&data))?;
+                self.log.push(format!("add {}", path.display()));
             }
             Command::Delete(target) => {
                 // Game data is only ever deleted from the mods folder.
-                let dest = self.game.target(target);
-                if is_exe(&dest) {
-                    self.log.push(format!("warning: refusing to delete {}", dest.display()));
-                } else if dest.is_file() {
-                    self.undo.keep(&dest)?;
-                    std::fs::remove_file(&dest)?;
-                    self.log.push(format!("delete {}", dest.display()));
+                let dest = self.roots.dest(&RelPath::parse(target)?)?;
+                let path = dest.path();
+                if let Some(why) = self.refused(&dest) {
+                    self.log.push(format!("warning: refusing to delete {}{why}", path.display()));
+                } else if self.roots.read_dest(&dest)?.is_some() {
+                    self.undo.keep(&path)?;
+                    self.roots.remove(&dest)?;
+                    self.log.push(format!("delete {}", path.display()));
                 }
             }
             Command::Archive { path, create, body } => {
@@ -339,35 +345,34 @@ impl Installer<'_> {
                 result?;
             }
             Command::Text { path, create, ops } => {
-                let dest = self.loose_file(path)?;
-                let (text, latin1) = match std::fs::read(&dest) {
-                    Ok(b) => decode_text(b),
-                    Err(_) if *create => (String::new(), false),
-                    Err(_) => return Err(Error::Package(format!("{path} not found"))),
+                let Some(mut dest) = self.loose_file(path)? else { return Ok(()) };
+                let (text, latin1) = match self.read_loose(&dest)? {
+                    Some(b) => decode_text(b),
+                    None if *create => (String::new(), false),
+                    None => return Err(Error::Package(format!("{path} not found"))),
                 };
                 let out = self.encode_text(path, &text::apply(&text, ops), latin1);
-                std::fs::create_dir_all(dest.parent().unwrap())?;
-                self.write_loose(&dest, out)?;
-                self.log.push(format!("edit {}", dest.display()));
+                self.write_loose(&mut dest, out)?;
+                self.log.push(format!("edit {}", dest.path().display()));
             }
             Command::Xml { path, ops } => {
-                let dest = self.loose_file(path)?;
-                let data = std::fs::read(&dest).map_err(|_| Error::Package(format!("{path} not found")))?;
+                let Some(mut dest) = self.loose_file(path)? else { return Ok(()) };
+                let data = self.read_loose(&dest)?.ok_or_else(|| Error::Package(format!("{path} not found")))?;
                 let (out, warnings) = xml::apply(&data, ops)?;
                 self.warn(path, warnings);
-                self.write_loose(&dest, out)?;
-                self.log.push(format!("edit {}", dest.display()));
+                self.write_loose(&mut dest, out)?;
+                self.log.push(format!("edit {}", dest.path().display()));
             }
             Command::Defragment(path) => {
                 let disk = self.top_archive(path, false)?;
                 self.archives.get_mut(&disk).unwrap().defragment();
             }
             Command::Pso { path, ops, source } => {
-                let dest = self.loose_file(path)?;
-                let data = std::fs::read(&dest).map_err(|_| Error::Package(format!("{path} not found")))?;
+                let Some(mut dest) = self.loose_file(path)? else { return Ok(()) };
+                let data = self.read_loose(&dest)?.ok_or_else(|| Error::Package(format!("{path} not found")))?;
                 let out = self.edit_meta(path, &data, ops, source)?;
-                self.write_loose(&dest, out)?;
-                self.log.push(format!("edit {}", dest.display()));
+                self.write_loose(&mut dest, out)?;
+                self.log.push(format!("edit {}", dest.path().display()));
             }
         }
         Ok(())
@@ -426,48 +431,79 @@ impl Installer<'_> {
 
     /// Opens (once per install) a top-level archive in the mods folder.
     fn top_archive(&mut self, path: &str, create: bool) -> Result<PathBuf, Error> {
-        let disk = self.game.target(path);
+        let rel = RelPath::parse(path)?;
+        let mut dest = self.roots.dest(&rel)?;
+        let disk = dest.path();
         if self.archives.contains_key(&disk) {
             return Ok(disk);
         }
+        // The archive is saved at the end: it must pass what any write passes (no programs, no
+        // game data in the game folder), whether it exists or is created.
+        self.roots.check_write(&dest)?;
         // A copy made from the original goes again if the install fails. An
         // archive already there is only saved at the end: nothing to keep.
         if std::fs::symlink_metadata(&disk).is_err() {
             self.undo.keep(&disk)?;
         }
-        let disk = match self.game.mods_copy(path)? {
+        let disk = match self.roots.mods_copy(&rel.without_mods())? {
             Some(p) => p,
             // Saved by a rename: a dangling link there is replaced, never written through.
-            None if create => disk,
+            None if create => {
+                self.roots.ensure_parent(&mut dest)?;
+                self.roots.check_write(&dest)?;
+                disk
+            }
             None => return Err(Error::Package(format!("archive {path} not found"))),
         };
         {
-            let editor = if disk.is_file() {
-                ArchiveEditor::open(&disk, self.keys)?
-            } else {
-                std::fs::create_dir_all(disk.parent().unwrap())?;
-                ArchiveEditor::new(&disk.file_name().unwrap().to_string_lossy())
-            };
+            let editor = if disk.is_file() { ArchiveEditor::open(&disk, self.keys)? } else { ArchiveEditor::new(&disk.file_name().unwrap().to_string_lossy()) };
             self.archives.insert(disk.clone(), editor);
         }
         Ok(disk)
     }
 
-    /// A loose file to edit: game data is copied to the mods folder first.
-    fn loose_file(&mut self, path: &str) -> Result<PathBuf, Error> {
-        let dest = self.game.target(path);
-        self.undo.keep(&dest)?;
-        if dest.starts_with(self.game.mods_dir()) {
-            self.game.mods_copy(path)?;
+    /// Why a package may not replace or delete this destination, as text to
+    /// append to a warning: programs and the game's own libraries and notes in
+    /// the game folder are left alone, and the rest of the package installs.
+    fn refused(&self, dest: &Resolved) -> Option<&'static str> {
+        if is_exe(Path::new(&dest.name)) {
+            Some("")
+        } else if self.roots.is_game_file(dest) {
+            Some(" (one of the game's own files; mod loaders excepted)")
+        } else {
+            None
         }
-        Ok(dest)
+    }
+
+    /// A loose file to edit: game data is copied to the mods folder first.
+    /// `None` (after a warning) for one the package may not change.
+    fn loose_file(&mut self, path: &str) -> Result<Option<Resolved>, Error> {
+        let rel = RelPath::parse(path)?;
+        let dest = self.roots.dest(&rel)?;
+        if self.roots.is_game_file(&dest) {
+            self.log.push(format!("warning: refusing to replace {}{}", dest.path().display(), self.refused(&dest).unwrap_or_default()));
+            return Ok(None);
+        }
+        self.undo.keep(&dest.path())?;
+        if dest.root == RootKind::Mods && !rel.in_mods_folder() {
+            self.roots.mods_copy(&rel)?;
+            return Ok(Some(self.roots.dest(&rel)?));
+        }
+        Ok(Some(dest))
+    }
+
+    /// What a loose file holds now; `None` if there is no file.
+    fn read_loose(&mut self, dest: &Resolved) -> Result<Option<Vec<u8>>, Error> {
+        let mut data = Vec::new();
+        Ok(self.roots.read_dest(dest)?.map(|mut f| f.read_to_end(&mut data).map(|_| data)).transpose()?)
     }
 
     /// Writes a loose file by replacing it: never through a link, and the
     /// old content stays for [`Undo`].
-    fn write_loose(&mut self, dest: &Path, data: Vec<u8>) -> Result<(), Error> {
-        self.undo.keep(dest)?;
-        crate::game::replace_file(dest, |tmp| std::fs::write(tmp, data))?;
+    fn write_loose(&mut self, dest: &mut Resolved, data: Vec<u8>) -> Result<(), Error> {
+        self.roots.ensure_parent(dest)?;
+        self.undo.keep(&dest.path())?;
+        self.roots.replace(dest, |f| f.write_all(&data))?;
         Ok(())
     }
 
@@ -547,12 +583,9 @@ fn is_exe(path: &Path) -> bool {
 }
 
 /// A target path from the package, refused if it could leave the game folder
-/// or the archive (`..`, a drive letter) or names nothing.
+/// or the archive, or names something Windows cannot (see [`RelPath`]).
 fn safe_path(path: String) -> Result<String, Error> {
-    let mut parts = path.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".").peekable();
-    if parts.peek().is_none() || parts.any(|p| p == ".." || p.contains(':')) {
-        return Err(Error::Package(format!("unsafe path {path:?}")));
-    }
+    RelPath::parse(&path)?;
     Ok(path)
 }
 

@@ -21,7 +21,6 @@ fn list_of(path: &Path) -> String {
 // ---- OIV-02: path confinement ----
 
 #[test]
-#[ignore = "repro OIV-02: add through mods/x64 -> ../x64 writes into the original x64 folder"]
 fn oiv02_add_through_linked_mods_x64_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
@@ -48,7 +47,6 @@ fn oiv02_archive_edit_through_linked_mods_x64_is_refused() {
 }
 
 #[test]
-#[ignore = "repro OIV-02: a created archive through mods/x64 -> ../x64 lands in the original x64 folder"]
 fn oiv02_new_archive_through_linked_mods_x64_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
@@ -61,7 +59,6 @@ fn oiv02_new_archive_through_linked_mods_x64_is_refused() {
 }
 
 #[test]
-#[ignore = "repro OIV-02: add through scripts -> outside folder writes outside the game"]
 fn oiv02_add_through_linked_scripts_outside_the_game_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Legacy);
@@ -79,7 +76,6 @@ fn oiv02_add_through_linked_scripts_outside_the_game_is_refused() {
 }
 
 #[test]
-#[ignore = "repro OIV-02: delete through mods/update -> ../update deletes the original update.rpf"]
 fn oiv02_delete_through_linked_mods_update_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
@@ -92,7 +88,6 @@ fn oiv02_delete_through_linked_mods_update_is_refused() {
 }
 
 #[test]
-#[ignore = "repro OIV-02: refused too late, a .paleto-undo hard link is left in the original update folder"]
 fn oiv02_text_edit_through_linked_mods_update_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
@@ -107,7 +102,6 @@ fn oiv02_text_edit_through_linked_mods_update_is_refused() {
 }
 
 #[test]
-#[ignore = "repro OIV-02: add with mods -> . writes game data over the originals"]
 fn oiv02_mods_linked_to_the_game_root_refuses_game_data() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
@@ -121,7 +115,6 @@ fn oiv02_mods_linked_to_the_game_root_refuses_game_data() {
 }
 
 #[test]
-#[ignore = "repro OIV-02: dlc.rpf is written into the original update folder before the refusal"]
 fn oiv02_install_pack_through_linked_mods_update_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);

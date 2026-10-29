@@ -7,10 +7,12 @@ pub mod crash_hunt;
 pub mod crash_report;
 pub mod diagnosis;
 pub mod export;
+pub mod fsroot;
 pub mod game;
 pub mod loader;
 pub mod oiv;
 pub mod prefix;
+pub mod relpath;
 pub mod scripthook;
 pub mod shared_textures;
 pub mod snapshots;
@@ -21,6 +23,8 @@ pub mod xml;
 
 #[cfg(test)]
 pub(crate) mod fixtures;
+#[cfg(test)]
+mod link_matrix_tests;
 #[cfg(test)]
 mod write_safety_tests;
 
@@ -59,6 +63,12 @@ pub enum Error {
     Convert(String),
     #[error("prefix: {0}")]
     Prefix(String),
+    /// A path from a package or a caller that must not be used as a destination.
+    #[error("unsafe path {path:?}: {why}")]
+    UnsafePath { path: String, why: String },
+    /// A link (or a `..` inside one) that leads out of the folder it must stay in.
+    #[error("{path}: the link {through} leads outside the game and mods folders")]
+    Escape { path: String, through: String },
     /// Stopped because nobody wants the result any more.
     #[error("cancelled")]
     Cancelled,

@@ -3,9 +3,9 @@
 //! They do nothing but slow the game's loading (OpenRPF redirects them) and
 //! hide the real changes, so they can be deleted: the game then reads its own.
 
-use std::path::Path;
-
-use crate::game::same_file;
+use crate::fsroot::Existing;
+use crate::game::{same_content, same_file};
+use crate::relpath::RelPath;
 use crate::{Error, Game};
 
 /// A file of the mods folder identical to the game's: its path relative to
@@ -35,29 +35,21 @@ pub fn identical_copies(game: &Game) -> Vec<Copy> {
 }
 
 /// Deletes these files of the mods folder (after checking each is still
-/// identical to the game's), then the folders left empty.
+/// identical to the game's, and that the name still holds the file that was
+/// compared), then the folders left empty.
 pub fn delete(game: &Game, copies: &[Copy]) -> Result<usize, Error> {
-    let mods = game.mods_dir();
+    let roots = game.roots()?;
     let mut deleted = 0;
     for c in copies {
-        let file = mods.join(&c.path);
-        if same_file(&file, &game.original(&c.path)) {
-            std::fs::remove_file(&file)?;
+        let dest = roots.mods_dest(&RelPath::parse(&c.path)?)?;
+        let (Some(Existing::File(_)), Some(original)) = (&dest.existing, roots.original(&RelPath::parse(&c.path)?)?) else { continue };
+        if same_content(dest.parent.open_read(&dest.name)?, original) {
+            roots.remove(&dest)?;
             deleted += 1;
-            remove_empty_parents(&file, &mods);
+            let _ = roots.prune_empty(&dest);
         }
     }
     Ok(deleted)
-}
-
-fn remove_empty_parents(file: &Path, stop: &Path) {
-    let mut dir = file.parent();
-    while let Some(d) = dir.filter(|d| *d != stop && d.starts_with(stop)) {
-        if std::fs::remove_dir(d).is_err() {
-            break;
-        }
-        dir = d.parent();
-    }
 }
 
 #[cfg(test)]

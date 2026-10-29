@@ -1,10 +1,11 @@
 //! Script Hook V: finding the latest release, the installed and game versions, and updating the DLL.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use crate::game::resolve_ci;
 use crate::loader::{HookStatus, script_hook};
+use crate::relpath::RelPath;
 use crate::{Edition, Error, Game};
 
 const PAGE_URL: &str = "https://www.dev-c.com/gtav/scripthookv/";
@@ -208,12 +209,9 @@ pub fn install_from_zip(game: &Game, zip: &[u8]) -> Result<String, Error> {
         return Err(bad("ScriptHookV.dll is not a Windows DLL"));
     }
     let version = dll_version(&dll).ok_or_else(|| bad("no version in ScriptHookV.dll"))?;
-    let target = resolve_ci(&game.root, DLL_NAME);
-    let temp = game.root.join(".ScriptHookV.dll.new");
-    if let Err(e) = std::fs::write(&temp, &dll).and_then(|()| std::fs::rename(&temp, &target)) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e.into());
-    }
+    let roots = game.roots()?;
+    let mut target = roots.dest(&RelPath::parse(DLL_NAME)?)?;
+    roots.replace(&mut target, |f| f.write_all(&dll))?;
     Ok(version)
 }
 

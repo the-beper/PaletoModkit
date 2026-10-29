@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
+use crate::relpath::RelPath;
 use crate::{Edition, Error, Game};
 
 /// An archive file on disk plus a path inside it, which may cross nested archives.
@@ -89,7 +90,7 @@ impl ArchivePath {
     pub fn editable(&self, game: Option<&Game>) -> Result<Self, Error> {
         let Some(game) = game else { return Ok(self.clone()) };
         let Some(rel) = in_game(&self.disk, game).filter(|rel| !rel.starts_with("mods")) else { return Ok(self.clone()) };
-        let disk = game.mods_copy(&rel.to_string_lossy())?.expect("the original exists");
+        let disk = game.mods_copy(&rel.to_string_lossy())?.ok_or_else(|| Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{} is not in the game folder", rel.display()))))?;
         Ok(ArchivePath { disk, inner: self.inner.clone() })
     }
 
@@ -99,8 +100,10 @@ impl ArchivePath {
         if rel.starts_with("mods") {
             return None;
         }
-        let disk = crate::game::resolve_ci(&game.mods_dir(), &rel.to_string_lossy());
-        disk.is_file().then(|| ArchivePath { disk, inner: self.inner.clone() })
+        let roots = game.roots().ok()?;
+        let dest = roots.mods_dest(&RelPath::parse(&rel.to_string_lossy()).ok()?).ok()?;
+        roots.read_dest(&dest).ok()??;
+        Some(ArchivePath { disk: dest.path(), inner: self.inner.clone() })
     }
 
     /// Edits the folder (or nested archive) at this path: `f` gets the
@@ -337,6 +340,18 @@ mod tests {
         assert_eq!(std::fs::read(elsewhere.join("update.rpf")).unwrap(), original, "original untouched");
         assert_eq!(in_game(&root.join("x/../update/update.rpf"), &game), Some(PathBuf::from("update/update.rpf")));
         assert_eq!(in_game(&dir.path().join("other drive"), &game), None);
+    }
+
+    #[test]
+    fn editing_an_archive_that_has_no_original_is_an_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+        let game = Game::open(&root).unwrap();
+        let missing = ArchivePath::new(root.join("x64/missing.rpf"));
+        let e = missing.editable(Some(&game)).unwrap_err().to_string();
+        assert!(e.contains("is not in the game folder"), "{e}");
     }
 
     #[test]
