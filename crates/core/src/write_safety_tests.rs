@@ -646,6 +646,23 @@ fn oiv03_a_real_zip64_package_still_opens() {
     assert_eq!(std::fs::read(game.root.join("scripts/new.asi")).unwrap(), b"zip64");
 }
 
+#[test]
+fn oiv03_a_zip_is_never_searched_for_where_it_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    // 2 MiB took a zip reader that searches seven seconds, and 64 MiB would take hours.
+    let path = dir.path().join("bait.oiv");
+    std::fs::write(&path, crate::fixtures::search_bait(2 << 20)).unwrap();
+    let start = std::time::Instant::now();
+    let err = Package::open(&path).err().expect("a package made of bait was opened").to_string();
+    assert!(start.elapsed() < std::time::Duration::from_millis(500), "took {:?}: {err}", start.elapsed());
+    // A package with something in front of it is not opened (and says so at once); one without opens.
+    let package = oiv(dir.path(), "plain.oiv", "", &[], true);
+    assert!(Package::open(&package).is_ok());
+    let stubbed = dir.path().join("stubbed.oiv");
+    std::fs::write(&stubbed, [b"#!/bin/sh\n".as_slice(), &std::fs::read(&package).unwrap()].concat()).unwrap();
+    assert!(Package::open(&stubbed).is_err());
+}
+
 // ---- OIV-01: archives saved after the loose files are final ----
 
 #[test]

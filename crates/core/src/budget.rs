@@ -333,8 +333,12 @@ pub fn zip_precheck<R: Read + Seek>(file: &mut R, limits: &Limits) -> Result<(),
         // Markers say the real numbers are in a zip64 record, if there is a locator to it; else they are the numbers.
         let named = if entries == 0xFFFF || size == 0xFFFF_FFFF || offset == 0xFFFF_FFFF { zip64_locator(file, end)? } else { None };
         match named {
-            Some(named) => {
+            // A locator that points at or past itself is skipped by a zip reader too.
+            Some(named) if named < end - 20 => {
                 zip64.insert(end - 20, (named, end));
+            }
+            Some(_) => {
+                why.get_or_insert("the zip64 locator does not point back to a record");
             }
             None => match judge(entries, size, offset, end, limits)? {
                 None => believable = true,
@@ -392,6 +396,14 @@ pub fn zip_precheck<R: Read + Seek>(file: &mut R, limits: &Limits) -> Result<(),
     } else {
         Err(Error::Package(format!("not a usable zip file: {}", why.unwrap_or("no end of central directory"))))
     }
+}
+
+/// A zip opened for reading, at the very start of what is read: its offsets are taken as they are,
+/// and the file is never searched for where the zip begins (a zip reader that does searches in time
+/// that grows with the square of the file when its end records are made to mislead it). A zip with
+/// something in front of it, such as a self-extracting stub, is not opened.
+pub fn zip_open<R: Read + Seek>(reader: R) -> zip::result::ZipResult<zip::ZipArchive<R>> {
+    zip::ZipArchive::with_config(zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) }, reader)
 }
 
 /// Every file of a zip must lie in a place of its own, between the start of the file and its list of
@@ -669,5 +681,15 @@ mod tests {
         let err = zip_precheck(&mut Cursor::new(data), &small()).unwrap_err().to_string();
         assert!(start.elapsed() < std::time::Duration::from_secs(1), "took {:?}", start.elapsed());
         assert_eq!(err, "package: not a usable zip file: a zip64 locator has more than one end record to choose from");
+    }
+
+    #[test]
+    fn a_locator_that_points_past_itself_is_skipped() {
+        // A locator and end record naming offset 200, which is after them, then a good record and its own locator.
+        let data = [zip64_tail(200), vec![0; 58], zip64_record(44, 3, 150), zip64_tail(100)].concat();
+        assert!(zip_precheck(&mut Cursor::new(data), &small()).is_ok());
+        // And with nothing else, a refusal and not a panic.
+        let err = zip_precheck(&mut Cursor::new([zip64_tail(200), vec![0; 100]].concat()), &small()).unwrap_err().to_string();
+        assert_eq!(err, "package: not a usable zip file: the zip64 locator does not point back to a record");
     }
 }

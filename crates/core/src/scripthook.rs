@@ -200,7 +200,7 @@ pub fn install_from_zip(game: &Game, zip: &[u8]) -> Result<String, Error> {
     // Only the DLL is read, and the release is small: the package limits, with this cap for the one file.
     let limits = Limits { in_memory: MAX_ZIP, ..Limits::PACKAGE };
     budget::zip_precheck(&mut std::io::Cursor::new(zip), &limits)?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).map_err(|e| Error::Package(e.to_string()))?;
+    let mut archive = budget::zip_open(std::io::Cursor::new(zip)).map_err(|e| Error::Package(e.to_string()))?;
     budget::zip_extents(&mut archive)?;
     let index = (0..archive.len())
         .find(|&i| archive.name_for_index(i).and_then(Result::ok).is_some_and(|n| n.rsplit(['/', '\\']).next().is_some_and(|f| f.eq_ignore_ascii_case(DLL_NAME))))
@@ -368,6 +368,14 @@ mod tests {
         names.sort();
         assert_eq!(names, ["GTA5_Enhanced.exe", "dinput8.dll", "scripthookv.dll"]);
         assert!(install_from_zip(&game, b"not a zip").is_err());
+    }
+
+    #[test]
+    fn a_zip_made_to_be_searched_is_refused_at_once() {
+        let (_dir, game) = game_dir(Edition::Enhanced);
+        let start = std::time::Instant::now();
+        assert!(install_from_zip(&game, &crate::fixtures::search_bait(2 << 20)).is_err());
+        assert!(start.elapsed() < Duration::from_millis(500), "took {:?}", start.elapsed());
     }
 
     #[test]

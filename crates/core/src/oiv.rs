@@ -73,7 +73,7 @@ impl Package {
         let mut file = File::open(path)?;
         // Before the zip reader allocates for the list of files.
         budget::zip_precheck(&mut file, &limits)?;
-        let zip = ZipArchive::new(file).map_err(zip_err)?;
+        let zip = budget::zip_open(file).map_err(zip_err)?;
         let mut entries = Entries::new(zip, limits)?;
         let assembly = entries.read("assembly.xml", limits.manifest)?;
         let assembly = String::from_utf8_lossy(assembly.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&assembly)).into_owned();

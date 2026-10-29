@@ -68,6 +68,28 @@ pub(crate) fn oiv_raw(dir: &Path, name: &str, entries: impl IntoIterator<Item = 
     path
 }
 
+/// `len` bytes of central directory headers, a broken one in the middle, and two plain end records
+/// (the last says the list is the broken header, the one before it says it is the first): a zip reader
+/// that looks for where the zip starts, whose end records are neither of them at the end of a list of
+/// files, searches all of it for headers, for each header it finds.
+pub(crate) fn search_bait(len: usize) -> Vec<u8> {
+    let end = |size: u32, offset: u32, comment: u16| {
+        let mut v = b"PK\x05\x06\0\0\0\0\x01\0\x01\0".to_vec();
+        v.extend_from_slice(&size.to_le_bytes());
+        v.extend_from_slice(&offset.to_le_bytes());
+        v.extend_from_slice(&comment.to_le_bytes());
+        v
+    };
+    let mut data = b"PK\x01\x02".repeat(len / 4);
+    let half = (len / 2) & !3;
+    data[half + 4..half + 46].fill(0xFF);
+    data.extend_from_slice(&[b'X'; 64]);
+    data.extend_from_slice(&end(46, 0, 64 + 22));
+    data.extend_from_slice(&[b'X'; 64]);
+    data.extend_from_slice(&end(46, u32::try_from(half).unwrap(), 0));
+    data
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Entry {
     Dir,
