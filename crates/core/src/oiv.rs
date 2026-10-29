@@ -6,12 +6,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use paleto_rpf::{ArchiveEditor, Keys};
 use zip::ZipArchive;
 
+use crate::budget::{self, Budget, Limits, Scratch};
 use crate::convert;
 use crate::fsroot::{Dir, Existing, Fingerprint, GameRoots, Resolved, RootKind};
 use crate::game::Game;
@@ -45,20 +46,39 @@ enum Command {
 }
 
 pub struct Package {
-    zip: ZipArchive<File>,
+    entries: Entries,
     pub metadata: Metadata,
     content: Vec<Command>,
     /// Content converted to the Enhanced format, by zip entry name (lower case),
     /// installed in place of the package's own.
-    converted: HashMap<String, Vec<u8>>,
+    converted: HashMap<String, Converted>,
 }
+
+/// Converted content: small files are held, an archive stays in a file (its folder already gone).
+enum Converted {
+    Bytes(Vec<u8>),
+    File(File, u64),
+}
+
+/// How many nodes `assembly.xml` may have (a legitimate one has a few thousand).
+const MAX_NODES: u32 = 2_000_000;
 
 impl Package {
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let mut zip = ZipArchive::new(File::open(path)?).map_err(zip_err)?;
-        let assembly = read_entry(&mut zip, "assembly.xml")?;
+        Self::open_with(path, Limits::PACKAGE)
+    }
+
+    /// [`Package::open`] with other limits (tests use small ones).
+    pub(crate) fn open_with(path: &Path, limits: Limits) -> Result<Self, Error> {
+        let mut file = File::open(path)?;
+        // Before the zip reader allocates for the list of files.
+        budget::zip_precheck(&mut file, &limits)?;
+        let zip = ZipArchive::new(file).map_err(zip_err)?;
+        let mut entries = Entries::new(zip, limits)?;
+        let assembly = entries.read("assembly.xml", limits.manifest)?;
         let assembly = String::from_utf8_lossy(assembly.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&assembly)).into_owned();
-        let doc = roxmltree::Document::parse(&assembly).map_err(|e| Error::Package(format!("assembly.xml: {e}")))?;
+        let options = roxmltree::ParsingOptions { nodes_limit: MAX_NODES, ..Default::default() };
+        let doc = roxmltree::Document::parse_with_options(&assembly, options).map_err(|e| Error::Package(format!("assembly.xml: {e}")))?;
         let root = doc.root_element();
         if !root.has_tag_name("package") {
             return Err(Error::Package("assembly.xml: root is not <package>".into()));
@@ -96,11 +116,13 @@ impl Package {
 
         let content = child(root, "content").ok_or_else(|| Error::Package("assembly.xml: missing <content>".into()))?;
         let content = parse_commands(content, assembly.as_str())?;
-        Ok(Package { zip, metadata, content, converted: HashMap::new() })
+        Ok(Package { entries, metadata, content, converted: HashMap::new() })
     }
 
+    /// The package's picture; none if there is none or it is over the limit (it is not read then).
     pub fn icon(&mut self) -> Option<Vec<u8>> {
-        read_entry(&mut self.zip, "icon.png").ok()
+        self.entries.fresh();
+        self.entries.read("icon.png", self.entries.budget.limits().icon).ok()
     }
 
     /// The `<add>` sources, at every level.
@@ -125,20 +147,21 @@ impl Package {
     /// textures and particles made for Legacy, loose or inside the archives it
     /// adds ("dlc.rpf/x64/vehicles.rpf/car.yft"). Paths use '/' separators.
     pub fn legacy_files(&mut self, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
+        self.entries.fresh();
         let mut found = Vec::new();
         for source in self.add_sources() {
             let name = source.replace('\\', "/");
-            let data = read_entry(&mut self.zip, &content_path(&source))?;
-            if convert::needs_conversion(&name, &data) {
-                found.push(name);
-            } else if name.to_ascii_lowercase().ends_with(".rpf") {
-                let dir = convert::scratch_dir()?;
-                let disk = dir.join("archive.rpf");
-                let result = std::fs::write(&disk, &data).map_err(Error::from).and_then(|_| Ok(paleto_rpf::Archive::open(&disk, keys)?));
-                if let Ok(archive) = result {
+            let entry = content_path(&source);
+            if name.to_ascii_lowercase().ends_with(".rpf") {
+                // An archive is looked into on disk, never held.
+                let dir = Scratch::new()?;
+                let disk = dir.path().join("archive.rpf");
+                self.entries.copy(&entry, &mut dir.create("archive.rpf")?)?;
+                if let Ok(archive) = paleto_rpf::Archive::open(&disk, keys) {
                     found.extend(convert::legacy_in_archive(&archive, keys).into_iter().map(|p| format!("{name}/{p}")));
                 }
-                let _ = std::fs::remove_dir_all(&dir);
+            } else if convert::convertible(&name) && convert::needs_conversion(&name, &self.entries.head(&entry)?) {
+                found.push(name);
             }
         }
         Ok(found)
@@ -149,18 +172,17 @@ impl Package {
     /// Returns a log; files that cannot be converted are reported there and
     /// installed as they are.
     pub fn convert_legacy(&mut self, tool: &Path, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
+        self.entries.fresh();
+        let in_memory = self.entries.budget.limits().in_memory;
         let mut log = Vec::new();
         let mut loose = Vec::new();
         for source in self.add_sources() {
             let name = source.replace('\\', "/");
             let entry = content_path(&source).to_ascii_lowercase();
-            let data = read_entry(&mut self.zip, &entry)?;
-            if convert::needs_conversion(&name, &data) {
-                loose.push((name, entry, data));
-            } else if name.to_ascii_lowercase().ends_with(".rpf") {
-                let dir = convert::scratch_dir()?;
-                let disk = dir.join("archive.rpf");
-                std::fs::write(&disk, &data)?;
+            if name.to_ascii_lowercase().ends_with(".rpf") {
+                let dir = Scratch::new()?;
+                let disk = dir.path().join("archive.rpf");
+                self.entries.copy(&entry, &mut dir.create("archive.rpf")?)?;
                 let result = convert::convert_whole_archive(&disk, keys, tool);
                 let converted = result.and_then(|report| {
                     for r in &report {
@@ -169,12 +191,15 @@ impl Package {
                             Some(e) => format!("warning: {name}/{}: not converted: {e}", r.path),
                         });
                     }
-                    Ok(report.iter().any(|r| r.error.is_none()).then(|| std::fs::read(&disk)).transpose()?)
+                    // The file stays readable through its handle once the folder is gone.
+                    Ok(report.iter().any(|r| r.error.is_none()).then(|| File::open(&disk).and_then(|f| f.metadata().map(|m| (f, m.len())))).transpose()?)
                 });
-                let _ = std::fs::remove_dir_all(&dir);
-                if let Some(new) = converted? {
-                    self.converted.insert(entry, new);
+                if let Some((file, len)) = converted? {
+                    self.converted.insert(entry, Converted::File(file, len));
                 }
+            } else if convert::convertible(&name) && convert::needs_conversion(&name, &self.entries.head(&entry)?) {
+                let data = self.entries.read(&entry, in_memory)?;
+                loose.push((name, entry, data));
             }
         }
         if !loose.is_empty() {
@@ -182,7 +207,7 @@ impl Package {
             for ((name, entry, _), outcome) in loose.iter().zip(convert::convert(tool, &inputs)?) {
                 match outcome {
                     convert::Outcome::Converted(new) => {
-                        self.converted.insert(entry.clone(), new);
+                        self.converted.insert(entry.clone(), Converted::Bytes(new));
                         log.push(format!("converted {name}"));
                     }
                     convert::Outcome::Unchanged => {}
@@ -202,11 +227,12 @@ impl Package {
 
     /// [`Package::install`], with keys only needed for encrypted archives.
     pub(crate) fn install_with(&mut self, game: &Game, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
-        self.check(&self.content.clone())?;
+        self.check(&self.content.clone(), false)?;
+        self.entries.fresh();
         let roots = game.roots()?;
         // One change at a time per game, for the whole install.
         let _lock = txn::guard(&roots, "installing a package")?;
-        let mut inst = Installer { roots: &roots, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
+        let mut inst = Installer { roots: &roots, keys, entries: &mut self.entries, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
         if let Err(e) = self.content.clone().iter().try_for_each(|cmd| inst.run_root(cmd)) {
             // Archives are only saved at the end: putting the loose files back undoes it all.
             let (failures, notes) = inst.undo.roll_back();
@@ -222,14 +248,27 @@ impl Package {
         Ok(inst.log)
     }
 
-    /// Fails early on anything we cannot do, before touching any file.
-    fn check(&mut self, cmds: &[Command]) -> Result<(), Error> {
+    /// Fails early on anything we cannot do, before touching any file: a missing file, or one
+    /// whose header already says it is more than an install may take (`in_archive`: inside one).
+    fn check(&mut self, cmds: &[Command], in_archive: bool) -> Result<(), Error> {
+        let limits = *self.entries.budget.limits();
         for cmd in cmds {
             match cmd {
-                Command::Add { source, .. } => {
-                    find_entry(&self.zip, &content_path(source)).ok_or_else(|| Error::Package(format!("missing content/{source}")))?;
+                Command::Add { source, target } => {
+                    let entry = content_path(source);
+                    let (declared, stored) = self.entries.declared(&entry).map_err(|_| Error::Package(format!("missing content/{source}")))?;
+                    // What will be added is the converted file if there is one.
+                    let size = match self.converted.get(&entry.to_ascii_lowercase()) {
+                        Some(Converted::Bytes(data)) => data.len() as u64,
+                        Some(Converted::File(_, len)) => *len,
+                        None => {
+                            self.entries.budget.check_ratio(declared, stored, &entry)?;
+                            declared
+                        }
+                    };
+                    within(&entry, size, add_cap(&limits, in_archive, target))?;
                 }
-                Command::Archive { body, .. } => self.check(body)?,
+                Command::Archive { body, .. } => self.check(body, true)?,
                 _ => {}
             }
         }
@@ -241,8 +280,8 @@ struct Installer<'a> {
     /// Where files may be written: every destination is resolved through it.
     roots: &'a GameRoots,
     keys: Option<&'a Keys>,
-    zip: &'a mut ZipArchive<File>,
-    converted: &'a HashMap<String, Vec<u8>>,
+    entries: &'a mut Entries,
+    converted: &'a HashMap<String, Converted>,
     /// Top-level archives being edited, by path in the mods folder.
     archives: BTreeMap<PathBuf, ArchiveEditor>,
     log: Vec<String>,
@@ -480,13 +519,37 @@ thread_local! {
 }
 
 impl Installer<'_> {
-    /// The data of an `<add>` source: the converted file if there is one.
+    /// The data of an `<add>` source (the converted file if there is one) in memory, within the caps.
     fn source(&mut self, source: &str) -> Result<Vec<u8>, Error> {
         let entry = content_path(source);
+        let cap = self.entries.budget.limits().in_memory;
         match self.converted.get(&entry.to_ascii_lowercase()) {
-            Some(data) => Ok(data.clone()),
-            None => read_entry(self.zip, &entry),
+            Some(Converted::Bytes(data)) => self.entries.budget.read(&mut data.as_slice(), data.len() as u64, cap, &entry),
+            Some(Converted::File(file, len)) => self.entries.budget.read(&mut rewound(file)?, *len, cap, &entry),
+            None => self.entries.read(&entry, cap),
         }
+    }
+
+    /// An `<add>` source written to `out`, a piece at a time.
+    fn write_source(&mut self, source: &str, out: &mut File) -> Result<(), Error> {
+        let entry = content_path(source);
+        match self.converted.get(&entry.to_ascii_lowercase()) {
+            Some(Converted::Bytes(data)) => self.entries.budget.copy(&mut data.as_slice(), data.len() as u64, out, &entry)?,
+            Some(Converted::File(file, len)) => self.entries.budget.copy(&mut rewound(file)?, *len, out, &entry)?,
+            None => self.entries.copy(&entry, out)?,
+        };
+        Ok(())
+    }
+
+    /// An `<add>` source as a file, and its length: for the archives an archive takes from disk.
+    fn source_file(&mut self, source: &str) -> Result<(File, u64), Error> {
+        if let Some(Converted::File(file, len)) = self.converted.get(&content_path(source).to_ascii_lowercase()) {
+            return Ok((file.try_clone()?, *len));
+        }
+        Scratch::spool(|out| {
+            self.write_source(source, out)?;
+            Ok(out.stream_position()?)
+        })
     }
 
     /// A command at the game folder level.
@@ -498,13 +561,18 @@ impl Installer<'_> {
                     self.log.push(format!("warning: refusing to replace {}{why}", dest.path().display()));
                     return Ok(());
                 }
-                let data = self.source(source)?;
                 self.ensure_dirs(&mut dest)?;
                 let path = dest.path();
                 self.archives.remove(&path);
                 self.undo.keep(&dest, true)?;
                 // A copy in the mods folder may be a link to an original: replace it, never write through it.
-                self.roots.replace(&mut dest, |f| f.write_all(&data))?;
+                // The source goes into the new file a piece at a time; a failure of its own is not an I/O error of the file.
+                let (roots, mut failed) = (self.roots, None);
+                let written = roots.replace(&mut dest, |f| self.write_source(source, f).map_err(|e| io::Error::other(failed.insert(e).to_string())));
+                if let Some(e) = failed {
+                    return Err(e);
+                }
+                written?;
                 self.undo.wrote(&dest);
                 self.log.push(format!("add {}", path.display()));
             }
@@ -574,7 +642,13 @@ impl Installer<'_> {
         let keys = self.keys;
         match cmd {
             Command::Add { source, target } => {
-                editor.add_file(target, self.source(source)?)?;
+                if spools(target) {
+                    // An archive, sound or video is attached from a file, not held.
+                    let (file, len) = self.source_file(source)?;
+                    editor.add_file_from(target, file, len)?;
+                } else {
+                    editor.add_file(target, self.source(source)?)?;
+                }
                 self.log.push(format!("add {at}\\{target}"));
             }
             Command::Delete(target) => {
@@ -862,20 +936,104 @@ fn content_path(source: &str) -> String {
     format!("content/{}", source.replace('\\', "/").trim_start_matches('/'))
 }
 
-/// The index of a zip entry, matching the name case-insensitively and
-/// accepting backslash separators (packages made on Windows use both).
-fn find_entry(zip: &ZipArchive<File>, name: &str) -> Option<usize> {
-    let wanted = name.replace('\\', "/").to_ascii_lowercase();
-    (0..zip.len()).find(|&i| zip.name_for_index(i).is_some_and(|n| n.is_ok_and(|n| n.replace('\\', "/").to_ascii_lowercase() == wanted)))
+/// The most one `<add>` may bring: into the game or mods folder it is streamed; into an archive
+/// it is held (so less) unless it is spooled, and then the archive's own size field (32 bits) is the limit.
+fn add_cap(limits: &Limits, in_archive: bool, target: &str) -> u64 {
+    match (in_archive, spools(target)) {
+        (false, _) => limits.streamed,
+        (true, false) => limits.in_memory,
+        (true, true) => limits.streamed.min(u64::from(u32::MAX)),
+    }
 }
 
-/// Reads a zip entry found by [`find_entry`].
-fn read_entry(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<u8>, Error> {
-    let index = find_entry(zip, name).ok_or_else(|| Error::Package(format!("missing {name}")))?;
-    let mut entry = zip.by_index(index).map_err(zip_err)?;
-    let mut data = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut data)?;
-    Ok(data)
+/// Fails if a file of `size` bytes is over `cap`; says 4 GiB for what a 32-bit size field cannot hold.
+fn within(what: &str, size: u64, cap: u64) -> Result<(), Error> {
+    let shown = if cap == u64::from(u32::MAX) { 1 << 32 } else { cap };
+    if size > cap { Err(Error::Limit { what: what.to_string(), limit: shown }) } else { Ok(()) }
+}
+
+/// What an `<add>` into an archive takes from a file instead of memory.
+fn spools(target: &str) -> bool {
+    target.rsplit(['/', '\\']).next().and_then(|n| n.rsplit_once('.')).is_some_and(|(_, e)| ["rpf", "awc", "bik"].iter().any(|k| e.eq_ignore_ascii_case(k)))
+}
+
+/// A converted file from its start.
+fn rewound(file: &File) -> io::Result<&File> {
+    let mut f = file;
+    f.seek(SeekFrom::Start(0))?;
+    Ok(f)
+}
+
+/// A zip entry name as entries are looked up: case and separators do not matter
+/// (packages made on Windows use both).
+fn normal(name: &str) -> String {
+    name.replace('\\', "/").to_ascii_lowercase()
+}
+
+/// The package's zip, read within its limits: every read goes through the budget.
+struct Entries {
+    zip: ZipArchive<File>,
+    /// Entry numbers by [`normal`] name; of two entries of one name, the first.
+    index: HashMap<String, usize>,
+    budget: Budget,
+}
+
+impl Entries {
+    fn new(mut zip: ZipArchive<File>, limits: Limits) -> Result<Self, Error> {
+        let count = zip.len();
+        if count as u64 > limits.entries {
+            return Err(Error::Package(format!("the package has {count} files; more than {} are refused", limits.entries)));
+        }
+        // What a file says it takes up must be room it has, or its ratio proves nothing.
+        budget::zip_extents(&mut zip)?;
+        let mut index = HashMap::with_capacity(count);
+        for i in 0..count {
+            if let Some(Ok(name)) = zip.name_for_index(i) {
+                index.entry(normal(&name)).or_insert(i);
+            }
+        }
+        Ok(Entries { zip, index, budget: Budget::new(limits) })
+    }
+
+    /// A new budget, for a new operation.
+    fn fresh(&mut self) {
+        self.budget = Budget::new(*self.budget.limits());
+    }
+
+    fn find(&self, name: &str) -> Result<usize, Error> {
+        self.index.get(&normal(name)).copied().ok_or_else(|| Error::Package(format!("missing {name}")))
+    }
+
+    /// What the zip says an entry holds and takes (unpacked, packed), which is not yet what it holds.
+    fn declared(&mut self, name: &str) -> Result<(u64, u64), Error> {
+        let index = self.find(name)?;
+        let entry = self.zip.by_index_raw(index).map_err(zip_err)?;
+        Ok((entry.size(), entry.compressed_size()))
+    }
+
+    /// The first bytes of an entry.
+    fn head(&mut self, name: &str) -> Result<Vec<u8>, Error> {
+        let index = self.find(name)?;
+        let mut head = Vec::new();
+        self.zip.by_index(index).map_err(zip_err)?.take(16).read_to_end(&mut head)?;
+        Ok(head)
+    }
+
+    /// An entry into memory, at most `cap` bytes.
+    fn read(&mut self, name: &str, cap: u64) -> Result<Vec<u8>, Error> {
+        let index = self.find(name)?;
+        let mut entry = self.zip.by_index(index).map_err(zip_err)?;
+        let (declared, stored) = (entry.size(), entry.compressed_size());
+        self.budget.read_packed(&mut entry, declared, stored, cap, name)
+    }
+
+    /// An entry written to `out`, a piece at a time.
+    fn copy(&mut self, name: &str, out: &mut impl Write) -> Result<u64, Error> {
+        let index = self.find(name)?;
+        let mut entry = self.zip.by_index(index).map_err(zip_err)?;
+        let (declared, stored) = (entry.size(), entry.compressed_size());
+        self.budget.copy_packed(&mut entry, declared, stored, out, name)
+    }
 }
 
 fn zip_err(e: zip::result::ZipError) -> Error {
@@ -886,6 +1044,23 @@ fn zip_err(e: zip::result::ZipError) -> Error {
 mod tests {
     use super::*;
     use paleto_formats::hash::{joaat, joaat_lower};
+
+    #[test]
+    fn what_an_add_may_bring() {
+        let limits = Limits::PACKAGE;
+        // Streamed to a file: 8 GiB. Held inside an archive: 1 GiB. Spooled inside one: what its 32-bit size can say.
+        assert_eq!(add_cap(&limits, false, "scripts/a.asi"), 8 << 30);
+        assert_eq!(add_cap(&limits, false, "x64/a.rpf"), 8 << 30);
+        assert_eq!(add_cap(&limits, true, "b.txt"), 1 << 30);
+        for target in ["a.rpf", "dir\\a.RPF", "a.awc", "a.bik"] {
+            assert_eq!(add_cap(&limits, true, target), u64::from(u32::MAX));
+        }
+        assert_eq!(add_cap(&Limits { streamed: 100, ..limits }, true, "a.rpf"), 100);
+        // And the way it is told.
+        assert_eq!(within("content/x", 5 << 30, add_cap(&limits, true, "a.rpf")).unwrap_err().to_string(), "content/x is larger than 4 GiB");
+        assert_eq!(within("content/x", 2 << 30, add_cap(&limits, true, "b.txt")).unwrap_err().to_string(), "content/x is larger than 1 GiB");
+        assert!(within("content/x", u64::from(u32::MAX), add_cap(&limits, true, "a.rpf")).is_ok());
+    }
 
     /// A PSO file with `CPaletoTest { value: i32, model: hash }`.
     fn pso(value: i32, model: &str) -> Vec<u8> {

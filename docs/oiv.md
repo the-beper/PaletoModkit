@@ -30,6 +30,23 @@ A `<remove>` whose XPath matches nothing is not an error: the node was already g
 
 An install holds the lock of the game for its whole run: a second change to the same game (another install, a snapshot, and so on) gets a "busy" message instead of mixing with it. Before a file is replaced or deleted, its old content is kept under a `.paleto-…` name beside it, and put back if the install fails. If a file cannot be put back, the error says so, names the file and its backup, and never says "nothing was installed". If the program is interrupted, those backups stay listed as leftovers; see [Troubleshooting](troubleshooting.md#one-change-at-a-time-and-interrupted-changes) for the `.paleto` folder and what happens at the next change.
 
+## Limits on what a package may hold
+
+A package is read with limits, counted on the bytes actually read (what its headers claim proves nothing). A damaged or hostile one is refused with a message that names the limit.
+
+| What | Limit |
+| :--- | :--- |
+| `assembly.xml` | 16 MiB and two million XML nodes |
+| `icon.png` | 4 MiB; a larger one is left out. The app only draws pictures up to 1024 by 1024 |
+| Files in the package | 100 000, in a list of files of at most 64 MiB |
+| A file added to the game or mods folder | 8 GiB, written to its new file piece by piece |
+| An `.rpf`, `.awc` or `.bik` added inside an archive | about 4 GiB (the size an archive can store), copied through a temporary file |
+| Any other file added inside an archive | 1 GiB, all of them together 4 GiB, held in memory |
+| Expansion | A file that comes out at more than 16 MiB may not be more than 200 times its packed size |
+| Everything read in one install | 64 GiB |
+
+The count and the size of the list of files are first judged from the end records of the zip, before the zip reader allocates for the list: the reader may take any end record in the last 128 KiB of the file, so each one is judged, and a zip64 locator must have exactly one zip64 record to point at, of a size the reader can read within the same 64 MiB. The count is checked again once the list is read. Every file must have room of its own in the zip: one that shares bytes with another, or says it takes up more than the room before the next file or the list of files, refuses the package, because the expansion limit trusts what a file says it takes up. Sizes, expansion and the files' presence are checked from the headers before the installer touches a file, so a package that is too big for these limits fails without changing anything. A header that lies, or a file that holds more or less than it says, is found while the file is read: the package is refused and what the install had changed so far is undone. The temporary copy of an `.rpf`, `.awc` or `.bik` has no name in the temporary folder, so nothing of it is left if the program stops.
+
 ## The installation log
 
 The installer ends with a log of every change (`add …`, `edit …`, `saved …`) and its warnings. Keep it in mind when a mod does not work: a warning usually means the package was made for another version of the game files.

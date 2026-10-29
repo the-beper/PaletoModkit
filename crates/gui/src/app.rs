@@ -4973,7 +4973,14 @@ fn read_start(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
 }
 
 fn load_icon(ctx: &egui::Context, png: &[u8]) -> Option<egui::TextureHandle> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    // A package's picture is small; a bigger one (or one that claims to be) is not decoded.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(1024);
+    limits.max_image_height = Some(1024);
+    limits.max_alloc = Some(64 << 20);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    reader.limits(limits);
+    let img = reader.decode().ok()?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
     Some(ctx.load_texture("package-icon", color, Default::default()))

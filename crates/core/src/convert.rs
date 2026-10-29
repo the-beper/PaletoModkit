@@ -5,6 +5,7 @@
 //! hands it the files and puts the results back into the mods folder.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
+use crate::budget::{Budget, Limits, Scratch};
 use crate::loader::enhanced_version;
 use crate::{Error, Game};
 
@@ -376,47 +378,59 @@ fn header(path: &Path) -> Option<[u8; 16]> {
     Some(buf)
 }
 
+/// A file ready to be added: held in memory (converted, or read), or still on disk as it is.
+pub enum Prepared {
+    Bytes(Vec<u8>),
+    /// An archive converted on disk: its folder is already gone, and it is read through the handle (`len` bytes).
+    File(File, u64),
+    /// Not changed: to be copied from where it is, not held.
+    Disk(PathBuf),
+}
+
 /// Reads files on disk (as [`legacy_in_local`] takes them), converting the
 /// Legacy ones with `tool`: loose resources, and the resources inside archives
 /// (the archive on disk is left alone). One data per file, in order, and a
-/// log of what was converted or could not be.
-pub fn read_converting(files: &[(PathBuf, String)], tool: &Path, keys: Option<&Keys>) -> Result<(Vec<Vec<u8>>, Vec<String>), Error> {
+/// log of what was converted or could not be. Files that need no conversion
+/// are not read: they stay [`Prepared::Disk`].
+pub fn prepare(files: &[(PathBuf, String)], tool: &Path, keys: Option<&Keys>) -> Result<(Vec<Prepared>, Vec<String>), Error> {
+    let budget = Budget::new(Limits::PACKAGE);
+    let in_memory = budget.limits().in_memory;
     let mut data = Vec::new();
     let mut log = Vec::new();
     let mut loose = Vec::new();
     for (i, (path, rel)) in files.iter().enumerate() {
         let rel = rel.replace('\\', "/");
-        let bytes = std::fs::read(path)?;
-        if needs_conversion(&rel, &bytes) {
-            loose.push((i, rel));
-        } else if rel.to_ascii_lowercase().ends_with(".rpf")
-            && Archive::open(path, keys).is_ok_and(|a| !legacy_in_archive(&a, keys).is_empty())
-        {
-            let dir = scratch_dir()?;
-            let copy = dir.join("archive.rpf");
-            std::fs::write(&copy, &bytes)?;
-            let result = convert_whole_archive(&copy, keys, tool).and_then(|report| {
-                for r in &report {
-                    log.push(match &r.error {
-                        None => format!("converted {rel}/{}", r.path),
-                        Some(e) => format!("{rel}/{}: not converted: {e}", r.path),
-                    });
-                }
-                Ok(std::fs::read(&copy)?)
-            });
-            let _ = std::fs::remove_dir_all(&dir);
-            data.push(result?);
-            continue;
+        if convertible(&rel) && header(path).is_some_and(|h| needs_conversion(&rel, &h)) {
+            // Held for the converter; kept on disk as it is unless it is converted.
+            loose.push((i, rel, read_whole(&budget, path, in_memory)?));
+            data.push(Prepared::Disk(path.clone()));
+        } else if rel.to_ascii_lowercase().ends_with(".rpf") && Archive::open(path, keys).is_ok_and(|a| !legacy_in_archive(&a, keys).is_empty()) {
+            let scratch = Scratch::new()?;
+            let copy = scratch.path().join("archive.rpf");
+            let mut file = File::open(path)?;
+            let len = file.metadata()?.len();
+            budget.copy(&mut file, len, &mut scratch.create("archive.rpf")?, &rel)?;
+            let report = convert_whole_archive(&copy, keys, tool)?;
+            for r in &report {
+                log.push(match &r.error {
+                    None => format!("converted {rel}/{}", r.path),
+                    Some(e) => format!("{rel}/{}: not converted: {e}", r.path),
+                });
+            }
+            let converted = File::open(&copy)?;
+            let len = converted.metadata()?.len();
+            data.push(Prepared::File(converted, len));
+        } else {
+            data.push(Prepared::Disk(path.clone()));
         }
-        data.push(bytes);
     }
     if !loose.is_empty() {
-        let inputs: Vec<(&str, &[u8])> = loose.iter().map(|(i, rel)| (rel.as_str(), data[*i].as_slice())).collect();
+        let inputs: Vec<(&str, &[u8])> = loose.iter().map(|(_, rel, bytes)| (rel.as_str(), bytes.as_slice())).collect();
         let outcomes = convert(tool, &inputs)?;
-        for ((i, rel), outcome) in loose.iter().zip(outcomes) {
+        for ((i, rel, _), outcome) in loose.iter().zip(outcomes) {
             match outcome {
                 Outcome::Converted(new) => {
-                    data[*i] = new;
+                    data[*i] = Prepared::Bytes(new);
                     log.push(format!("converted {rel}"));
                 }
                 Outcome::Unchanged => {}
@@ -424,6 +438,31 @@ pub fn read_converting(files: &[(PathBuf, String)], tool: &Path, keys: Option<&K
             }
         }
     }
+    Ok((data, log))
+}
+
+/// A file on disk into memory, within the budget.
+fn read_whole(budget: &Budget, path: &Path, cap: u64) -> Result<Vec<u8>, Error> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    budget.read(&mut file, len, cap, &path.display().to_string())
+}
+
+/// [`prepare`], with every file in memory: what an archive editor takes. A file over
+/// [`Limits::in_memory`] (1 GiB) is refused, and all of them together over `in_memory_total` (4 GiB).
+pub fn read_converting(files: &[(PathBuf, String)], tool: &Path, keys: Option<&Keys>) -> Result<(Vec<Vec<u8>>, Vec<String>), Error> {
+    let (prepared, log) = prepare(files, tool, keys)?;
+    let budget = Budget::new(Limits::PACKAGE);
+    let cap = budget.limits().in_memory;
+    let data = prepared
+        .into_iter()
+        .zip(files)
+        .map(|(p, (_, rel))| match p {
+            Prepared::Bytes(data) => Ok(data),
+            Prepared::File(mut file, len) => budget.read(&mut file, len, cap, rel),
+            Prepared::Disk(path) => read_whole(&budget, &path, cap),
+        })
+        .collect::<Result<_, Error>>()?;
     Ok((data, log))
 }
 
@@ -575,6 +614,42 @@ done
         let mut pack = ArchiveEditor::open(&converted, None).unwrap();
         assert_eq!(pack.archive("x64/vehicles.rpf", false, None).unwrap().read("car.yft", None).unwrap(), res(171));
         assert_eq!(legacy_in_archive(&Archive::open(&drop.join("dlc.rpf"), None).unwrap(), None), ["x64/vehicles.rpf/car.yft"]);
+    }
+
+    #[test]
+    fn files_that_need_no_conversion_stay_on_disk() {
+        let res = |v: u32| [b"RSC7".as_slice(), &v.to_le_bytes(), &((v >> 4) << 28).to_le_bytes(), &((v & 15) << 28).to_le_bytes(), b"payload"].concat();
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<(PathBuf, String)> = [("car.yft", res(162)), ("car_hi.yft", res(171)), ("readme.txt", b"hi".to_vec())].into_iter().map(|(name, data)| {
+            std::fs::write(dir.path().join(name), data).unwrap();
+            (dir.path().join(name), name.to_string())
+        }).collect();
+        let (data, log) = prepare(&files, &fake_tool(dir.path()), None).unwrap();
+        assert_eq!(log, ["converted car.yft"]);
+        assert!(matches!(&data[0], Prepared::Bytes(b) if *b == res(171)));
+        assert!(matches!(&data[1], Prepared::Disk(p) if *p == files[1].0));
+        assert!(matches!(&data[2], Prepared::Disk(p) if *p == files[2].0));
+    }
+
+    #[test]
+    fn a_converted_archive_stays_a_file() {
+        use std::io::Read;
+        let res = |v: u32| [b"RSC7".as_slice(), &v.to_le_bytes(), &((v >> 4) << 28).to_le_bytes(), &((v & 15) << 28).to_le_bytes(), b"payload"].concat();
+        let dir = tempfile::tempdir().unwrap();
+        let mut pack = ArchiveEditor::new("dlc.rpf");
+        pack.archive("x64/vehicles.rpf", true, None).unwrap().add_file("car.yft", res(162)).unwrap();
+        pack.save(&dir.path().join("dlc.rpf")).unwrap();
+        let (data, log) = prepare(&[(dir.path().join("dlc.rpf"), "dlc.rpf".into())], &fake_tool(dir.path()), None).unwrap();
+        assert_eq!(log, ["converted dlc.rpf/x64/vehicles.rpf/car.yft"]);
+        // Not read into memory: a file, with its folder gone, that is read through the handle it was opened with.
+        let Some(Prepared::File(mut file, len)) = data.into_iter().next() else { panic!("the converted archive is not a file") };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len() as u64, len);
+        let converted = dir.path().join("converted.rpf");
+        std::fs::write(&converted, bytes).unwrap();
+        let mut pack = ArchiveEditor::open(&converted, None).unwrap();
+        assert_eq!(pack.archive("x64/vehicles.rpf", false, None).unwrap().read("car.yft", None).unwrap(), res(171));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Game folder, mods folder and OIV package handling.
 
 pub mod addon;
+pub mod budget;
 pub mod cleanup;
 pub mod convert;
 pub mod crash_hunt;
@@ -73,6 +74,9 @@ pub enum Error {
     /// A link (or a `..` inside one) that leads out of the folder it must stay in.
     #[error("{path}: the link {through} leads outside the game and mods folders")]
     Escape { path: String, through: String },
+    /// Something read from an archive is bigger than we accept (see [`budget`]).
+    #[error("{what} is larger than {}", budget::size(*.limit))]
+    Limit { what: String, limit: u64 },
     /// Stopped because nobody wants the result any more.
     #[error("cancelled")]
     Cancelled,

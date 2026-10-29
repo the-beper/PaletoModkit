@@ -3,11 +3,13 @@
 //! DLC list (`update.rpf/common/data/dlclist.xml`), which the game reads to
 //! know which packs to load.
 
-use std::io::Write;
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys};
 
+use crate::budget::{Budget, Limits};
 use crate::game::{Edition, Game, resolve_ci};
 use crate::relpath::RelPath;
 use crate::loader::{DLC_LIST, add_dlc_packs, dlc_pack_order};
@@ -85,15 +87,37 @@ pub fn install_pack(game: &Game, keys: Option<&Keys>, dlc: &Path, name: &str, to
     let _lock = crate::txn::guard(&roots, "installing an add-on pack")?;
     let mut dest = roots.mods_dest(&RelPath::parse(&format!("update/x64/dlcpacks/{name}/dlc.rpf"))?)?;
     let mut log = Vec::new();
-    let data = match tool.filter(|_| game.edition == Edition::Enhanced) {
+    let prepared = match tool.filter(|_| game.edition == Edition::Enhanced) {
         Some(tool) => {
-            let (mut data, converted) = convert::read_converting(&[(dlc.to_path_buf(), "dlc.rpf".into())], tool, keys)?;
+            let (mut data, converted) = convert::prepare(&[(dlc.to_path_buf(), "dlc.rpf".into())], tool, keys)?;
             log.extend(converted);
             data.remove(0)
         }
-        None => std::fs::read(dlc)?,
+        None => convert::Prepared::Disk(dlc.to_path_buf()),
     };
-    roots.replace(&mut dest, |f| f.write_all(&data))?;
+    // A pack can be gigabytes: it goes from its file into the new one a piece at a time.
+    let (budget, mut failed) = (Budget::new(Limits::PACKAGE), None);
+    let written = roots.replace(&mut dest, |f| {
+        let mut copy = || -> Result<(), Error> {
+            match &prepared {
+                convert::Prepared::Bytes(data) => f.write_all(data)?,
+                convert::Prepared::File(converted, len) => {
+                    budget.copy(&mut &*converted, *len, f, "dlc.rpf")?;
+                }
+                convert::Prepared::Disk(path) => {
+                    let mut source = File::open(path)?;
+                    let len = source.metadata()?.len();
+                    budget.copy(&mut source, len, f, "dlc.rpf")?;
+                }
+            }
+            Ok(())
+        };
+        copy().map_err(|e| io::Error::other(failed.insert(e).to_string()))
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    written?;
     log.push(format!("installed {}", dest.path().display()));
 
     let (rel, inner) = DLC_LIST;
@@ -159,5 +183,26 @@ mod tests {
         assert_eq!(log[1], "piccolo is already in the DLC list");
         assert_eq!(list(&root.join("mods/update/update.rpf")).matches("piccolo").count(), 1);
         assert!(install_pack(&game, None, &packs[1].dlc, "my car", None).is_err());
+    }
+
+    #[test]
+    fn a_converted_pack_is_copied_from_its_file() {
+        let res = |v: u32| [b"RSC7".as_slice(), &v.to_le_bytes(), &((v >> 4) << 28).to_le_bytes(), &((v & 15) << 28).to_le_bytes(), b"payload"].concat();
+        let dir = tempfile::tempdir().unwrap();
+        let dlc = dir.path().join("dlc.rpf");
+        let mut ed = ArchiveEditor::new("dlc.rpf");
+        ed.archive("x64/vehicles.rpf", true, None).unwrap().add_file("car.yft", res(162)).unwrap();
+        ed.save(&dlc).unwrap();
+        let original = std::fs::read(&dlc).unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+        update_rpf(&root.join("update/update.rpf"), &["mpheist"]);
+        let game = Game::open(&root).unwrap();
+        let log = install_pack(&game, None, &dlc, "car", Some(&convert::tests::fake_tool(dir.path()))).unwrap();
+        assert_eq!(log[0], "converted dlc.rpf/x64/vehicles.rpf/car.yft");
+        let mut installed = ArchiveEditor::open(&root.join("mods/update/x64/dlcpacks/car/dlc.rpf"), None).unwrap();
+        assert_eq!(installed.archive("x64/vehicles.rpf", false, None).unwrap().read("car.yft", None).unwrap(), res(171));
+        assert_eq!(std::fs::read(&dlc).unwrap(), original, "the pack on disk is left alone");
     }
 }

@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use crate::budget::{self, Budget, Limits};
 use crate::game::resolve_ci;
 use crate::loader::{HookStatus, script_hook};
 use crate::relpath::RelPath;
@@ -196,15 +197,18 @@ pub fn compat(game: &Game) -> Compat {
 /// from it. Returns the installed version.
 pub fn install_from_zip(game: &Game, zip: &[u8]) -> Result<String, Error> {
     let bad = |m: &str| Error::Package(m.to_string());
+    // Only the DLL is read, and the release is small: the package limits, with this cap for the one file.
+    let limits = Limits { in_memory: MAX_ZIP, ..Limits::PACKAGE };
+    budget::zip_precheck(&mut std::io::Cursor::new(zip), &limits)?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).map_err(|e| Error::Package(e.to_string()))?;
+    budget::zip_extents(&mut archive)?;
     let index = (0..archive.len())
         .find(|&i| archive.name_for_index(i).and_then(Result::ok).is_some_and(|n| n.rsplit(['/', '\\']).next().is_some_and(|f| f.eq_ignore_ascii_case(DLL_NAME))))
         .ok_or_else(|| bad("no ScriptHookV.dll in the zip"))?;
-    let mut dll = Vec::new();
-    archive.by_index(index).map_err(|e| Error::Package(e.to_string()))?.take(MAX_ZIP + 1).read_to_end(&mut dll)?;
-    if dll.len() as u64 > MAX_ZIP {
-        return Err(bad("ScriptHookV.dll is too big"));
-    }
+    let mut entry = archive.by_index(index).map_err(|e| Error::Package(e.to_string()))?;
+    let (declared, stored) = (entry.size(), entry.compressed_size());
+    let dll = Budget::new(limits).read_packed(&mut entry, declared, stored, MAX_ZIP, DLL_NAME)?;
+    drop(entry);
     if !dll.starts_with(b"MZ") {
         return Err(bad("ScriptHookV.dll is not a Windows DLL"));
     }
@@ -364,5 +368,18 @@ mod tests {
         names.sort();
         assert_eq!(names, ["GTA5_Enhanced.exe", "dinput8.dll", "scripthookv.dll"]);
         assert!(install_from_zip(&game, b"not a zip").is_err());
+    }
+
+    #[test]
+    fn a_dll_over_the_cap_is_refused() {
+        let (dir, game) = game_dir(Edition::Enhanced);
+        std::fs::write(dir.path().join("scripthookv.dll"), fake_dll("3788.0/1013.33")).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("bin/ScriptHookV.dll", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).unwrap();
+        zip.write_all(&vec![b'M'; MAX_ZIP as usize + 1]).unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let err = install_from_zip(&game, &bytes).unwrap_err().to_string();
+        assert_eq!(err, "ScriptHookV.dll is larger than 20 MiB");
+        assert_eq!(installed(&game).as_deref(), Some("3788.0/1013.33"));
     }
 }

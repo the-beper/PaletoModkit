@@ -78,6 +78,7 @@ The app also checks the mods folder in the background when it starts, and warns 
 **Limits**:
 
 - Data files (`.xml`, `.meta`, `.ymt`, `.ymap`, `.dat`) are the same in both editions and need no conversion.
+- When files are converted on the way in (**Add files…**, drag and drop), all the files of that addition are read into memory first: one over 1 GiB, or 4 GiB in all, is refused with a message that names the limit. Add them in smaller groups, or install them as they are. An add-on pack is copied from file to file instead, up to 8 GiB.
 - Audio data (`.rel`) made for Legacy may not work on Enhanced; it is not converted.
 - Conversion was checked in game with textures (`.ytd`) and vehicles (`.yft`); models (`.ydr`, `.ydd`) and particles (`.ypt`) are converted the same way, but have not been tried in game yet.
 

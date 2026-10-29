@@ -6,6 +6,7 @@ use std::path::Path;
 
 use paleto_rpf::ArchiveEditor;
 
+use crate::budget::Limits;
 use crate::fixtures::*;
 use crate::game::{Edition, Game};
 use crate::{Error, Package};
@@ -283,17 +284,15 @@ fn fs04_two_installs_at_once_leave_exactly_one_result() {
 const BIG: usize = 64 << 20;
 
 #[test]
-#[ignore = "repro OIV-03: a 64 MiB assembly.xml is read whole"]
 fn oiv03_huge_assembly_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let assembly = format!(r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>{}"#, " ".repeat(BIG));
     let oiv = oiv_raw(dir.path(), "big.oiv", [("assembly.xml".to_string(), assembly.into_bytes())], true);
     let err = Package::open(&oiv).err().expect("a 64 MiB assembly.xml was read whole").to_string();
-    assert!(err.contains("too large") || err.contains("too big") || err.contains("size"), "{err}");
+    assert!(err.contains("assembly.xml is larger than 16 MiB"), "{err}");
 }
 
 #[test]
-#[ignore = "repro OIV-03: a 64 MiB icon.png is read whole"]
 fn oiv03_huge_icon_is_not_read() {
     let dir = tempfile::tempdir().unwrap();
     let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>"#;
@@ -302,13 +301,349 @@ fn oiv03_huge_icon_is_not_read() {
 }
 
 #[test]
-#[ignore = "repro OIV-03: a package of 200000 entries is accepted"]
 fn oiv03_package_with_too_many_entries_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>"#;
     let entries = std::iter::once(("assembly.xml".to_string(), assembly.as_bytes().to_vec())).chain((0..200_000).map(|i| (format!("content/f{i}"), Vec::new())));
     let oiv = oiv_raw(dir.path(), "many.oiv", entries, false);
     assert!(Package::open(&oiv).is_err(), "a package of 200000 entries was accepted");
+}
+
+/// Pseudo-random bytes (they do not compress).
+fn noise(len: usize) -> Vec<u8> {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    (0..len).map(|_| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 32) as u8
+    }).collect()
+}
+
+/// Where the local and the central header of the entry `name` start in a package.
+fn headers(data: &[u8], name: &str) -> (usize, usize) {
+    // (signature, where the name's length is, where the name is)
+    let find = |sig: &[u8], len_at: usize, name_at: usize| {
+        (0..data.len() - 46).find(|&i| data[i..].starts_with(sig) && data[i + name_at..].starts_with(name.as_bytes()) && u16::from_le_bytes([data[i + len_at], data[i + len_at + 1]]) as usize == name.len())
+    };
+    (find(b"PK\x03\x04", 26, 30).expect("local header"), find(b"PK\x01\x02", 28, 46).expect("central header"))
+}
+
+/// Rewrites the uncompressed size of the entry `name` in both its headers of a package.
+fn patch_size(oiv: &Path, name: &str, uncompressed: u32) {
+    let mut data = std::fs::read(oiv).unwrap();
+    let (local, central) = headers(&data, name);
+    data[local + 22..local + 26].copy_from_slice(&uncompressed.to_le_bytes());
+    data[central + 24..central + 28].copy_from_slice(&uncompressed.to_le_bytes());
+    std::fs::write(oiv, data).unwrap();
+}
+
+/// Rewrites the compressed size (what the entry says it takes up) of the entry `name` in both its headers of a package.
+fn patch_packed(oiv: &Path, name: &str, compressed: u32) {
+    let mut data = std::fs::read(oiv).unwrap();
+    let (local, central) = headers(&data, name);
+    data[local + 18..local + 22].copy_from_slice(&compressed.to_le_bytes());
+    data[central + 20..central + 24].copy_from_slice(&compressed.to_le_bytes());
+    std::fs::write(oiv, data).unwrap();
+}
+
+/// Rewrites the end record of a package.
+fn patch_end(oiv: &Path, edit: impl FnOnce(&mut [u8])) {
+    let mut data = std::fs::read(oiv).unwrap();
+    let at = data.len() - 22;
+    assert_eq!(&data[at..at + 4], b"PK\x05\x06");
+    edit(&mut data[at..]);
+    std::fs::write(oiv, data).unwrap();
+}
+
+fn install_limited(game: &Game, oiv: &Path, limits: Limits) -> Result<Vec<String>, Error> {
+    Package::open_with(oiv, limits)?.install_with(game, None)
+}
+
+/// An install that must fail, and leave the game and mods folders as they were; says why.
+fn refused(game: &Game, oiv: &Path, limits: Limits) -> String {
+    let before = snapshot(&game.root);
+    let err = install_limited(game, oiv, limits).expect_err("the package was installed").to_string();
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert!(leftovers(&game.root).is_empty(), "{:?}", leftovers(&game.root));
+    err
+}
+
+#[test]
+fn oiv03_a_bomb_with_a_small_header_is_refused_and_nothing_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let bomb = vec![0; 8 << 20];
+    let first = oiv(dir.path(), "bomb.oiv", r#"<add source="x">scripts\new.asi</add>"#, &[("content/x", &bomb)], true);
+    // The headers say 1000 bytes; the stream holds 8 MiB.
+    patch_size(&first, "content/x", 1000);
+    // (The zip reader notices it too; whichever does first, the install stops.)
+    let overflow = |err: &str| err.contains("holds more than the 1000 bytes") || err.contains("larger than its declared");
+    let err = refused(&game, &first, Limits::PACKAGE);
+    assert!(overflow(&err), "{err}");
+    // The same inside an archive.
+    let second = oiv(dir.path(), "bomb2.oiv", r#"<archive path="x64\a.rpf"><add source="x">b.txt</add></archive>"#, &[("content/x", &bomb)], true);
+    patch_size(&second, "content/x", 1000);
+    let err = refused(&game, &second, Limits::PACKAGE);
+    assert!(overflow(&err), "{err}");
+}
+
+#[test]
+fn oiv03_a_header_that_declares_more_than_the_file_holds_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let oiv = oiv(dir.path(), "short.oiv", r#"<add source="x">scripts\new.asi</add>"#, &[("content/x", &vec![0; 1 << 20])], true);
+    patch_size(&oiv, "content/x", 3 << 20);
+    let err = refused(&game, &oiv, Limits::PACKAGE);
+    assert!(err.contains("not the 3145728 its header says"), "{err}");
+    // A manifest that lies the same way.
+    let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>"#;
+    let oiv = oiv_raw(dir.path(), "lie.oiv", [("assembly.xml".to_string(), assembly.as_bytes().to_vec())], true);
+    patch_size(&oiv, "assembly.xml", assembly.len() as u32 + 1000);
+    assert!(Package::open(&oiv).err().expect("a lying manifest was read").to_string().contains("its header says"));
+}
+
+#[test]
+fn oiv03_the_end_record_is_judged_before_the_zip_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>"#;
+    let entries = || std::iter::once(("assembly.xml".to_string(), assembly.as_bytes().to_vec())).chain((0..5).map(|i| (format!("content/f{i}"), vec![i as u8])));
+    let small = Limits { entries: 5, ..Limits::PACKAGE };
+    // Six entries against a limit of five: refused by the count in the end record.
+    let oiv = oiv_raw(dir.path(), "six.oiv", entries(), false);
+    let err = Package::open_with(&oiv, small).err().expect("six entries were accepted").to_string();
+    assert!(err.contains("the archive has 6 files; more than 5 are refused"), "{err}");
+    // An end record that claims 60000 entries (the file holds 6) is refused by that claim alone.
+    patch_end(&oiv, |end| end[8..12].copy_from_slice(&[0x60, 0xEA, 0x60, 0xEA]));
+    let err = Package::open_with(&oiv, small).err().unwrap().to_string();
+    assert!(err.contains("the archive has 60000 files"), "{err}");
+    // So is one that claims a list of 100 MiB.
+    let oiv = oiv_raw(dir.path(), "wide.oiv", entries(), false);
+    patch_end(&oiv, |end| end[12..16].copy_from_slice(&(100u32 << 20).to_le_bytes()));
+    let err = Package::open(&oiv).err().unwrap().to_string();
+    assert_eq!(err, "the list of the archive's files is larger than 64 MiB");
+    // The same file is fine under limits it fits.
+    let ok = oiv_raw(dir.path(), "ok.oiv", entries(), false);
+    assert!(Package::open_with(&ok, Limits { entries: 6, ..Limits::PACKAGE }).is_ok());
+}
+
+#[test]
+fn oiv03_a_package_just_under_each_limit_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content><add source="x">scripts\new.asi</add></content></package>"#;
+    let icon = vec![9; 100];
+    let entries = [("assembly.xml".to_string(), assembly.as_bytes().to_vec()), ("icon.png".to_string(), icon.clone()), ("content/x".to_string(), vec![1; 300])];
+    let oiv = oiv_raw(dir.path(), "edge.oiv", entries, true);
+    let exact = Limits { manifest: assembly.len() as u64, icon: 100, entries: 3, in_memory: 300, in_memory_total: 300, streamed: 300, total: 300, ..Limits::PACKAGE };
+    let mut package = Package::open_with(&oiv, exact).unwrap();
+    assert_eq!(package.icon().unwrap(), icon);
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    package.install_with(&game, None).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/new.asi")).unwrap(), vec![1; 300]);
+    // One under each: refused (or, for the icon, left out).
+    assert!(Package::open_with(&oiv, Limits { manifest: exact.manifest - 1, ..exact }).is_err());
+    assert!(Package::open_with(&oiv, Limits { entries: 2, ..exact }).is_err());
+    assert!(Package::open_with(&oiv, Limits { icon: 99, ..exact }).unwrap().icon().is_none());
+    let other = tempfile::tempdir().unwrap();
+    let err = refused(&game_folder(other.path(), Edition::Enhanced), &oiv, Limits { streamed: 299, ..exact });
+    assert!(err.contains("content/x is larger than 299 bytes"), "{err}");
+}
+
+#[test]
+fn oiv03_large_payloads_are_streamed_not_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // Nothing may be held beyond 1 MiB, and 2 MiB in all.
+    let limits = Limits { in_memory: 1 << 20, in_memory_total: 2 << 20, ..Limits::PACKAGE };
+    let big = noise(10 << 20);
+    let pack = dir.path().join("pack.rpf");
+    rpf(&pack, "pack.rpf", &[("big.bin", &big)]);
+    let pack = std::fs::read(&pack).unwrap();
+    assert!(pack.len() > 10 << 20);
+    let oiv = oiv(
+        dir.path(),
+        "big.oiv",
+        r#"<add source="big">scripts\big.asi</add>
+        <archive path="x64\a.rpf"><add source="pack">inner\pack.rpf</add></archive>"#,
+        &[("content/big", &big), ("content/pack", &pack)],
+        true,
+    );
+    let original = snapshot(&game.root.join("x64"));
+    install_limited(&game, &oiv, limits).unwrap();
+    assert!(std::fs::read(game.root.join("scripts/big.asi")).unwrap() == big, "the loose file differs");
+    let installed = ArchiveEditor::open(&game.root.join("mods/x64/a.rpf"), None).unwrap();
+    assert_eq!(installed.read("a.txt", None).unwrap(), b"a");
+    assert!(installed.read("inner/pack.rpf", None).unwrap() == pack, "the archive added into the archive differs");
+    assert_unchanged(&original, &snapshot(&game.root.join("x64")));
+    assert!(leftovers(&game.root).is_empty());
+}
+
+#[test]
+fn oiv03_a_file_for_inside_an_archive_is_held_within_the_caps() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let limits = Limits { in_memory: 1 << 20, in_memory_total: 2 << 20, ..Limits::PACKAGE };
+    // Not an archive, sound or video: it has to be held, and it is over the cap.
+    let oiv = oiv(dir.path(), "big.oiv", r#"<archive path="x64\a.rpf"><add source="x">b.txt</add></archive>"#, &[("content/x", &noise(2 << 20))], true);
+    let err = refused(&game, &oiv, limits);
+    assert!(err.contains("content/x is larger than 1 MiB"), "{err}");
+}
+
+#[test]
+fn oiv03_the_budget_runs_out_across_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // Each file is within every cap; together they are not.
+    let files = [noise(1 << 20), noise(1 << 20), noise(1 << 20)];
+    let content = [("content/a", files[0].as_slice()), ("content/b", files[1].as_slice()), ("content/c", files[2].as_slice())];
+    let loose = oiv(dir.path(), "three.oiv", r#"<add source="a">scripts\a.asi</add><add source="b">scripts\b.asi</add><add source="c">scripts\c.asi</add>"#, &content, false);
+    let err = refused(&game, &loose, Limits { total: 2 << 20, ..Limits::PACKAGE });
+    assert!(err.contains("everything read from the archive is larger than 2 MiB"), "{err}");
+    // The same held in memory, inside an archive.
+    let held = oiv(dir.path(), "texts.oiv", r#"<archive path="x64\a.rpf"><add source="a">a.bin</add><add source="b">b.bin</add><add source="c">c.bin</add></archive>"#, &content, false);
+    let err = refused(&game, &held, Limits { in_memory: 1 << 20, in_memory_total: 2 << 20, ..Limits::PACKAGE });
+    assert!(err.contains("the files held in memory together is larger than 2 MiB"), "{err}");
+    // And all three go in when the budget has room for them.
+    install_limited(&game, &held, Limits { in_memory: 1 << 20, in_memory_total: 4 << 20, ..Limits::PACKAGE }).unwrap();
+}
+
+/// Puts `comment` in the end record of a package (which has none).
+fn add_comment(oiv: &Path, comment: &[u8]) {
+    let mut data = std::fs::read(oiv).unwrap();
+    let at = data.len() - 2;
+    assert_eq!(&data[at..], [0, 0]);
+    data[at..].copy_from_slice(&u16::try_from(comment.len()).unwrap().to_le_bytes());
+    data.extend_from_slice(comment);
+    std::fs::write(oiv, data).unwrap();
+}
+
+#[test]
+fn oiv03_an_end_record_hidden_in_the_comment_is_refused_before_the_zip_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let assembly = r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>"#;
+    let entries = || std::iter::once(("assembly.xml".to_string(), assembly.as_bytes().to_vec())).chain((0..5).map(|i| (format!("content/f{i}"), vec![i as u8])));
+    let limits = Limits { entries: 8, ..Limits::PACKAGE };
+    // A second end record in the comment of the real one, claiming 60000 files, and a byte after it that its own
+    // (empty) comment does not cover: the file does not end with it, but a zip reader that looks back from the end finds it first.
+    let fake = [b"PK\x05\x06\0\0\0\0".as_slice(), &60_000u16.to_le_bytes(), &60_000u16.to_le_bytes(), &150u32.to_le_bytes(), &20u32.to_le_bytes(), &[0, 0], &[0]].concat();
+    let hidden = oiv_raw(dir.path(), "hidden.oiv", entries(), false);
+    add_comment(&hidden, &fake);
+    let err = Package::open_with(&hidden, limits).err().expect("a package with a hidden end record was opened").to_string();
+    // (The message of the precheck, not the one of the count after the zip is read.)
+    assert!(err.contains("the archive has 60000 files; more than 8 are refused"), "{err}");
+    // The same package without it opens, and so does one that holds a zip of its own as its last file.
+    assert!(Package::open_with(&oiv_raw(dir.path(), "plain.oiv", entries(), false), limits).is_ok());
+    let inner = std::fs::read(oiv_raw(dir.path(), "inner.zip", [("a".to_string(), vec![1; 10])], false)).unwrap();
+    let nested = oiv_raw(dir.path(), "nested.oiv", entries().chain(std::iter::once(("content/inner.zip".to_string(), inner))), false);
+    assert!(Package::open_with(&nested, limits).is_ok());
+}
+
+#[test]
+fn oiv03_a_file_that_expands_too_much_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // Zeros pack to a few KiB: more than 200 times, and over the 16 MiB below which the ratio is not judged.
+    let sparse = oiv(dir.path(), "sparse.oiv", r#"<add source="x">scripts\new.asi</add>"#, &[("content/x", &vec![0; (16 << 20) + 1])], true);
+    let err = refused(&game, &sparse, Limits::PACKAGE);
+    assert!(err.contains("content/x (packed to") && err.contains("200 times that at most) is larger than"), "{err}");
+    // The same inside an archive, where it would be held.
+    let held = oiv(dir.path(), "held.oiv", r#"<archive path="x64\a.rpf"><add source="x">b.txt</add></archive>"#, &[("content/x", &vec![0; 2 << 20])], true);
+    let err = refused(&game, &held, Limits { ratio_after: 1 << 20, ..Limits::PACKAGE });
+    assert!(err.contains("content/x (packed to"), "{err}");
+    // A manifest that expands too much is stopped as it is read.
+    let assembly = format!(r#"<package version="2.2" target="Five"><metadata><name>X</name></metadata><content></content></package>{}"#, " ".repeat(2 << 20));
+    let spaces = oiv_raw(dir.path(), "spaces.oiv", [("assembly.xml".to_string(), assembly.into_bytes())], true);
+    let err = Package::open_with(&spaces, Limits { ratio_after: 1 << 20, ..Limits::PACKAGE }).err().expect("a manifest that expands too much was read").to_string();
+    assert!(err.contains("assembly.xml (packed to"), "{err}");
+    // Up to the 16 MiB it is not judged, and a file that does not pack is no matter at any size.
+    let fine = oiv(dir.path(), "fine.oiv", r#"<add source="x">scripts\a.asi</add><add source="y">scripts\b.asi</add>"#, &[("content/x", &vec![0; 16 << 20]), ("content/y", &noise(17 << 20))], true);
+    install_limited(&game, &fine, Limits::PACKAGE).unwrap();
+    assert_eq!(std::fs::metadata(game.root.join("scripts/a.asi")).unwrap().len(), 16 << 20);
+    assert_eq!(std::fs::metadata(game.root.join("scripts/b.asi")).unwrap().len(), 17 << 20);
+}
+
+#[test]
+fn oiv03_spooled_files_count_against_the_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // Three 1 MiB videos for inside an archive: spooled to files, never held, but read all the same.
+    let files = [noise(1 << 20), noise(1 << 20), noise(1 << 20)];
+    let content = [("content/a", files[0].as_slice()), ("content/b", files[1].as_slice()), ("content/c", files[2].as_slice())];
+    let videos = oiv(dir.path(), "videos.oiv", r#"<archive path="x64\a.rpf"><add source="a">a.bik</add><add source="b">b.bik</add><add source="c">c.bik</add></archive>"#, &content, false);
+    let err = refused(&game, &videos, Limits { total: 2 << 20, in_memory_total: 1 << 20, ..Limits::PACKAGE });
+    assert!(err.contains("everything read from the archive is larger than 2 MiB"), "{err}");
+    install_limited(&game, &videos, Limits { total: 4 << 20, in_memory_total: 1 << 20, ..Limits::PACKAGE }).unwrap();
+    let installed = ArchiveEditor::open(&game.root.join("mods/x64/a.rpf"), None).unwrap();
+    assert!(installed.read("c.bik", None).unwrap() == files[2], "the video differs");
+}
+
+#[test]
+fn oiv03_a_file_may_not_claim_more_room_than_it_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let commands = r#"<add source="x">scripts\a.asi</add><add source="y">scripts\b.asi</add>"#;
+    // Zeros pack to 20 KiB or so, 1000 times: refused as it is.
+    let honest = oiv(dir.path(), "honest.oiv", commands, &[("content/x", &vec![0; 20 << 20]), ("content/y", b"y")], true);
+    assert!(refused(&game, &honest, Limits::PACKAGE).contains("content/x (packed to"));
+    // The same, saying it takes up 1 MiB, which would make the ratio 20 and pass: but 1 MiB goes past the next file.
+    let lying = oiv(dir.path(), "lying.oiv", commands, &[("content/x", &vec![0; 20 << 20]), ("content/y", b"y")], true);
+    patch_packed(&lying, "content/x", 1 << 20);
+    let err = Package::open(&lying).err().expect("a file that claims room it does not have was accepted").to_string();
+    assert!(err.contains("damaged zip file"), "{err}");
+    // The last one into the list of files.
+    let last = oiv(dir.path(), "last.oiv", commands, &[("content/y", b"y"), ("content/x", &vec![0; 20 << 20])], true);
+    patch_packed(&last, "content/x", 1 << 20);
+    assert!(Package::open(&last).err().expect("a file that claims room in the list of files was accepted").to_string().contains("damaged zip file"));
+    // Two entries that share one header (and its data) are not a package either.
+    let shared = oiv(dir.path(), "shared.oiv", commands, &[("content/x", &vec![0; 1 << 20]), ("content/y", b"y")], true);
+    let mut data = std::fs::read(&shared).unwrap();
+    let (x, y) = (headers(&data, "content/x"), headers(&data, "content/y"));
+    let at = u32::try_from(x.0).unwrap().to_le_bytes();
+    data[y.1 + 42..y.1 + 46].copy_from_slice(&at);
+    std::fs::write(&shared, data).unwrap();
+    let err = Package::open(&shared).err().expect("two files with one header were accepted").to_string();
+    assert!(err.contains("damaged zip file"), "{err}");
+    // A package with stored and packed files, a zip inside it, and a file that does not pack, is fine.
+    let inner = std::fs::read(oiv_raw(dir.path(), "inner.zip", [("a".to_string(), vec![1; 10])], false)).unwrap();
+    for deflate in [false, true] {
+        let fine = oiv(dir.path(), "fine.oiv", commands, &[("content/x", &inner), ("content/y", &noise(1 << 20))], deflate);
+        install_limited(&game, &fine, Limits::PACKAGE).unwrap();
+        assert_eq!(std::fs::read(game.root.join("scripts/a.asi")).unwrap(), inner);
+    }
+}
+
+/// The package at `oiv` as a zip64 one: the same files, with the end record in the zip64 form (the markers, and the record and locator before it).
+fn make_zip64(oiv: &Path) {
+    let mut data = std::fs::read(oiv).unwrap();
+    let end = data.len() - 22;
+    let (entries, size, offset) = (u16::from_le_bytes([data[end + 10], data[end + 11]]), u32::from_le_bytes(data[end + 12..end + 16].try_into().unwrap()), u32::from_le_bytes(data[end + 16..end + 20].try_into().unwrap()));
+    data.truncate(end);
+    let record = data.len() as u64;
+    data.extend_from_slice(b"PK\x06\x06");
+    data.extend_from_slice(&44u64.to_le_bytes());
+    data.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    data.extend_from_slice(&u64::from(entries).to_le_bytes());
+    data.extend_from_slice(&u64::from(entries).to_le_bytes());
+    data.extend_from_slice(&u64::from(size).to_le_bytes());
+    data.extend_from_slice(&u64::from(offset).to_le_bytes());
+    data.extend_from_slice(b"PK\x06\x07\0\0\0\0");
+    data.extend_from_slice(&record.to_le_bytes());
+    data.extend_from_slice(&[1, 0, 0, 0]);
+    data.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    data.extend_from_slice(&[0xFF; 12]);
+    data.extend_from_slice(&[0, 0]);
+    std::fs::write(oiv, data).unwrap();
+}
+
+#[test]
+fn oiv03_a_real_zip64_package_still_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let package = oiv(dir.path(), "big.oiv", r#"<add source="x">scripts\new.asi</add>"#, &[("content/x", b"zip64")], true);
+    make_zip64(&package);
+    assert_eq!(Package::open(&package).unwrap().metadata.name, "X");
+    Package::open(&package).unwrap().install_with(&game, None).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/new.asi")).unwrap(), b"zip64");
 }
 
 // ---- OIV-01: archives saved after the loose files are final ----
