@@ -14,7 +14,7 @@ A Cargo workspace, in Rust (edition 2024, Rust 1.95 or later):
 
 | Crate | What it holds |
 | :--- | :--- |
-| [`crates/rpf`](../crates/rpf) | `paleto-rpf`: the RPF7 archive reader and editor, with raw, AES and NG encryption, nested archives and in-place saving. |
+| [`crates/rpf`](../crates/rpf) | `paleto-rpf`: the RPF7 archive reader and editor, with raw, AES and NG encryption and nested archives; a save writes a new copy and renames it over the archive, which is only ever read. |
 | [`crates/formats`](../crates/formats) | `paleto-formats`: the game's file formats: RSC7 resources, texture dictionaries (BCn decoding and encoding, DDS and PNG), PSO and resource metadata ↔ XML, text tables, audio containers, model meshes, collision, navmeshes and clip dictionaries. |
 | [`crates/core`](../crates/core) | `paleto-core`: game install detection and keys, the `mods/` routing (`vfs`), the OIV engine, and the mod tools: Legacy → Enhanced conversion, add-on packs, the loader and session checks, snapshots, the Wine prefix (.NET for ScriptHookVDotNet mods, backups), the crash report and crash hunt, export and clean-up. |
 | [`crates/gui`](../crates/gui) | `paleto-modkit`: the desktop app, built with egui and eframe (native Wayland, with its own drag and drop until winit supports it). |

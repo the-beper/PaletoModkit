@@ -12,7 +12,6 @@ fn read(path: &Path, name: &str) -> Option<Vec<u8>> {
 /// aside and rename it: whoever holds the old file (a hard link, an open
 /// handle) keeps a complete archive.
 #[test]
-#[ignore = "repro OIV-01: save() to the opened path rewrites the same inode in place, the hard-linked old archive changes"]
 fn saving_over_the_opened_archive_leaves_the_old_file_intact() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.rpf");

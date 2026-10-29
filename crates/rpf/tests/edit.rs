@@ -561,3 +561,316 @@ fn malformed_archives_fail_cleanly() {
     std::fs::write(&path, data).unwrap();
     assert!(corrupt(Archive::open(&path, None)));
 }
+
+// Saving never writes the archive that was opened: it stages a new file.
+
+/// Offsets (in blocks) of the files in the archive at `path`, by path.
+fn offsets(path: &Path, keys: Option<&paleto_rpf::Keys>) -> std::collections::BTreeMap<String, u32> {
+    let a = Archive::open(path, keys).unwrap();
+    a.walk(0).into_iter().filter_map(|(p, i)| a.entries[i].offset().map(|o| (p, o))).collect()
+}
+
+/// Names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+/// Saves the archive at `path` to itself after `edit`, and checks that the old
+/// inode (kept by a hard link) was not written, that the path holds the new
+/// archive with the same permission bits, that nothing else is left in the
+/// folder and that the files in `untouched` kept their place.
+fn staged_save(path: &Path, keys: Option<&paleto_rpf::Keys>, untouched: &[&str], edit: impl FnOnce(&mut ArchiveEditor)) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = path.parent().unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let keep = dir.join("old-inode.keep");
+    std::fs::hard_link(path, &keep).unwrap();
+    let before = std::fs::read(path).unwrap();
+    let before_offsets = offsets(path, keys);
+    let old_ino = std::fs::metadata(path).unwrap().ino();
+
+    let mut ed = ArchiveEditor::open(path, keys).unwrap();
+    edit(&mut ed);
+    ed.save(path).unwrap();
+
+    assert_eq!(std::fs::read(&keep).unwrap(), before, "the old inode was written");
+    assert_eq!(std::fs::metadata(&keep).unwrap().ino(), old_ino);
+    let new = std::fs::metadata(path).unwrap();
+    assert_ne!(new.ino(), old_ino, "saved in place");
+    assert_eq!(new.mode() & 0o777, 0o640);
+    assert_ne!(std::fs::read(path).unwrap(), before);
+    let mut expected = vec!["old-inode.keep".to_string(), path.file_name().unwrap().to_string_lossy().into_owned()];
+    expected.sort();
+    assert_eq!(names(dir), expected);
+    let after_offsets = offsets(path, keys);
+    for name in untouched {
+        assert_eq!(after_offsets[*name], before_offsets[*name], "{name} moved");
+    }
+}
+
+#[test]
+fn saving_to_its_own_path_never_writes_the_old_file() {
+    // The nested archive grows in the space after it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = with_nested(dir.path(), "z_inner.rpf", "a.bin");
+    staged_save(&path, None, &["a.bin"], |ed| {
+        ed.archive("z_inner.rpf", false, None).unwrap().add_file("small.txt", b"hi".to_vec()).unwrap();
+        ed.add_file("top.txt", b"top".to_vec()).unwrap();
+    });
+    assert_eq!(read(&path, "z_inner.rpf/small.txt"), b"hi");
+    assert_eq!(read(&path, "top.txt"), b"top");
+    assert!(read(&path, "z_inner.rpf/big.bin") == noise(100_000, 2));
+    assert!(read(&path, "a.bin") == noise(100_000, 1));
+
+    // The nested archive is blocked by a file after it: it is rebuilt.
+    let dir = tempfile::tempdir().unwrap();
+    let path = with_nested(dir.path(), "a_inner.rpf", "z.bin");
+    staged_save(&path, None, &["z.bin"], |ed| {
+        ed.archive("a_inner.rpf", false, None).unwrap().add_file("more.bin", noise(50_000, 3)).unwrap();
+    });
+    assert!(read(&path, "a_inner.rpf/more.bin") == noise(50_000, 3));
+    assert!(read(&path, "a_inner.rpf/big.bin") == noise(100_000, 2));
+    assert!(read(&path, "z.bin") == noise(100_000, 1));
+
+    // Plain edits: replace and grow.
+    let dir = tempfile::tempdir().unwrap();
+    let path = with_nested(dir.path(), "z_inner.rpf", "a.bin");
+    staged_save(&path, None, &["z_inner.rpf"], |ed| {
+        ed.add_file("a.bin", b"small".to_vec()).unwrap();
+        ed.add_file("b.bin", noise(70_000, 5)).unwrap();
+    });
+    assert_eq!(read(&path, "a.bin"), b"small");
+    assert!(read(&path, "b.bin") == noise(70_000, 5));
+    assert!(read(&path, "z_inner.rpf/big.bin") == noise(100_000, 2));
+}
+
+#[test]
+fn aes_archive_saved_to_its_own_path_never_writes_the_old_file() {
+    let keys = test_keys();
+    let dir = tempfile::tempdir().unwrap();
+    let content: Vec<u8> = (0..64).collect();
+    let path = dir.path().join("a.rpf");
+    std::fs::write(&path, aes_archive(dir.path(), &keys, &content)).unwrap();
+    std::fs::remove_file(dir.path().join("aes.rpf")).unwrap();
+    staged_save(&path, Some(&keys), &["a.awc"], |ed| ed.add_file("b.txt", b"b".to_vec()).unwrap());
+    let archive = Archive::open(&path, Some(&keys)).unwrap();
+    assert_eq!(archive.encryption, Encryption::Aes);
+    assert_eq!(archive.read(archive.find("a.awc").unwrap(), Some(&keys)).unwrap(), content);
+    assert_eq!(archive.read(archive.find("b.txt").unwrap(), Some(&keys)).unwrap(), b"b");
+}
+
+fn new_file(path: &Path) -> std::fs::File {
+    std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap()
+}
+
+#[test]
+fn save_to_edits_a_copy_and_never_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch_dir = tempfile::tempdir().unwrap();
+    let path = with_nested(dir.path(), "z_inner.rpf", "a.bin");
+    let before = std::fs::read(&path).unwrap();
+    let before_offsets = offsets(&path, None);
+
+    let mut ed = ArchiveEditor::open_file(std::fs::File::open(&path).unwrap(), "outer.rpf", None).unwrap();
+    assert_eq!(ed.name(), "outer.rpf");
+    ed.archive("z_inner.rpf", false, None).unwrap().add_file("small.txt", b"hi".to_vec()).unwrap();
+    ed.add_file("top.txt", b"top".to_vec()).unwrap();
+    let out_path = scratch_dir.path().join("staged.bin");
+    let len = ed.save_to(&new_file(&out_path), &mut || tempfile::tempfile_in(scratch_dir.path())).unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(len, std::fs::metadata(&out_path).unwrap().len());
+    // Edited as a copy, like an in-place save: untouched data is where it was.
+    assert_eq!(offsets(&out_path, None)["a.bin"], before_offsets["a.bin"]);
+    assert_eq!(read(&out_path, "z_inner.rpf/small.txt"), b"hi");
+    assert_eq!(read(&out_path, "top.txt"), b"top");
+    assert!(read(&out_path, "a.bin") == noise(100_000, 1));
+    assert!(read(&out_path, "z_inner.rpf/big.bin") == noise(100_000, 2));
+
+    // A rebuilt nested archive uses the scratch files, and the source stays as it is.
+    let path = with_nested(dir.path(), "a_inner.rpf", "z.bin");
+    let before = std::fs::read(&path).unwrap();
+    let mut ed = ArchiveEditor::open(&path, None).unwrap();
+    ed.archive("a_inner.rpf", false, None).unwrap().add_file("more.bin", noise(50_000, 3)).unwrap();
+    let out_path = scratch_dir.path().join("staged2.bin");
+    let mut asked = 0;
+    ed.save_to(&new_file(&out_path), &mut || {
+        asked += 1;
+        tempfile::tempfile_in(scratch_dir.path())
+    })
+    .unwrap();
+    assert!(asked > 0);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(read(&out_path, "a_inner.rpf/more.bin") == noise(50_000, 3));
+    assert!(read(&out_path, "z.bin") == noise(100_000, 1));
+
+    // A scratch file that cannot be made fails the save; the source is untouched.
+    let mut ed = ArchiveEditor::open(&path, None).unwrap();
+    ed.archive("a_inner.rpf", false, None).unwrap().add_file("more.bin", noise(50_000, 3)).unwrap();
+    let out = new_file(&scratch_dir.path().join("staged3.bin"));
+    let failed = ed.save_to(&out, &mut || Err(std::io::Error::other("no scratch space")));
+    assert!(matches!(failed, Err(paleto_rpf::Error::Io(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // The file to save into must be empty.
+    let ed = ArchiveEditor::open(&path, None).unwrap();
+    let full = new_file(&scratch_dir.path().join("full.bin"));
+    std::io::Write::write_all(&mut &full, b"x").unwrap();
+    assert!(ed.save_to(&full, &mut || tempfile::tempfile_in(scratch_dir.path())).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn a_new_archive_is_written_fresh_by_save_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ed = ArchiveEditor::new("n.rpf");
+    ed.add_file("a.txt", b"a".to_vec()).unwrap();
+    let out_path = dir.path().join("n.rpf");
+    let len = ed.save_to(&new_file(&out_path), &mut || tempfile::tempfile_in(dir.path())).unwrap();
+    assert_eq!(len, std::fs::metadata(&out_path).unwrap().len());
+    assert_eq!(read(&out_path, "a.txt"), b"a");
+}
+
+#[test]
+fn saving_over_a_symlink_replaces_the_link_not_its_target() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    let target = with_nested(&dir.path().join("real"), "z_inner.rpf", "a.bin");
+    let link = dir.path().join("link.rpf");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let before = std::fs::read(&target).unwrap();
+    let target_ino = std::fs::metadata(&target).unwrap().ino();
+
+    // Opened through the link, so it is edited as a copy; the link is replaced.
+    let mut ed = ArchiveEditor::open(&link, None).unwrap();
+    ed.add_file("top.txt", b"top".to_vec()).unwrap();
+    ed.save(&link).unwrap();
+
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_file());
+    assert_eq!(read(&link, "top.txt"), b"top");
+    assert!(read(&link, "a.bin") == noise(100_000, 1));
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    assert_eq!(std::fs::metadata(&target).unwrap().ino(), target_ino);
+    assert_eq!(names(&dir.path().join("real")), [target.file_name().unwrap().to_string_lossy().into_owned()]);
+    assert_eq!(names(dir.path()), ["link.rpf", "real"]);
+
+    // A link that leads nowhere is replaced too, and nothing is written through it.
+    let dangling = dir.path().join("dangling.rpf");
+    let nowhere = dir.path().join("nowhere.rpf");
+    std::os::unix::fs::symlink(&nowhere, &dangling).unwrap();
+    let mut ed = ArchiveEditor::new("d.rpf");
+    ed.add_file("a.txt", b"a".to_vec()).unwrap();
+    ed.save(&dangling).unwrap();
+    assert!(!nowhere.exists());
+    assert!(std::fs::symlink_metadata(&dangling).unwrap().is_file());
+    assert_eq!(read(&dangling, "a.txt"), b"a");
+
+    // The permission bits are those of the link's target, and a read-only one is refused.
+    use std::os::unix::fs::PermissionsExt;
+    let (real, link2) = (dir.path().join("ro.rpf"), dir.path().join("ro-link.rpf"));
+    std::fs::write(&real, b"x").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::os::unix::fs::symlink(&real, &link2).unwrap();
+    let ed = ArchiveEditor::new("n.rpf");
+    assert!(matches!(ed.save(&link2), Err(paleto_rpf::Error::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied));
+    assert!(std::fs::symlink_metadata(&link2).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&real).unwrap(), b"x");
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+    ArchiveEditor::new("n.rpf").save(&link2).unwrap();
+    assert_eq!(std::fs::symlink_metadata(&link2).unwrap().mode() & 0o777, 0o640);
+    assert_eq!(std::fs::read(&real).unwrap(), b"x");
+}
+
+#[test]
+fn a_read_only_archive_is_opened_but_not_saved_over() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = with_nested(dir.path(), "z_inner.rpf", "a.bin");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut ed = ArchiveEditor::open(&path, None).unwrap();
+    assert_eq!(ed.read("a.bin", None).unwrap(), noise(100_000, 1));
+    ed.add_file("top.txt", b"top".to_vec()).unwrap();
+    match ed.save(&path) {
+        Err(paleto_rpf::Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied),
+        other => panic!("{:?}", other.err()),
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o444);
+    assert_eq!(names(dir.path()), [path.file_name().unwrap().to_string_lossy().into_owned()]);
+}
+
+#[test]
+fn a_failed_save_leaves_the_archive_and_the_folder_as_they_were() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = with_nested(dir.path(), "z_inner.rpf", "a.bin");
+    let before = std::fs::read(&path).unwrap();
+    let only = names(dir.path());
+
+    // The staging file cannot be made in a folder that is not writable.
+    let mut ed = ArchiveEditor::open(&path, None).unwrap();
+    ed.add_file("top.txt", b"top".to_vec()).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    // (Running as root, a folder is always writable: nothing to check then.)
+    let writable_anyway = std::fs::File::create(dir.path().join("probe")).is_ok();
+    let result = ed.save(&path);
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    if writable_anyway {
+        std::fs::remove_file(dir.path().join("probe")).unwrap();
+    } else {
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(names(dir.path()), only);
+    }
+
+    // An error after the staging file exists: its names table is too large.
+    let mut ed = ArchiveEditor::open(&path, None).unwrap();
+    for i in 0..3000 {
+        ed.add_file(&format!("many/a_rather_long_file_name_for_the_table_{i:05}.txt"), vec![1]).unwrap();
+    }
+    assert!(matches!(ed.save(&path), Err(paleto_rpf::Error::Unsupported(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(names(dir.path()), only);
+}
+
+#[test]
+fn files_added_from_disk_are_not_read_into_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut inner = ArchiveEditor::new("inner.rpf");
+    inner.add_file("a/b.xml", b"<x/>".to_vec()).unwrap();
+    let inner_path = dir.path().join("inner.bin");
+    inner.save(&inner_path).unwrap();
+    let mut bytes = std::fs::read(&inner_path).unwrap();
+    let len = bytes.len() as u64;
+    bytes.extend_from_slice(b"trailing bytes that are not part of it");
+    std::fs::write(&inner_path, &bytes).unwrap();
+    let open = || std::fs::File::open(&inner_path).unwrap();
+
+    let mut ed = ArchiveEditor::new("outer.rpf");
+    ed.add_file_from("sub/Inner.RPF", open(), len).unwrap();
+    ed.add_file("t.txt", b"t".to_vec()).unwrap();
+    // Not stored as is: refused, and nothing is added.
+    assert!(matches!(ed.add_file_from("sub/x.txt", open(), len), Err(paleto_rpf::Error::Unsupported(_))));
+    assert!(!ed.exists("sub/x.txt"));
+    // Longer than the file, or too large for the entry: refused.
+    assert!(matches!(ed.add_file_from("sub/long.rpf", open(), bytes.len() as u64 + 1), Err(paleto_rpf::Error::Io(_))));
+    assert!(matches!(ed.add_file_from("sub/huge.awc", open(), 1 << 32), Err(paleto_rpf::Error::TooLarge(_))));
+    assert!(!ed.exists("sub/long.rpf") && !ed.exists("sub/huge.awc"));
+    let path = dir.path().join("outer.rpf");
+    ed.save(&path).unwrap();
+    assert_eq!(read(&path, "sub/inner.rpf/a/b.xml"), b"<x/>");
+
+    // Into an archive that was opened (edited as a copy), and into a nested one.
+    let mut ed = ArchiveEditor::open(&path, None).unwrap();
+    ed.add_file_from("sub/second.rpf", open(), len).unwrap();
+    ed.archive("sub/inner.rpf", false, None).unwrap().add_file_from("deep.awc", open(), 5).unwrap();
+    ed.save(&path).unwrap();
+    assert_eq!(read(&path, "sub/second.rpf/a/b.xml"), b"<x/>");
+    assert_eq!(read(&path, "sub/inner.rpf/a/b.xml"), b"<x/>");
+    assert_eq!(read(&path, "sub/inner.rpf/deep.awc"), &bytes[..5]);
+    assert_eq!(read(&path, "t.txt"), b"t");
+}

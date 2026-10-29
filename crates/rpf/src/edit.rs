@@ -5,20 +5,30 @@
 //! their AES-encrypted files still read as such. Files that are not touched
 //! keep their bytes, encryption included.
 //!
-//! A top-level archive is saved in place: new data goes into free gaps or at the
-//! end, never over anything the old table of contents still points to, and the
-//! table of contents is written last, once the data is on disk. An edited
-//! nested archive is saved the same way within its own space when it fits in
-//! the space after it (its own table of contents then changes before the
-//! outer one), and rebuilt like new data otherwise. An interrupted save
-//! therefore leaves the old archive readable, nested archives possibly
-//! already showing their new content.
+//! The archive an editor was opened from is only ever read. A save writes a new
+//! file: [`ArchiveEditor::save`] stages it next to the target and renames it
+//! over the target (the old file is never written, so a failed or interrupted
+//! save leaves it as it was), and [`ArchiveEditor::save_to`] writes into a
+//! file the caller made, so callers can stage an archive inside their own
+//! transaction.
+//!
+//! An archive that was opened is saved as an edited copy of itself: the copy
+//! is made first (`copy_file_range`, a reflink where the filesystem has them),
+//! then edited in place. New data goes into free gaps or at the end, never
+//! over anything the old table of contents points to, and the table of
+//! contents is written last, once the data is on disk. An edited nested
+//! archive is saved the same way within its own space when it fits in the
+//! space after it (its own table of contents then changes before the outer
+//! one), and rebuilt like new data otherwise. Untouched data therefore keeps
+//! its place, and a copy cut short still reads as the old archive, nested
+//! archives possibly already showing their new content. A defragmented or
+//! new archive is written fresh.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use flate2::Compression;
@@ -108,11 +118,17 @@ impl ArchiveEditor {
     }
 
     /// Opens an archive on disk for editing; save it with [`ArchiveEditor::save`].
+    /// The file is only read, never written.
     pub fn open(path: &Path, keys: Option<&Keys>) -> Result<Self, Error> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let size = file.metadata()?.len();
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let archive = Archive::parse(Arc::new(file), name, 0, size, keys)?;
+        Self::open_file(File::open(path)?, &name, keys)
+    }
+
+    /// Like [`ArchiveEditor::open`], from a file that is already open (readable).
+    /// `name` is the archive's file name.
+    pub fn open_file(file: File, name: &str, keys: Option<&Keys>) -> Result<Self, Error> {
+        let size = file.metadata()?.len();
+        let archive = Archive::parse(Arc::new(file), name.to_string(), 0, size, keys)?;
         Self::from_archive(&archive, keys)
     }
 
@@ -190,6 +206,24 @@ impl ArchiveEditor {
         }
         let node = FileNode { kind: stored.kind, data: Data::Bytes(stored.data) };
         self.insert(&parts, Node::File(node))
+    }
+
+    /// Adds or replaces an archive, audio or video file (`rpf`, `awc`, `bik`:
+    /// stored as is) with the first `len` bytes of `file`, which are not read
+    /// into memory: they are copied when the archive is saved, so `file` must
+    /// stay as it is until then.
+    pub fn add_file_from(&mut self, path: &str, file: File, len: u64) -> Result<(), Error> {
+        let parts = split(path)?;
+        let name = parts.last().unwrap();
+        if !STORED_RAW.contains(&name.rsplit('.').next().unwrap_or("")) {
+            return Err(Error::Unsupported("adding a file from disk other than an rpf, awc or bik"));
+        }
+        let uncompressed_size = u32::try_from(len).map_err(|_| Error::TooLarge(name.clone()))?;
+        if file.metadata()?.len() < len {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("{name} is shorter than {len} bytes")).into());
+        }
+        let kind = EntryKind::Binary { offset: 0, size: 0, uncompressed_size, encrypted: false };
+        self.insert(&parts, Node::File(FileNode { kind, data: Data::Stored { file: Arc::new(file), offset: 0, len } }))
     }
 
     /// A file as stored, with its entry, to be put back with [`ArchiveEditor::add_stored`].
@@ -347,23 +381,118 @@ impl ArchiveEditor {
         self.defragment = true;
     }
 
-    /// Saves to `path`. In place when `path` is the archive this editor was
-    /// opened from, otherwise a fresh archive is written.
-    pub fn save(mut self, path: &Path) -> Result<(), Error> {
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-        let source = self.source.as_ref().filter(|s| !self.defragment && s.base == 0 && same_file(&s.file, path));
-        if let Some(file) = source.map(|s| s.file.clone()) {
-            self.write(&file, 0, true, None, &dir)?;
-            file.sync_data()?;
-        } else {
-            use std::os::unix::fs::PermissionsExt;
-            let tmp = tempfile::NamedTempFile::new_in(&dir)?;
-            self.write(&Arc::new(tmp.as_file().try_clone()?), 0, false, None, &dir)?;
-            tmp.as_file().set_permissions(std::fs::Permissions::from_mode(0o644))?;
-            tmp.as_file().sync_data()?;
-            tmp.persist(path).map_err(|e| e.error)?;
+    /// Saves to `path`, never writing any existing file: the archive is staged
+    /// in a new file next to `path` and renamed over it, so an error leaves
+    /// what was there untouched (a hard link to the old file keeps the old
+    /// bytes). A symbolic link at `path` is not followed: the new file replaces
+    /// the link itself and what the link points to is never written or replaced
+    /// (the editor cannot know where it leads). An existing target (what the
+    /// link points to, for a link) keeps its permission bits and must be
+    /// writable by its owner (otherwise [`std::io::ErrorKind::PermissionDenied`]);
+    /// a new one gets 0644. When `path` (or what it links to) is the archive this
+    /// editor was opened from, the new file is an edited copy of it (see
+    /// [`ArchiveEditor::save_to`]); otherwise a fresh archive is written.
+    ///
+    /// Once the rename is done the save has succeeded: syncing the folder
+    /// afterwards is best effort, so how durable the rename is then depends on
+    /// the filesystem.
+    pub fn save(self, path: &Path) -> Result<(), Error> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let target = path;
+        let dir = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+        let is_link = std::fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink());
+        let existing = match std::fs::metadata(target) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            // A link that cannot be followed (a loop) is replaced like a dangling one.
+            Err(_) if is_link => None,
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(m) = &existing {
+            if !m.is_file() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a regular file", target.display())).into());
+            }
+            if m.mode() & 0o200 == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{} is read-only", target.display())).into());
+            }
         }
+        let mode = existing.as_ref().map_or(0o644, |m| m.mode() & 0o777);
+        let opened_from_target = match (&existing, &self.source) {
+            (Some(e), Some(s)) => s.file.metadata().is_ok_and(|m| m.dev() == e.dev() && m.ino() == e.ino()),
+            _ => false,
+        };
+        // A random name made exclusively (O_EXCL): nothing planted is ever opened.
+        let tmp = tempfile::Builder::new().prefix(".paleto-save-").tempfile_in(&dir)?;
+        self.write_to(tmp.as_file(), &mut || tempfile::tempfile_in(&dir), opened_from_target)?;
+        tmp.as_file().set_permissions(std::fs::Permissions::from_mode(mode))?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(target).map_err(|e| e.error)?;
+        // Best effort: the archive is in place, an error here must not say it is not.
+        let _ = File::open(&dir).and_then(|d| d.sync_all());
         Ok(())
+    }
+
+    /// Writes the archive into `out`, an empty file open for reading and
+    /// writing, and returns the length of the file. The archive this editor
+    /// was opened from is never written. `scratch` makes the temporary files
+    /// that rebuilding an edited nested archive needs.
+    ///
+    /// An archive that was opened (and is not defragmented) is first copied
+    /// into `out` (`copy_file_range`, a reflink where the filesystem has them)
+    /// and edited there in place: untouched data keeps its offset, new data goes
+    /// into free gaps or at the end, the table of contents is written last. Any
+    /// other archive is written fresh. Everything is synced before returning.
+    ///
+    /// The copy moves the file cursors of the source and of `out` (positional
+    /// reads and writes elsewhere are unaffected), and `out` must not be opened
+    /// with `O_APPEND`, which would make the positional writes append.
+    pub fn save_to(self, out: &File, scratch: &mut dyn FnMut() -> std::io::Result<File>) -> Result<u64, Error> {
+        self.write_to(out, scratch, true)
+    }
+
+    /// [`ArchiveEditor::save_to`]; `copy` says whether an archive that was opened is
+    /// copied and edited (otherwise a fresh archive is written).
+    fn write_to(mut self, out: &File, scratch: &mut dyn FnMut() -> std::io::Result<File>, copy: bool) -> Result<u64, Error> {
+        if out.metadata()?.len() != 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "the file to save into is not empty").into());
+        }
+        let target = Arc::new(out.try_clone()?);
+        let source = self.source.as_ref().filter(|s| copy && !self.defragment && s.base == 0).map(|s| (s.file.clone(), s.len));
+        if let Some((file, len)) = source {
+            // The cursors are shared by every handle to the file: start both at 0.
+            let (mut from, mut to) = (&*file, &*target);
+            from.seek(SeekFrom::Start(0))?;
+            to.seek(SeekFrom::Start(0))?;
+            let copied = std::io::copy(&mut from.take(len), &mut to)?;
+            if copied != len {
+                return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the archive is shorter than when it was opened").into());
+            }
+            self.repoint(&file, &target);
+            self.write(&target, 0, true, None, scratch)?;
+        } else {
+            self.write(&target, 0, false, None, scratch)?;
+        }
+        target.sync_data()?;
+        Ok(target.metadata()?.len())
+    }
+
+    /// Makes every file of this archive and of the nested archives being edited
+    /// that is read through `from` read through `to` (a copy of it) instead.
+    fn repoint(&mut self, from: &Arc<File>, to: &Arc<File>) {
+        if let Some(source) = self.source.as_mut().filter(|s| Arc::ptr_eq(&s.file, from)) {
+            source.file = to.clone();
+        }
+        let mut stack = vec![&mut self.root];
+        while let Some(dir) = stack.pop() {
+            for node in dir.children.values_mut() {
+                match node {
+                    Node::Dir(d) => stack.push(d),
+                    Node::File(FileNode { data: Data::Stored { file, .. }, .. }) if Arc::ptr_eq(file, from) => *file = to.clone(),
+                    Node::File(_) => {}
+                    Node::Archive(child) => child.repoint(from, to),
+                }
+            }
+        }
     }
 
     /// Writes the archive at `base` in `target` and returns its size.
@@ -373,7 +502,7 @@ impl ArchiveEditor {
     /// exceeding it gives [`Error::NoSpace`] before the data or the table of
     /// contents of this archive are written (nested archives inside it may
     /// already have been saved in place).
-    fn write(&mut self, target: &Arc<File>, base: u64, in_place: bool, limit: Option<u64>, tmp_dir: &Path) -> Result<u64, Error> {
+    fn write(&mut self, target: &Arc<File>, base: u64, in_place: bool, limit: Option<u64>, scratch: &mut dyn FnMut() -> std::io::Result<File>) -> Result<u64, Error> {
         let toc_blocks = {
             let (entries, _) = self.flatten();
             let (names, _) = names_table(&entries)?;
@@ -413,7 +542,7 @@ impl ArchiveEditor {
                 let start = (child_base - base) / BLOCK;
                 let old_end = start + old_len.div_ceil(BLOCK);
                 let next = used.iter().map(|r| r.0).filter(|&s| s >= old_end).min().or(limit_blocks);
-                match child.write(&file, child_base, true, next.map(|n| (n - start) * BLOCK), tmp_dir) {
+                match child.write(&file, child_base, true, next.map(|n| (n - start) * BLOCK), scratch) {
                     Ok(len) => {
                         used.push((start, start + len.div_ceil(BLOCK)));
                         written = Some((file, child_base, len));
@@ -425,8 +554,8 @@ impl ArchiveEditor {
             let (file, offset, len) = match written {
                 Some(w) => w,
                 None => {
-                    let tmp = Arc::new(tempfile::tempfile_in(tmp_dir)?);
-                    let len = child.write(&tmp, 0, false, None, tmp_dir)?;
+                    let tmp = Arc::new(scratch()?);
+                    let len = child.write(&tmp, 0, false, None, scratch)?;
                     (tmp, 0, len)
                 }
             };
@@ -733,12 +862,4 @@ fn split(path: &str) -> Result<Vec<String>, Error> {
         return Err(Error::InvalidPath(path.to_string()));
     }
     Ok(parts)
-}
-
-fn same_file(file: &File, path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (file.metadata(), std::fs::metadata(path)) {
-        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-        _ => false,
-    }
 }
