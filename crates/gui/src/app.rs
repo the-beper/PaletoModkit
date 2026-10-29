@@ -421,13 +421,16 @@ struct InstallDialog {
     legacy: Vec<String>,
     /// Convert them before installing.
     convert: bool,
-    result: Option<Result<Vec<String>, String>>,
+    result: Option<InstallResult>,
 }
+
+/// The log of an install, or why it failed and what it did and undid before.
+type InstallResult = Result<Vec<String>, (String, Vec<String>)>;
 
 enum Outcome {
     /// An operation finished; show the message and reopen `reload` if given.
     Done { message: String, reload: Option<ArchivePath> },
-    Installed(Result<Vec<String>, String>),
+    Installed(InstallResult),
     Failed(String),
     /// What undoing or setting aside interrupted changes did.
     Recovered(Result<paleto_core::txn::Report, String>, bool),
@@ -1157,6 +1160,36 @@ impl App {
         self.startup.offer_crash(time, verdict.to_string());
     }
 
+    /// Shows how an install ended in its dialog; a failed add-on install (which has none) opens one.
+    fn show_install_result(&mut self, result: InstallResult) {
+        if result.is_err()
+            && let Some(game) = &self.game
+        {
+            // What a failed install could not undo is an interrupted change now: the next change is refused until it is settled.
+            self.interrupted = paleto_core::txn::pending(game);
+        }
+        // Add-on packs have no dialog of their own: only a failure opens one.
+        if result.is_ok() && self.install.is_none() {
+            return;
+        }
+        let dialog = self.install.get_or_insert_with(|| InstallDialog {
+            path: PathBuf::new(),
+            package: None,
+            metadata: paleto_core::oiv::Metadata { name: "Add-on packs".into(), ..Default::default() },
+            icon: None,
+            legacy: Vec::new(),
+            convert: false,
+            result: None,
+        });
+        dialog.result = Some(result);
+    }
+
+    /// Shows this failed install as if it had just run, for the tests.
+    #[doc(hidden)]
+    pub fn offer_install_failure(&mut self, e: &paleto_core::Error) {
+        self.show_install_result(Err(install_failure(e, Vec::new())));
+    }
+
     /// Tells the app of changes an earlier run left interrupted, as if they were found when the game was chosen.
     #[doc(hidden)]
     pub fn offer_interrupted(&mut self, pending: Vec<paleto_core::txn::Pending>) {
@@ -1696,15 +1729,20 @@ impl App {
                 let (game, keys) = (game.clone(), keys.clone());
                 let tool = (dialog.convert && !dialog.legacy.is_empty()).then(paleto_core::convert::converter).flatten();
                 self.task = Some(Task::spawn(format!("Installing {}", dialog.metadata.name), ctx, move || {
-                    let mut run = || -> Result<Vec<String>, paleto_core::Error> {
-                        let mut log = match &tool {
-                            Some(tool) => package.convert_legacy(tool, Some(&keys))?,
-                            None => Vec::new(),
-                        };
-                        log.extend(package.install(&game, &keys)?);
-                        Ok(log)
-                    };
-                    Outcome::Installed(run().map_err(|e| e.to_string()))
+                    let mut log = Vec::new();
+                    if let Some(tool) = &tool {
+                        match package.convert_legacy(tool, Some(&keys)) {
+                            Ok(converted) => log = converted,
+                            Err(e) => return Outcome::Installed(Err(install_failure(&e, log))),
+                        }
+                    }
+                    Outcome::Installed(match package.install(&game, &keys) {
+                        Ok(done) => {
+                            log.extend(done);
+                            Ok(log)
+                        }
+                        Err(e) => Err(install_failure(&e, log)),
+                    })
                 }));
             }
             Action::CloseInstall => self.install = None,
@@ -2055,13 +2093,11 @@ impl App {
                 let keys = self.keys.clone();
                 let tool = (dialog.convert && dialog.legacy > 0).then(paleto_core::convert::converter).flatten();
                 self.task = Some(Task::spawn("Installing add-on packs", ctx, move || {
-                    let mut converted = 0;
-                    for (dlc, name) in &dialog.packs {
-                        match paleto_core::addon::install_pack(&game, keys.as_deref(), dlc, name, tool.as_deref()) {
-                            Ok(log) => converted += log.iter().filter(|l| l.starts_with("converted ")).count(),
-                            Err(e) => return Outcome::Failed(format!("{name}: {e}")),
-                        }
-                    }
+                    let log = match paleto_core::addon::install_packs(&game, keys.as_deref(), &dialog.packs, tool.as_deref()) {
+                        Ok(log) => log,
+                        Err(e) => return Outcome::Installed(Err(install_failure(&e, Vec::new()))),
+                    };
+                    let converted = log.iter().filter(|l| l.starts_with("converted ")).count();
                     let names: Vec<String> = dialog.packs.iter().map(|(_, n)| n.to_ascii_lowercase()).collect();
                     let mut message = format!("installed {} and added to the DLC list", names.join(", "));
                     if converted > 0 {
@@ -2683,7 +2719,7 @@ impl App {
                     Outcome::Installed(Ok(changes)) => {
                         desktop_notify(&label, &install_summary(changes));
                     }
-                    Outcome::Installed(Err(err)) => {
+                    Outcome::Installed(Err((err, _))) => {
                         desktop_notify(&label, &format!("Installation failed: {err}"));
                     }
                     Outcome::Failed(err) => {
@@ -2733,9 +2769,7 @@ impl App {
                     if let Some(location) = self.current() {
                         self.show(location);
                     }
-                    if let Some(d) = &mut self.install {
-                        d.result = Some(result);
-                    }
+                    self.show_install_result(result);
                 }
                 Outcome::Recovered(result, aside) => {
                     let mut lines = Vec::new();
@@ -3812,8 +3846,12 @@ impl App {
                 }
                 ui.vertical(|ui| {
                     ui.heading(&d.metadata.name);
-                    ui.label(format!("Version {}   ·   by {}", d.metadata.version, d.metadata.author));
-                    ui.label(RichText::new(d.path.display().to_string()).weak().small());
+                    if !d.metadata.version.is_empty() {
+                        ui.label(format!("Version {}   ·   by {}", d.metadata.version, d.metadata.author));
+                    }
+                    if !d.path.as_os_str().is_empty() {
+                        ui.label(RichText::new(d.path.display().to_string()).weak().small());
+                    }
                 });
             });
             ui.separator();
@@ -3885,9 +3923,12 @@ impl App {
                 Some(result) => {
                     match result {
                         Ok(_) => ui.label(RichText::new("✔ Installed").strong().color(theme::ok(ui.visuals().dark_mode))),
-                        Err(e) => ui.label(RichText::new(format!("✖ {e}")).color(theme::error(ui.visuals().dark_mode))),
+                        Err((e, _)) => ui.label(RichText::new(format!("✖ {e}")).color(theme::error(ui.visuals().dark_mode))),
                     };
-                    if let Ok(log) = result {
+                    let log = match result {
+                        Ok(log) | Err((_, log)) => log,
+                    };
+                    if !log.is_empty() {
                         egui::ScrollArea::vertical().max_height(crate::widgets::dialog_list_height(ui.ctx())).show(ui, |ui| {
                             for line in log {
                                 let text = RichText::new(line).monospace().small();
@@ -5201,6 +5242,24 @@ pub(crate) fn size(bytes: u64) -> String {
 /// What an install did, from its log: the files it added, edited, deleted or
 /// converted, and its warnings. "saved" lines only close archives whose edits
 /// are already counted.
+/// What the install dialog shows of a failed install: the error, then the log of what was done and undone
+/// (after the lines of `log`, what ran earlier), and when the undo was not clean, what is left.
+fn install_failure(e: &paleto_core::Error, mut log: Vec<String>) -> (String, Vec<String>) {
+    let paleto_core::Error::Txn(f) = e else { return (e.to_string(), log) };
+    log.extend(f.log.iter().cloned());
+    if f.undone && f.failures.is_empty() {
+        return (e.to_string(), log);
+    }
+    log.push("Left behind (not undone):".into());
+    log.extend(f.failures.iter().map(|l| format!("  {l}")));
+    log.push(if f.journaled {
+        "The backups and the journal were kept: Paleto offers to finish the recovery when you choose this game again, or run `paleto recover`.".into()
+    } else {
+        "These files were left as they are, with their backups next to them.".into()
+    });
+    (format!("{}: the changes could not be fully undone", f.cause), log)
+}
+
 fn install_summary(log: &[String]) -> String {
     let warnings = log.iter().filter(|l| l.starts_with("warning:")).count();
     let changes = log.iter().filter(|l| !l.starts_with("warning:") && !l.starts_with("saved ")).count();

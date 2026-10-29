@@ -760,12 +760,12 @@ fn main() -> Result<()> {
             anyhow::ensure!(!packs.is_empty(), "{} is not an .oiv package and holds no dlc.rpf", package.display());
             anyhow::ensure!(name.is_none() || packs.len() == 1, "--name needs a single pack, {} found", packs.len());
             let tool = paleto_core::convert::converter().filter(|_| !no_convert);
-            for pack in packs {
-                let name = name.clone().unwrap_or(pack.name);
-                println!("{} as {name}", pack.dlc.display());
-                for line in addon::install_pack(&game, Some(&keys), &pack.dlc, &name, tool.as_deref())? {
-                    println!("  {line}");
-                }
+            let packs: Vec<(PathBuf, String)> = packs.into_iter().map(|pack| (pack.dlc, name.clone().unwrap_or(pack.name))).collect();
+            for (dlc, name) in &packs {
+                println!("{} as {name}", dlc.display());
+            }
+            for line in report(addon::install_packs(&game, Some(&keys), &packs, tool.as_deref()))? {
+                println!("  {line}");
             }
         }
         Command::Install { package, no_convert, .. } => {
@@ -792,7 +792,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            for line in pkg.install(&game, &keys)? {
+            for line in report(pkg.install(&game, &keys))? {
                 println!("  {line}");
             }
             println!("installed into {}", game.mods_dir().display());
@@ -1362,6 +1362,22 @@ fn recover_first(cli: &Cli) -> Result<()> {
 }
 
 /// The game folder: explicit, or found above `near` or the current directory.
+/// The log of an install; when it failed after changing files, the lines of what was done and undone come before the error (which names what is left).
+fn report(result: Result<Vec<String>, paleto_core::Error>) -> Result<Vec<String>> {
+    match result {
+        Err(paleto_core::Error::Txn(failure)) => {
+            for line in &failure.log {
+                println!("  {line}");
+            }
+            if !failure.undone || !failure.failures.is_empty() {
+                println!("! the install could not be fully undone{}", if failure.journaled { ": run `paleto recover` to finish the recovery" } else { ": the files named below were left as they are" });
+            }
+            Err(paleto_core::Error::Txn(failure).into())
+        }
+        other => Ok(other?),
+    }
+}
+
 fn find_game(explicit: Option<&Path>, near: Option<&Path>) -> Result<Game> {
     if let Some(dir) = explicit {
         return Ok(Game::open(dir)?);
@@ -1398,6 +1414,17 @@ fn load_keys(game: Option<&Path>, archive: &Path) -> Result<Option<Keys>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed install keeps its error (and so its exit code and the text naming what is left); a good one its log.
+    #[test]
+    fn report_keeps_the_error_of_a_failed_install() {
+        use paleto_core::{Error, txn::TxnFailure};
+        assert_eq!(report(Ok(vec!["add x".into()])).unwrap(), ["add x"]);
+        let failure = TxnFailure { cause: Error::Package("boom".into()), log: vec!["add x".into()], undone: false, failures: vec!["/g/a: gone (backup: /g/.b)".into()], journaled: true, verb: "installed" };
+        let text = report(Err(Error::Txn(Box::new(failure)))).unwrap_err().to_string();
+        assert!(text.contains("boom") && text.contains("/g/a: gone (backup: /g/.b)") && !text.contains("nothing was installed"), "{text}");
+        assert_eq!(report(Err(Error::Package("early".into()))).unwrap_err().to_string(), Error::Package("early".into()).to_string());
+    }
 
     /// An archive of one install is never edited in place because another
     /// install was chosen with --game. (The current directory, the other way
