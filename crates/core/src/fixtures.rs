@@ -207,8 +207,10 @@ pub(crate) fn without_leaked_dirs(mut now: BTreeMap<String, Entry>, want: &BTree
 
 /// An error that claims nothing false: the plain cause (nothing had been changed), or a failure that says the undo was complete.
 pub(crate) fn honest(e: &Error) -> bool {
-    let text = e.to_string();
-    text.contains("nothing was installed") || text.contains("nothing was changed") || !matches!(e, Error::Txn(_))
+    match e {
+        Error::Txn(f) => f.undone && f.failures.is_empty() && matches!(f.verb, "installed" | "changed") && e.to_string().ends_with(&format!("(nothing was {})", f.verb)),
+        _ => true,
+    }
 }
 
 /// Fails (or crashes at) the k-th system call of `op`, for every k until none is left to hit, and checks the

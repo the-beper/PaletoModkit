@@ -195,10 +195,22 @@ impl Owned {
         }
     }
 
-    /// The owned folder `name` (the first name of a path in the game folder) is, in any case.
+    /// The owned folder `name` (the first name of a path in the game folder) is, spelled exactly: the tool only
+    /// ever makes these names, so another case is somebody else's folder (on a case-sensitive filesystem).
     fn of(name: &str) -> Option<Owned> {
-        [Owned::Disabled, Owned::Legacy].into_iter().find(|o| name.eq_ignore_ascii_case(o.folder()))
+        [Owned::Disabled, Owned::Legacy].into_iter().find(|o| name == o.folder())
     }
+}
+
+/// Why a folder the tool keeps its own files in must not be written to, judged on identities because a mount
+/// point is not a link and gets past `O_NOFOLLOW`: it is on another device than the game folder, or is
+/// one of the `others` (the game folder, the mods folder, the game's `x64` and `update`), which is what a bind mount of
+/// one of them over it looks like.
+fn owned_refusal(folder: &Fingerprint, game: &Fingerprint, others: &[(&str, Fingerprint)]) -> Option<String> {
+    if folder.dev != game.dev {
+        return Some("is on another device than the game folder (a mount point)".to_string());
+    }
+    others.iter().find(|(_, o)| folder.same_file(o)).map(|(name, _)| format!("is the {name} folder under another name (a mount point)"))
 }
 
 impl Resolved {
@@ -565,6 +577,27 @@ impl GameRoots {
         self.resolve(RootKind::Mods, p.parts(), p)
     }
 
+    /// Refuses `top`, a held tool-owned folder of the game folder, if it is the game folder, the mods folder or
+    /// the game's `x64` or `update` under another name, or on another device (see [`owned_refusal`]).
+    fn check_owned_folder(&self, top: &Dir, shown: &Path) -> Result<(), Error> {
+        let mut others = vec![("game", self.game.id)];
+        for name in ["x64", "update"] {
+            if let Ok(Some((actual, _))) = find_ci(&self.game.dir, name)
+                && let Ok(dir) = self.game.dir.open_dir_following(&actual)
+                && let Ok(id) = dir.fingerprint()
+            {
+                others.push((name, id));
+            }
+        }
+        if let Some(mods) = self.mods.get() {
+            others.push(("mods", mods.id));
+        }
+        match owned_refusal(&top.fingerprint()?, &self.game.id, &others) {
+            Some(why) => Err(unsafe_path(shown, format!("this tool's own folder {why}"))),
+            None => Ok(()),
+        }
+    }
+
     /// `rel` in one of the tool's own folders of the game folder, for a transaction to write (a backup, a part put
     /// aside): the names are matched exactly, a link or a file anywhere on the way (the folder itself and the last
     /// name included) is refused so nothing is ever written through one, and the folders that are missing are made by
@@ -585,6 +618,9 @@ impl GameRoots {
                 None => missing.push(folder.to_string()),
                 Some(Kind::Dir) => match parent.open_dir(folder) {
                     Ok(dir) => {
+                        if logical.is_empty() {
+                            self.check_owned_folder(&dir, &shown)?;
+                        }
                         parent = dir;
                         logical.push(folder.to_string());
                     }
@@ -715,6 +751,16 @@ impl GameRoots {
             }
             if !in_owned && tool_owned(&full[0]) {
                 return Err(bad("that folder belongs to this tool"));
+            }
+            if in_owned {
+                match self.game.dir.kind(&full[0])? {
+                    None => {}
+                    Some(Kind::Dir) => match self.game.dir.open_dir(&full[0]) {
+                        Ok(top) => self.check_owned_folder(&top, &self.game.shown.join(&full[0]))?,
+                        Err(e) => return Err(bad(&format!("this tool's own folder cannot be opened: {e}"))),
+                    },
+                    Some(_) => return Err(bad("this tool's own folder is a link or a file, not a folder")),
+                }
             }
             if let Some(mods) = self.mods.get() {
                 let mut at = self.game.dir.try_clone()?;

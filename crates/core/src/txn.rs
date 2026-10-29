@@ -140,6 +140,8 @@ pub struct Txn<'r> {
     rooted: [bool; 2],
     committing: bool,
     phase: Phase,
+    /// What the rollback that ended the transaction could not undo (see [`Txn::abort`]).
+    left: Vec<String>,
     recovered: Vec<String>,
     _lock: LockGuard<'r>,
 }
@@ -447,8 +449,12 @@ fn txn_error(cause: Error, log: Vec<String>, rolled: &Rolled) -> Error {
 
 /// Gives the caller's `log` and `verb` to an error from [`Txn::stage`], [`Txn::delete`] or a `commit*`:
 /// a plain error there means the undo was clean ("nothing was {verb}"); an [`Error::Txn`] already says what
-/// is left and passes through, with `log` in front of what it logged and `verb` for its message.
+/// is left and passes through, with `log` in front of what it logged and `verb` for its message. The error of
+/// a call on a transaction that had already ended says nothing about the undo: it is returned as it is.
 pub fn failure(e: Error, mut log: Vec<String>, verb: &'static str) -> Error {
+    if matches!(&e, Error::Io(io) if io.get_ref().is_some_and(|inner| inner.is::<Finished>())) {
+        return e;
+    }
     match e {
         Error::Txn(mut f) => {
             log.append(&mut f.log);
@@ -459,6 +465,18 @@ pub fn failure(e: Error, mut log: Vec<String>, verb: &'static str) -> Error {
         cause => Error::Txn(Box::new(TxnFailure { cause, log, undone: true, failures: Vec::new(), journaled: false, verb })),
     }
 }
+
+/// What a call on a transaction that is over fails with.
+#[derive(Debug)]
+struct Finished;
+
+impl fmt::Display for Finished {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the transaction is already finished")
+    }
+}
+
+impl std::error::Error for Finished {}
 
 /// Free space that must stay after a staged file is written.
 const FREE_MARGIN: u64 = 1 << 30;
@@ -894,7 +912,7 @@ impl<'r> Txn<'r> {
             }
             return Err(e.into());
         }
-        Ok(Txn { roots, id, journal, jlen: start.len() as u64, jdir, jname, ops: Vec::new(), dirs: Vec::new(), dir_cache: HashMap::new(), planned: HashSet::new(), staged: Vec::new(), rooted: [false; 2], committing: false, phase: Phase::Open, recovered: report.log, _lock: lock })
+        Ok(Txn { roots, id, journal, jlen: start.len() as u64, jdir, jname, ops: Vec::new(), dirs: Vec::new(), dir_cache: HashMap::new(), planned: HashSet::new(), staged: Vec::new(), rooted: [false; 2], committing: false, phase: Phase::Open, left: Vec::new(), recovered: report.log, _lock: lock })
     }
 
     /// What recovery did when this transaction began.
@@ -903,7 +921,7 @@ impl<'r> Txn<'r> {
     }
 
     fn ensure_open(&self) -> Result<(), Error> {
-        if self.phase == Phase::Open { Ok(()) } else { Err(Error::Io(io::Error::other("the transaction is already finished"))) }
+        if self.phase == Phase::Open { Ok(()) } else { Err(Error::Io(io::Error::other(Finished))) }
     }
 
     fn put(&mut self, line: &str) -> io::Result<()> {
@@ -925,7 +943,15 @@ impl<'r> Txn<'r> {
     /// An error raised by the caller while the transaction is open (a command of a package that cannot be
     /// applied): everything staged is undone, and the answer is always an [`Error::Txn`] carrying `log`. It says
     /// "(nothing was installed)" only if the undo was clean, else what is left and where; [`failure`] changes the verb.
+    /// If an error of `stage` or `delete` had already ended the transaction, what its rollback could not undo is
+    /// reported again; if that was clean, the error is `cause` as it is: this does not know what else the caller did.
     pub fn abort(mut self, cause: Error, log: Vec<String>) -> Error {
+        if self.phase == Phase::Done {
+            if self.left.is_empty() {
+                return cause;
+            }
+            return txn_error(cause, log, &Rolled { failures: self.left.clone(), notes: Vec::new() });
+        }
         self.fail(cause, log, true)
     }
 
@@ -946,6 +972,7 @@ impl<'r> Txn<'r> {
         let (journal, jlen) = (&self.journal, self.jlen);
         finish_rollback(&self.jdir, &self.jname, &rolled, |end| write_end(journal, jlen, false, end));
         self.phase = Phase::Done;
+        self.left = rolled.failures.clone();
         rolled
     }
 

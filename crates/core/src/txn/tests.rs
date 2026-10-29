@@ -1300,3 +1300,84 @@ fn the_fault_loop_accepts_a_folder_a_crash_left_empty_and_still_reports_a_file_i
 fn the_fault_loop_reports_a_file_planted_in_a_new_folder() {
     crate::fixtures::exhaust(Fault::Crash, |dir| (fixture(dir, true), ()), |game, ()| new_folders(game, true), |_, (), _, _| {});
 }
+
+#[test]
+fn recovery_accepts_the_owned_folders_spelled_exactly_and_no_other_case() {
+    // A planted create, with the `made` record that makes the file look like the one the operation staged: if the
+    // policy let it through, the rollback would unlink a file the tool never made, in a folder it never made.
+    for (folder, name) in [("MODS_LEGACY", "foo.rpf"), ("Mods_Disabled", "foo.asi"), ("MODS_LEGACY", "foo.asi"), ("mods_Legacy", "x64.rpf")] {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), true);
+        let roots = game.roots().unwrap();
+        let id = "0123456789abcdef";
+        std::fs::create_dir_all(game.root.join(folder)).unwrap();
+        let target = game.root.join(folder).join(name);
+        std::fs::write(&target, b"the user's file").unwrap();
+        let fp = Fingerprint::of(&File::open(&target).unwrap()).unwrap();
+        let create = journal::JOp { kind: OpKind::Create, anchor: RootKind::Game, dir: vec![folder.to_string()], name: name.into(), expect: None, mode: JMode::Move, made: Some(fp), kept: false, did: true };
+        let text = [journal::header(), journal::begin(id, 1, 1, "planted"), journal::root(&journal::RootRec { kind: RootKind::Game, fp: roots.game.dir.fingerprint().unwrap(), shown: roots.game.shown.display().to_string() }), journal::op(0, &create), journal::made(0, &fp), journal::commit()].concat();
+        std::fs::create_dir_all(game.root.join(".paleto/journal")).unwrap();
+        std::fs::write(game.root.join(".paleto/journal").join(format!("{id}.log")), text).unwrap();
+        let report = recover(&game).unwrap();
+        let what = format!("{folder}/{name}");
+        assert!(report.failures.len() == 1 && report.failures[0].contains("not touched"), "{what}: {report:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"the user's file", "{what}: the file was removed on the word of a planted journal");
+    }
+}
+
+#[test]
+fn an_abort_after_a_stage_error_that_left_rollback_failures_reports_them_again() {
+    if is_root() {
+        return;
+    }
+    DAMAGE.with(|d| d.set(0));
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "ended").unwrap();
+    t.stage(&mut roots.dest(&rel("scripts/orig.asi")).unwrap(), |f| f.write_all(b"replaced")).unwrap();
+    let scripts = game.root.join("scripts");
+    ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || damage(&scripts))));
+    let first = t.stage(&mut roots.dest(&rel("plugins/b.ini")).unwrap(), |_| Err(std::io::Error::other("disk full"))).unwrap_err();
+    let Error::Txn(f) = &first else { panic!("the stage error hid the rollback failure: {first:?}") };
+    assert!(!f.undone && !f.failures.is_empty());
+    // A call on the ended transaction says nothing about the undo, and `failure` leaves it alone.
+    let again = t.stage(&mut roots.dest(&rel("plugins/c.ini")).unwrap(), |f| f.write_all(b"x")).unwrap_err();
+    assert!(again.to_string().contains("already finished"), "{again}");
+    let same = failure(again, vec!["log".into()], "installed");
+    assert!(matches!(same, Error::Io(_)) && !same.to_string().contains("nothing was"), "{same:?}");
+    let e = t.abort(Error::Package("a command failed".into()), vec!["log".into()]);
+    let Error::Txn(f) = &e else { panic!("not a transaction failure: {e:?}") };
+    assert!(!f.undone && !f.failures.is_empty() && f.log == ["log"] && f.journaled, "{f:?}");
+    assert!(!e.to_string().contains("nothing was") && e.to_string().contains(".paleto-"), "{e}");
+    drop(ReadOnly::new(&game.root.join("scripts")));
+    let report = recover(&game).unwrap();
+    assert!(report.failures.is_empty() && report.rolled_back == 1, "{report:?}");
+}
+
+#[test]
+fn an_abort_after_a_stage_error_that_was_undone_cleanly_is_the_cause_and_says_nothing_about_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "ended").unwrap();
+    let first = t.stage(&mut roots.dest(&rel("plugins/b.ini")).unwrap(), |_| Err(std::io::Error::other("disk full"))).unwrap_err();
+    assert_eq!(first.to_string(), "disk full");
+    let again = t.stage(&mut roots.dest(&rel("plugins/c.ini")).unwrap(), |f| f.write_all(b"x")).unwrap_err();
+    assert!(!failure(again, Vec::new(), "installed").to_string().contains("nothing was"));
+    let e = t.abort(Error::Package("a command failed".into()), vec!["log".into()]);
+    assert_eq!(e.to_string(), "package: a command failed");
+}
+
+#[test]
+fn honest_looks_at_the_failure_not_at_the_words() {
+    let failure_of = |cause: &str, undone: bool, failures: &[&str], verb: &'static str| Error::Txn(Box::new(TxnFailure { cause: Error::Package(cause.into()), log: Vec::new(), undone, failures: failures.iter().map(|f| f.to_string()).collect(), journaled: true, verb }));
+    assert!(crate::fixtures::honest(&failure_of("boom", true, &[], "installed")));
+    assert!(crate::fixtures::honest(&failure_of("boom", true, &[], "changed")));
+    assert!(crate::fixtures::honest(&Error::Package("plain".into())));
+    // Words in the cause, a leftover, an undo that was not complete, an odd verb: none is an honest "nothing was".
+    assert!(!crate::fixtures::honest(&failure_of("nothing was changed (nothing was installed)", false, &["a"], "installed")));
+    assert!(!crate::fixtures::honest(&failure_of("boom", false, &["a"], "installed")));
+    assert!(!crate::fixtures::honest(&failure_of("boom", true, &["a"], "changed")));
+    assert!(!crate::fixtures::honest(&failure_of("boom", true, &[], "removed")));
+}

@@ -867,6 +867,33 @@ fn an_owned_destination_is_found_link_free_with_its_missing_folders_and_passes_o
 }
 
 #[test]
+fn an_owned_folder_that_is_another_folder_under_a_mount_point_is_refused_by_identity() {
+    // A bind mount cannot be made here (and gets past O_NOFOLLOW): the check is a function of the identities.
+    let fp = |dev, ino| Fingerprint { dev, ino, ..Fingerprint::default() };
+    let others = [("game", fp(1, 10)), ("mods", fp(1, 11)), ("x64", fp(1, 12)), ("update", fp(1, 13))];
+    assert_eq!(owned_refusal(&fp(1, 20), &fp(1, 10), &others), None);
+    for (name, ino) in [("game", 10), ("mods", 11), ("x64", 12), ("update", 13)] {
+        let why = owned_refusal(&fp(1, ino), &fp(1, 10), &others).unwrap();
+        assert!(why.contains(&format!("is the {name} folder")), "{why}");
+    }
+    assert!(owned_refusal(&fp(2, 20), &fp(1, 10), &others).unwrap().contains("another device"));
+    // The same through the roots, with the handles a mount point would have given: the game folder, its x64 and
+    // update, the mods folder; and an ordinary folder passes.
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let game = dir.path().join("game");
+    std::fs::create_dir_all(game.join("mods")).unwrap();
+    roots.mods_state().unwrap().expect("the mods folder is there");
+    let shown = game.join("mods_legacy");
+    for held in [roots.game.dir.try_clone().unwrap(), roots.game.dir.open_dir("x64").unwrap(), roots.game.dir.open_dir("update").unwrap(), roots.game.dir.open_dir("mods").unwrap()] {
+        assert!(err(roots.check_owned_folder(&held, &shown).map(|()| 0)).contains("under another name"));
+    }
+    std::fs::create_dir(game.join("mods_legacy")).unwrap();
+    roots.check_owned_folder(&roots.game.dir.open_dir("mods_legacy").unwrap(), &shown).unwrap();
+    roots.owned_dest(Owned::Legacy, &rel("s/a.rpf")).unwrap();
+}
+
+#[test]
 fn an_owned_destination_refuses_a_link_or_a_file_anywhere_on_the_way() {
     let dir = tempfile::tempdir().unwrap();
     let roots = open(dir.path());
