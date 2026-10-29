@@ -431,17 +431,17 @@ fn main() -> Result<()> {
             let (archive, keys, idx) = resolve(&path, cli.game.as_deref())?;
             let entry = &archive.entries[idx];
             if entry.is_dir() {
-                let root = output.join(if idx == 0 { archive.name.trim_end_matches(".rpf") } else { &entry.name });
+                let root = vfs::extract_path(&output, if idx == 0 { archive.name.trim_end_matches(".rpf") } else { &entry.name })?;
+                // Every name is checked before anything is written: the archive is not trusted.
+                let files = archive.walk(idx).into_iter().filter(|(_, i)| !archive.entries[*i].is_dir()).map(|(p, i)| Ok((vfs::extract_path(&root, &p)?, i))).collect::<Result<Vec<_>>>()?;
                 let mut count = 0;
-                for (p, i) in archive.walk(idx) {
-                    if !archive.entries[i].is_dir() {
-                        write_file(&root.join(&p), &archive.read(i, keys.as_ref())?)?;
-                        count += 1;
-                    }
+                for (out, i) in files {
+                    write_file(&out, &archive.read(i, keys.as_ref())?)?;
+                    count += 1;
                 }
                 println!("{count} files extracted to {}", root.display());
             } else {
-                let dest = output.join(&entry.name);
+                let dest = vfs::extract_path(&output, &entry.name)?;
                 write_file(&dest, &archive.read(idx, keys.as_ref())?)?;
                 println!("extracted {}", dest.display());
             }

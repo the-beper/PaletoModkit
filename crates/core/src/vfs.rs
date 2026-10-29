@@ -213,6 +213,17 @@ pub fn join_inner(folder: &str, rel: &str) -> String {
     if folder.is_empty() { rel.to_string() } else { format!("{folder}/{rel}") }
 }
 
+/// Where an entry of an archive is extracted: `rel` (names joined by `/`, as [`paleto_rpf::Archive::walk`] gives
+/// them) below `dest`. Refused unless it is a plain relative path: no root or drive, no `.` or `..`, no empty
+/// name (joining an absolute path would drop `dest`, and `..` would leave it), whatever the archive holds.
+pub fn extract_path(dest: &Path, rel: &str) -> Result<PathBuf, Error> {
+    let plain = rel.split('/').all(|name| !matches!(name, "" | "." | "..")) && Path::new(rel).components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    if !plain {
+        return Err(Error::UnsafePath { path: rel.to_string(), why: "is not a plain relative path, so it is not extracted".into() });
+    }
+    Ok(dest.join(rel))
+}
+
 /// Lists local files below `path` (or `path` itself) with their path relative
 /// to `path`'s parent, for adding to an archive. The temporary names of this
 /// tool (`.paleto-*`: staged files, backups, folders made aside) are not files of
@@ -303,6 +314,16 @@ fn lexical(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use paleto_rpf::ArchiveEditor;
+
+    #[test]
+    fn extraction_stays_below_the_destination() {
+        let dest = Path::new("/out");
+        assert_eq!(extract_path(dest, "a.txt").unwrap(), Path::new("/out/a.txt"));
+        assert_eq!(extract_path(dest, "dir/sub/a.txt").unwrap(), Path::new("/out/dir/sub/a.txt"));
+        for bad in ["", "/home/u/.bashrc", "/a", "a//b", "a/", "./a", "a/./b", "../a", "a/../b", "a/..", ".."] {
+            assert!(matches!(extract_path(dest, bad), Err(Error::UnsafePath { .. })), "{bad:?}");
+        }
+    }
 
     #[test]
     fn folder_changes() {

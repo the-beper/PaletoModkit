@@ -4929,8 +4929,9 @@ fn extract(location: &ArchivePath, keys: Option<&Keys>, names: &[String], dest: 
         } else {
             vec![(name.clone(), idx)]
         };
-        for (rel, i) in files {
-            let out = dest.join(&rel);
+        // Every name is checked before anything of this one is written: the archive is not trusted.
+        let files = files.into_iter().map(|(rel, i)| vfs::extract_path(dest, &rel).map(|out| (rel, out, i))).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        for (rel, out, i) in files {
             std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
             let data = archive.read(i, keys).map_err(|e| format!("{rel}: {e}"))?;
             std::fs::write(&out, data).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -5043,5 +5044,32 @@ mod tests {
         assert_eq!(install_summary(&log), "Installed successfully (3 changes, 2 warnings)");
         assert_eq!(install_summary(&log[..1]), "Installed successfully (1 change)");
         assert_eq!(install_summary(&log[2..4]), "Installed successfully (0 changes, 1 warning)");
+    }
+
+    /// A folder without a name would make "dest.join(/file)" drop the destination: such an archive is damaged and extracts nothing.
+    #[test]
+    fn extracting_a_hostile_archive_writes_nothing_outside_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let (archive, out) = (dir.path().join("a.rpf"), dir.path().join("out"));
+        std::fs::create_dir(&out).unwrap();
+        let mut ed = paleto_rpf::ArchiveEditor::new("a.rpf");
+        ed.add_file("dd/paleto-escape-probe", b"x".to_vec()).unwrap();
+        ed.add_file("ok.txt", b"y".to_vec()).unwrap();
+        ed.save(&archive).unwrap();
+        let location = ArchivePath::new(archive.clone());
+        assert_eq!(extract(&location, None, &["dd".into(), "ok.txt".into()], &out), Ok(2));
+        std::fs::remove_dir_all(out.join("dd")).unwrap();
+        std::fs::remove_file(out.join("ok.txt")).unwrap();
+        // Empty the folder's name in the names table (the root's is empty already).
+        let mut data = std::fs::read(&archive).unwrap();
+        let names = 16 + 16 * u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let at = names + data[names..].windows(3).position(|w| w == b"dd\0").unwrap();
+        data[at] = 0;
+        std::fs::write(&archive, data).unwrap();
+        assert!(extract(&location, None, &[String::new(), "ok.txt".into()], &out).is_err());
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+        assert!(!Path::new("/paleto-escape-probe").exists());
+        // Whatever the parser lets through, a path that is not plain relative is refused before a write.
+        assert!(vfs::extract_path(&out, "/paleto-escape-probe").is_err());
     }
 }

@@ -328,6 +328,28 @@ fn names_that_are_paths_are_refused() {
 }
 
 #[test]
+fn an_entry_without_a_name_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rpf");
+    let mut ed = ArchiveEditor::new("a.rpf");
+    ed.add_file("zz", b"x".to_vec()).unwrap();
+    ed.add_file("d/yy", b"y".to_vec()).unwrap();
+    ed.save(&path).unwrap();
+    let clean = std::fs::read(&path).unwrap();
+    // The root has no name and is fine.
+    assert!(Archive::open(&path, None).is_ok());
+    // A file, then a folder, with its name emptied: the archive is damaged, not one that extracts to "/".
+    let names = 16 + 16 * u32::from_le_bytes(clean[4..8].try_into().unwrap()) as usize;
+    for name in [&b"zz\0"[..], b"d\0", b"yy\0"] {
+        let at = names + clean[names..].windows(name.len()).position(|w| w == name).unwrap();
+        let mut data = clean.clone();
+        data[at] = 0;
+        std::fs::write(&path, data).unwrap();
+        assert!(matches!(Archive::open(&path, None), Err(paleto_rpf::Error::Corrupt(_))), "{}", String::from_utf8_lossy(name));
+    }
+}
+
+#[test]
 fn a_file_that_is_not_an_archive_is_kept() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.rpf");

@@ -198,6 +198,10 @@ impl Archive {
             if name.contains(['/', '\\']) || name == "." || name == ".." {
                 return Err(Error::Corrupt("entry name is a path"));
             }
+            // Only the root has no name: an empty one would make a path built from it start at the root of the disk.
+            if name.is_empty() && !entries.is_empty() {
+                return Err(Error::Corrupt("entry without a name"));
+            }
             entries.push(Entry { name, kind });
         }
         if !entries.first().is_some_and(Entry::is_dir) {
