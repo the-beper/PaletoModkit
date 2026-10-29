@@ -695,6 +695,41 @@ fn a_holder_that_dies_leaves_no_stale_lock() {
     drop(open(dir.path()).lock("alive").unwrap());
 }
 
+/// A second descriptor of the file at `path` that this process has open, as a child forked meanwhile by another thread holds one.
+fn copy_of_open(path: &Path) -> std::os::fd::OwnedFd {
+    let want = std::fs::canonicalize(path).unwrap();
+    for entry in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() else { continue };
+        if std::fs::read_link(entry.path()).is_ok_and(|p| p == want) {
+            // SAFETY: `fd` names the file at `path`, which the caller's frame (the lock being taken) keeps open while it is duplicated here.
+            return unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }.try_clone_to_owned().unwrap();
+        }
+    }
+    panic!("{} is not open", path.display());
+}
+
+#[test]
+fn a_lock_taken_and_then_refused_is_let_go_though_a_forked_child_holds_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let path = dir.path().join("game/.paleto/lock");
+    let copy = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let held = copy.clone();
+    // Between the flock and the check of the names, a child forked by another thread (a test that runs a program)
+    // gets a copy of the descriptor, which it keeps until it runs its program; then the check fails.
+    AFTER_FLOCK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            *held.borrow_mut() = Some(copy_of_open(&path));
+            faults::arm_at(faults::Point::Stat, 1, faults::Mode::Fail(std::io::ErrorKind::Other));
+        }))
+    });
+    assert!(matches!(roots.lock("refused"), Err(Error::Io(_))));
+    assert!(faults::disarm());
+    assert!(copy.borrow().is_some());
+    // Closing the file does not let the lock go while the copy is open: it must have been released before.
+    drop(open(dir.path()).lock("next").unwrap());
+}
+
 #[test]
 fn the_lock_folder_and_file_are_never_followed_through_a_link() {
     let dir = tempfile::tempdir().unwrap();

@@ -211,14 +211,14 @@ fn a_recovery_that_crashes_again_is_recovered_by_the_next_one() {
             break;
         }
         let (want, _) = expected(&game, &old, &new);
-        // Each attempt dies at its j-th call, having got further than the one before.
-        for j in 1.. {
+        // Each attempt dies at its j-th call, having got further than the one before; the first that is not interrupted must finish.
+        let last = (1..).find_map(|j| {
             faults::arm(j, Fault::Crash);
-            let _ = recover(&game);
-            if !faults::disarm() {
-                break;
-            }
-        }
+            let result = recover(&game);
+            (!faults::disarm()).then_some(result)
+        });
+        let report = last.unwrap().unwrap_or_else(|e| panic!("k={k}: the recovery that nothing interrupted failed: {e}"));
+        assert!(report.failures.is_empty(), "k={k}: {report:?}");
         assert_eq!(minus_leaked_dirs(state(&game), &want), want, "k={k}");
         assert_clean(&game, &format!("k={k}"));
     }

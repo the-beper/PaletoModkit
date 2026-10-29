@@ -896,14 +896,17 @@ impl GameRoots {
                 hook();
             }
             // The file, or the folder it is in, may have been replaced between the open and the lock: lock what the names mean now.
-            if home.names_file("lock", &file)? && self.is_home(&home, fallback)? {
+            let current = (|| Ok::<_, Error>(home.names_file("lock", &file)? && self.is_home(&home, fallback)?))();
+            if let Ok(true) = current {
                 // What it says is only for whoever finds the lock busy.
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 let text = format!("{} {} {}\n", std::process::id(), now, label.replace(['\n', '\r'], " "));
                 let _ = file.set_len(0).and_then(|()| std::os::unix::fs::FileExt::write_all_at(&file, text.as_bytes(), 0));
                 return Ok((file, home));
             }
+            // Let go now, on an error too: closing the file would not while a child forked meanwhile by another thread still has it open.
             Dir::unlock(&file);
+            current?;
         }
         Err(changed(&shown))
     }
