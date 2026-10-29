@@ -19,6 +19,11 @@ pub mod text;
 pub mod vfs;
 pub mod xml;
 
+#[cfg(test)]
+pub(crate) mod fixtures;
+#[cfg(test)]
+mod write_safety_tests;
+
 pub use game::{Edition, Game};
 pub use oiv::Package;
 pub use vfs::ArchivePath;
