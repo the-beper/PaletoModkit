@@ -397,8 +397,9 @@ fn deleting_in_a_game_folder_is_refused_while_the_game_is_busy() {
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("b.txt"), b"b").unwrap();
     let mut harness = Harness::builder().build_eframe(|cc| App::new(cc));
-    settle(&mut harness);
     let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
     let game = paleto_core::Game::open(&root).unwrap();
     let roots = game.roots().unwrap();
     let held = paleto_core::txn::guard(&roots, "a test holds the lock").unwrap();
@@ -432,13 +433,16 @@ fn renaming_and_creating_a_folder_in_a_game_folder_are_refused_while_the_game_is
     std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
     std::fs::write(root.join("scripts/a.asi"), b"a").unwrap();
     let mut harness = Harness::builder().with_size([1100.0, 700.0]).build_eframe(|cc| App::new(cc));
+    let ctx = harness.ctx.clone();
+    // The game is chosen here, not found in the home folder, so the test sees the same screen everywhere.
+    harness.state_mut().select_game_folder(&root, &ctx);
     settle(&mut harness);
     let game = paleto_core::Game::open(&root).unwrap();
     let roots = game.roots().unwrap();
     let held = paleto_core::txn::guard(&roots, "a test holds the lock").unwrap();
     harness.state_mut().go(paleto_modkit::Location::Folder(root.join("scripts")));
     settle(&mut harness);
-    let rename = |harness: &mut Harness<'_, App>, to: &str| {
+    let rename =|harness: &mut Harness<'_, App>, to: &str| {
         harness.get_by_label("a.asi").click();
         harness.run_steps(2);
         harness.key_press(egui::Key::F2);
