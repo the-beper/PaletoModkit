@@ -34,6 +34,11 @@ if [ -z "$head" ]; then
 fi
 [ "$BOOTSTRAP" = 0 ] || die 5 "gh-pages exists ($head): --bootstrap is only for the very first publication"
 git clone -q --depth 1 --branch gh-pages "$REMOTE" "$DIR" || die 5 "cannot clone gh-pages"
+link=$(find "$DIR" -path "$DIR/.git" -prune -o -type l -print | head -n1)
+if [ -n "$link" ]; then
+    rm -rf "$DIR"
+    die 2 "gh-pages holds a symbolic link ($link): nothing of it is read or copied"
+fi
 got=$(git -C "$DIR" rev-parse HEAD)
 subject=$(git -C "$DIR" log -1 --format=%s)
 rm -rf "$DIR/.git"

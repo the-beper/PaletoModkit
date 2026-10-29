@@ -195,12 +195,32 @@ job_sign() {
             site="--site $rt/pages $boot"
             ;;
     esac
+    # The steps of the jobs: prepare (no secret), check-prepared (none), sign (the secret, nothing else), finish (none).
+    sign_args="--tag $tag --commit $commit"
+    m=$d/verified/release-manifest.txt
+    rm -f "$d/sign-prepare.log" "$d/sign-check.log" "$d/sign-sign.log" "$d/sign-finish.log"
+    rm -rf "$d/prepared" "$d/signres"
     # shellcheck disable=SC2086
-    run "$d/sign.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" \
-        sh packaging/flatpak-sign.sh --tag "$tag" --commit "$commit" --manifest "$d/verified/release-manifest.txt" \
-        --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --out "$d/signed"
+    run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
+        --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --work "$rt/prepwork" --out "$d/prepared"
     rc=$RC
-    in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --cleanup > "$d/cleanup.log" 2>&1 || true
+    if [ "$rc" = 0 ]; then
+        # shellcheck disable=SC2086
+        run "$d/sign-check.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --check-prepared $sign_args --manifest "$m" --in "$d/prepared" --work "$rt/signwork" --check-remote
+        rc=$RC
+    fi
+    if [ "$rc" = 0 ]; then
+        # shellcheck disable=SC2086
+        run "$d/sign-sign.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sign_args --work "$rt/signwork" --out "$d/signres"
+        rc=$RC
+    fi
+    if [ "$rc" = 0 ]; then
+        # shellcheck disable=SC2086
+        run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --work "$rt/finwork" --out "$d/signed"
+        rc=$RC
+    fi
+    cat "$d"/sign-prepare.log "$d"/sign-check.log "$d"/sign-sign.log "$d"/sign-finish.log > "$d/sign.log" 2> /dev/null || true
+    in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --cleanup --work "$rt/signwork" > "$d/cleanup.log" 2>&1 || true
     RC=$rc
 }
 
@@ -262,7 +282,7 @@ snapshot() {
 }
 pages_count() { git -C "$LIVE/origin.git" rev-list --count refs/heads/gh-pages; }
 record() { git -C "$LIVE/origin.git" show "$1:release.txt" 2> /dev/null; }
-leftover_gnupg() { find "$SIM/rt" -maxdepth 2 -name 'gnupg.*' 2> /dev/null | wc -l; }
+leftover_gnupg() { { find "$SIM/rt" -maxdepth 2 -name 'gnupg.*' 2> /dev/null; find /dev/shm -maxdepth 1 -name 'paleto-gnupg.*' -user "$(id -u)" 2> /dev/null; } | wc -l; }
 
 # ---- scenarios --------------------------------------------------------------------------------------------------
 
@@ -904,6 +924,295 @@ sc_sign_fresh_and_verify() {
     [ ! -e "$d/signed/flatpak-signed-repo.tar" ] || fail "something was signed on skip"
 }
 
+# ---- hardening of the signing and of the checks of gh-pages -----------------------------------------------------
+
+# edit_pages MESSAGE CMD...: a commit on gh-pages by someone else; CMD runs in a clone of it.
+edit_pages() {
+    msg=$1
+    shift
+    g=$SIM/other
+    rm -rf "$g"
+    git clone -q --branch gh-pages "$REMOTE" "$g"
+    (cd "$g" && "$@")
+    git -C "$g" add -A
+    git -C "$g" commit -q -m "$msg"
+    git -C "$g" push -q origin gh-pages
+}
+mut_two_keys() { sed -i "s|^GPGKey=.*|GPGKey=$(cat "$KEYS/K.pub" "$KEYS/A.pub" | base64 -w0)|" paleto-modkit.flatpakrepo; }
+mut_other_key() { sed -i "s|^GPGKey=.*|GPGKey=$(base64 -w0 "$KEYS/A.pub")|" paleto-modkit.flatpakrepo; }
+mut_record_no_tag() { echo "format=1" > release.txt; }
+mut_record_dir() { rm -f release.txt; mkdir release.txt; echo x > release.txt/a; }
+mut_symlink() { ln -s /etc/passwd evil-link; }
+
+# a second key in the published .flatpakrepo (or another one instead): the signing job refuses, nothing is signed
+sc_pages_second_key() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    edit_pages "second key" mut_two_keys
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_rc "sign with two keys in the published file" 3
+    assert_log "$LIVE/runs/1/sign.log" "exactly the key"
+    [ ! -e "$LIVE/runs/1/signed/PaletoModkit-x86_64.flatpak" ] || fail "a bundle was made"
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+sc_pages_other_key() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    edit_pages "another key" mut_other_key
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_rc "sign with another published key" 3
+}
+
+# a release.txt that is there and says nothing usable, or is not a file: exit 5, never "no limit"
+sc_pages_record_unreadable() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    edit_pages "record without a tag" mut_record_no_tag
+    job_validate 1 v1.6.0 release
+    assert_rc "validate with a record without a tag" 5
+    edit_pages "record is a folder" mut_record_dir
+    job_validate 1 v1.6.0 release
+    assert_rc "validate with a record that is a folder" 5
+}
+
+# a symbolic link in gh-pages: nothing is read or copied
+sc_pages_symlink() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    edit_pages "a link" mut_symlink
+    pipeline 1 v1.6.0 release push verify
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    job_sign 1
+    assert_rc "fetch of gh-pages with a link" 2
+    assert_log "$LIVE/runs/1/pages.log" "symbolic link"
+    [ ! -e "$SIM/rt/1/pages" ] || fail "the clone was left behind"
+}
+
+# the secret in the environment of the signing job: only --sign accepts it, and none of its child processes sees it
+sc_sign_secret_env() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push verify
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    tag=v1.6.0
+    commit=$(kv "$d/validate.out" commit)
+    rt=$SIM/rt/iso
+    mkdir -p "$rt/shim"
+    for t in flatpak gpg ostree; do
+        real=$(command -v "$t")
+        printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\nprintenv FLATPAK_GPG_PRIVATE_KEY >> "%s/seen" || true\nexec %s "$@"\n' "$t" "$rt" "$rt" "$real" > "$rt/shim/$t"
+        chmod +x "$rt/shim/$t"
+    done
+    : > "$rt/seen"
+    : > "$rt/calls"
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    assert_rc "fetch" 0
+    m=$d/verified/release-manifest.txt
+    args="--tag $tag --commit $commit --manifest $m --unsigned $d/fp/flatpak-unsigned-repo.tar --site $rt/pages --work $rt/pw --out $d/prepared"
+    cargs="--tag $tag --commit $commit --manifest $m --in $d/prepared --work $rt/w --check-remote"
+    sargs="--tag $tag --commit $commit --work $rt/w --out $d/signres"
+    fargs="--tag $tag --commit $commit --manifest $m --in $d/signres --work $rt/fw --out $d/signed"
+    secret=$(cat "$KEYS/K.sec")
+    # shellcheck disable=SC2086
+    run "$d/p0.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --prepare $args
+    assert_rc "prepare with the secret" 1
+    assert_log "$d/p0.log" "without the secret"
+    # shellcheck disable=SC2086
+    run "$d/p1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --prepare $args
+    assert_rc "prepare" 0
+    # shellcheck disable=SC2086
+    run "$d/p1b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --check-prepared $cargs
+    assert_rc "check-prepared with the secret" 1
+    # shellcheck disable=SC2086
+    run "$d/p1c.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --check-prepared $cargs
+    assert_rc "check-prepared" 0
+    : > "$rt/seen"
+    : > "$rt/calls"
+    # shellcheck disable=SC2086
+    run "$d/p2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sargs
+    assert_rc "sign" 0
+    assert_eq "the secret seen by a child process of --sign" 0 "$(wc -c < "$rt/seen")"
+    # the sign step unpacks nothing and makes no commit, no appstream data and no delta: it signs
+    if grep -q -e build-commit-from -e 'untrusted' "$rt/calls"; then fail "the sign step made commits from the build output"; fi
+    grep 'build-update-repo' "$rt/calls" | grep -q -e '--no-update-appstream' || fail "the sign step generated appstream data"
+    if grep -q -e 'generate-static-deltas' "$rt/calls"; then fail "the sign step generated static deltas"; fi
+    grep -q 'gpg-sign' "$rt/calls" || fail "the sign step did not sign with ostree gpg-sign"
+    for t in flatpak gpg ostree; do
+        [ "$(grep -c "^$t " "$rt/calls")" -gt 0 ] || fail "the shim of $t was never called: the check proves nothing"
+    done
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+    # shellcheck disable=SC2086
+    run "$d/p3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --finish $fargs
+    assert_rc "finish with the secret" 1
+    # shellcheck disable=SC2086
+    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
+    assert_rc "finish" 0
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+
+# two keys in the secret: not the pinned one alone
+sc_gpg_two_keys() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    cat "$KEYS/K.sec" "$KEYS/A.sec" > "$SIM/two.sec"
+    SECRET_FILE=$SIM/two.sec
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_rc "sign (two keys in the secret)" 4
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+
+# the published key file holds the same key in other bytes (an added user id): the files users have are kept
+# byte for byte, and the release goes through
+sc_pages_key_bytes() {
+    h=$SIM/keyvar
+    rm -rf "$h"
+    mkdir -p "$h"
+    chmod 700 "$h"
+    gpg --homedir "$h" --batch --quiet --import "$KEYS/K.sec" > /dev/null 2>&1
+    gpg --homedir "$h" --batch --quiet --quick-add-uid "$FPR_K" "Extra user id" > /dev/null 2>&1
+    gpg --homedir "$h" --batch --export "$FPR_K" > "$SIM/K2.pub" 2> /dev/null
+    gpgconf --homedir "$h" --kill all > /dev/null 2>&1 || true
+    if cmp -s "$KEYS/K.pub" "$SIM/K2.pub"; then fail "the variant of the key has the same bytes"; fi
+    commit_release 1.6.0
+    tag_release v1.6.0
+    edit_pages "same key, other bytes" mut_variant_key
+    pipeline 1 v1.6.0 release
+    assert_rc "pipeline" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    cmp -s "$SIM/other/paleto-modkit.flatpakrepo" "$LIVE/site/paleto-modkit.flatpakrepo" || fail "the .flatpakrepo has other bytes than the published one"
+    cmp -s "$SIM/other/paleto-modkit.flatpakref" "$LIVE/site/paleto-modkit.flatpakref" || fail "the .flatpakref has other bytes than the published one"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+}
+mut_variant_key() { k=$(base64 -w0 "$SIM/K2.pub"); sed -i "s|^GPGKey=.*|GPGKey=$k|" paleto-modkit.flatpakrepo paleto-modkit.flatpakref; }
+mut_other_file() { echo hello > other.txt; }
+
+# what the signing job checks before it signs: the hash of the prepared repository, the tag, the base of gh-pages, and
+# the content against the manifest of the verify job (a prepare job that lies about everything it wrote)
+sc_sign_prepared_checks() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push verify
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    tag=v1.6.0
+    commit=$(kv "$d/validate.out" commit)
+    rt=$SIM/rt/pc
+    mkdir -p "$rt"
+    secret=$(cat "$KEYS/K.sec")
+    m=$d/verified/release-manifest.txt
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    assert_rc "fetch" 0
+    # shellcheck disable=SC2086
+    run "$d/q1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag $tag --commit $commit --manifest "$m" \
+        --unsigned "$d/fp/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw" --out "$d/prepared"
+    assert_rc "prepare" 0
+    for f in flatpak-prepared-repo.tar flatpak-prepared.txt; do assert_file "prepared output" "$d/prepared/$f"; done
+    # shellcheck disable=SC2329
+    chk_it() { # IN TAG [OPTION]
+        in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --check-prepared --tag "$2" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/w" ${3:+"$3"}
+    }
+    # shellcheck disable=SC2329
+    sign_it() {
+        in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/w" --out "$d/signres"
+    }
+    # a prepared repository that changed after it was described
+    rm -rf "$d/prepared.bad"
+    cp -a "$d/prepared" "$d/prepared.bad"
+    printf Z >> "$d/prepared.bad/flatpak-prepared-repo.tar"
+    run "$d/q2.log" chk_it "$d/prepared.bad" "$tag"
+    assert_rc "check with a changed prepared repository" 2
+    assert_log "$d/q2.log" "not the one that was described"
+    # another tag than the one prepared
+    run "$d/q3.log" chk_it "$d/prepared" v1.6.1
+    assert_rc "check for another tag" 2
+    # a prepare job that lies about everything: another build of the same commit, prepared consistently, its
+    # description edited to name the verified build. Only the content checksum against the manifest can tell.
+    fx_flatpak "$d/build" "$d/fp2"
+    run "$d/q5.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-verify.sh builds --tag "$tag" --commit "$commit" --flatpak "$d/fp2" --out "$d/verified2"
+    assert_rc "verify the other build" 0
+    # shellcheck disable=SC2086
+    run "$d/q6.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag $tag --commit $commit --manifest "$d/verified2/release-manifest.txt" \
+        --unsigned "$d/fp2/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw2" --out "$d/prepared2"
+    assert_rc "prepare the other build" 0
+    sed -i "s/^unsigned_tar_sha256=.*/unsigned_tar_sha256=$(kv "$m" flatpak_unsigned_tar_sha256)/" "$d/prepared2/flatpak-prepared.txt"
+    run "$d/q7.log" chk_it "$d/prepared2" "$tag"
+    assert_rc "check of a prepared repository of another build" 2
+    assert_log "$d/q7.log" "not the verified build"
+    # the sign step does not accept a work folder that --check-prepared did not make
+    rm -rf "$rt/w"
+    mkdir -p "$rt/w"
+    run "$d/q8.log" sign_it
+    assert_rc "sign without a check" 1
+    # gh-pages moved since the preparation
+    edit_pages "someone else" mut_other_file
+    run "$d/q4.log" chk_it "$d/prepared" "$tag" --check-remote
+    assert_rc "check after gh-pages moved" 5
+    # a ref that points to another commit after the check: not signed
+    run "$d/q9.log" chk_it "$d/prepared" "$tag"
+    assert_rc "check" 0
+    par=$(ostree --repo="$rt/w/repo" rev-parse "$APP_REF^")
+    printf '%s\n' "$par" > "$rt/w/repo/refs/heads/$APP_REF"
+    assert_eq "the ref was moved" "$par" "$(ostree --repo="$rt/w/repo" rev-parse "$APP_REF")"
+    run "$d/q10.log" sign_it
+    assert_rc "sign after a ref changed" 2
+    assert_log "$d/q10.log" "not the commit that was checked"
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+
+# the checks of the library, on their own
+lib_run() { sh -c ". \"\$0\"; $1" "$PKG/release-lib.sh"; }
+# shellcheck disable=SC2016
+sc_lib_checks() {
+    nl=$(printf '\n_')
+    nl=${nl%_}
+    h40=$(printf 'a%.0s' $(seq 40))
+    if X="v1.6.0${nl}v9.9.9" lib_run 'semver_valid "$X"'; then fail "a two line tag is valid"; fi
+    if X="v1.6.0$(printf '\r')" lib_run 'semver_valid "$X"'; then fail "a tag with a CR is valid"; fi
+    if X="${h40}${nl}zz" lib_run 'is_hex "$X" 40'; then fail "a two line hex value is valid"; fi
+    X="$h40" lib_run 'is_hex "$X" 40' || fail "a hex value is not valid"
+    X="v1.6.0" lib_run 'semver_valid "$X"' || fail "v1.6.0 is not valid"
+    cmp_of() { lib_run "semver_cmp $1 $2"; }
+    assert_eq "cmp big patch" 1 "$(cmp_of v1.2.9007199254740993 v1.2.9007199254740992)"
+    assert_eq "cmp big patch reversed" -1 "$(cmp_of v1.2.9007199254740992 v1.2.9007199254740993)"
+    assert_eq "cmp equal" 0 "$(cmp_of v1.2.3 v1.2.3)"
+    assert_eq "cmp 10 over 9" 1 "$(cmp_of v1.10.0 v1.9.0)"
+    assert_eq "cmp rc.10 over rc.9" 1 "$(cmp_of v2.0.0-rc.10 v2.0.0-rc.9)"
+    assert_eq "cmp release over rc" 1 "$(cmp_of v2.0.0 v2.0.0-rc.1)"
+    assert_eq "cmp rc below release" -1 "$(cmp_of v2.0.0-rc.1 v2.0.0)"
+    # the public key file
+    cat "$KEYS/K.pub" "$KEYS/A.pub" > "$SIM/two.pub"
+    assert_eq "fingerprint of one key" "$FPR_K" "$(lib_run "pubkey_fpr \"$KEYS/K.pub\"")"
+    assert_eq "fingerprint of two keys" "" "$(lib_run "pubkey_fpr \"$SIM/two.pub\"")"
+    assert_eq "fingerprint of a secret key file" "" "$(lib_run "pubkey_fpr \"$KEYS/K.sec\"")"
+    assert_eq "fingerprint of nothing" "" "$(lib_run "pubkey_fpr /dev/null")"
+}
+
+# --check-head: the build jobs check the submodule out, the other jobs do not and say so
+sc_check_head() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    job_validate 1 v1.6.0 release
+    assert_rc "validate" 0
+    commit=$(kv "$LIVE/runs/1/validate.out" commit)
+    x=$LIVE/runs/1/bare
+    rm -rf "$x"
+    git clone -q "$REMOTE" "$x"
+    git -C "$x" checkout -q --detach "$commit"
+    run "$LIVE/runs/1/ch1.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$commit"
+    assert_rc "check-head without the submodule" 2
+    run "$LIVE/runs/1/ch2.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$commit" --no-submodule
+    assert_rc "check-head --no-submodule" 0
+    run "$LIVE/runs/1/ch3.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$(printf 'f%.0s' $(seq 40))" --no-submodule
+    assert_rc "check-head --no-submodule on another commit" 2
+    git -C "$x" submodule update -q --init
+    run "$LIVE/runs/1/ch4.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$commit"
+    assert_rc "check-head with the submodule" 0
+}
+
 # ---- the world, once ----------------------------------------------------------------------------------------------
 
 make_template() {
@@ -959,7 +1268,8 @@ restore() {
 SCENARIOS="valid_stable invalid_tag mismatch_cargo mismatch_lock mismatch_metainfo mismatch_date mismatch_submodule mismatch_extra_submodule mismatch_rc_type mismatch_stable_dev
 empty_pin identity_change prerelease main_moved tag_not_on_main build_failure converter_failure missing_zsync zsync_length flipped_appimage tool_pin build_flatpak_script sim_guard
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
-gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify"
+gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
+pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 
 FAILFILE=$SIM/fails

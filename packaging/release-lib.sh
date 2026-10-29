@@ -26,7 +26,19 @@ die() {
 # conf KEY: the value in release.conf (parsed, never sourced).
 conf() { sed -n "s/^$1=//p" "$RELEASE_CONF" | head -n1; }
 
-is_hex() { printf '%s\n' "$1" | grep -Eq "^[0-9a-fA-F]{$2}\$"; }
+# one_line VALUE: succeeds unless the value has a newline or a carriage return (grep works line by line, so a
+# multi-line value could pass a pattern check on one of its lines).
+LF=$(printf '\n_')
+LF=${LF%_}
+CR=$(printf '\r')
+one_line() {
+    case $1 in
+        *"$LF"* | *"$CR"*) return 1 ;;
+    esac
+    return 0
+}
+
+is_hex() { one_line "$1" && printf '%s\n' "$1" | grep -Eq "^[0-9a-fA-F]{$2}\$"; }
 
 # conf_hex KEY LENGTH: the value, or exit 2 when empty or not hex.
 conf_hex() {
@@ -66,7 +78,7 @@ release_init() {
 
 # ---- versions -------------------------------------------------------------------------------------------------
 
-semver_valid() { printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'; }
+semver_valid() { one_line "$1" && printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'; }
 is_rc() { case $1 in *-rc.*) return 0 ;; *) return 1 ;; esac; }
 
 # semver_key TAG: "major minor patch stable rc", the order key (a release candidate is below its release).
@@ -89,10 +101,16 @@ semver_key() {
     printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$st" "$rc"
 }
 
-# semver_cmp A B: -1, 0 or 1.
+# semver_cmp A B: -1, 0 or 1. The components are compared as digit strings (shorter is smaller, then
+# lexicographic): awk numbers are doubles and are equal above 2^53.
 semver_cmp() {
-    { semver_key "$1"; semver_key "$2"; } | awk 'NR == 1 { for (i = 1; i <= 5; i++) a[i] = $i + 0 }
-        NR == 2 { for (i = 1; i <= 5; i++) { b = $i + 0; if (a[i] < b) { print -1; exit } if (a[i] > b) { print 1; exit } } print 0 }'
+    { semver_key "$1"; semver_key "$2"; } | awk 'function cmp(x, y) {
+            if (length(x) != length(y)) return (length(x) < length(y)) ? -1 : 1
+            if (x == y) return 0
+            return (x < y) ? -1 : 1
+        }
+        NR == 1 { for (i = 1; i <= 5; i++) a[i] = $i "" }
+        NR == 2 { for (i = 1; i <= 5; i++) { c = cmp(a[i], $i ""); if (c != 0) { print c; exit } } print 0 }'
 }
 
 # ---- small files ----------------------------------------------------------------------------------------------
@@ -152,6 +170,7 @@ pages_state() {
     head=$(git -C "$g" rev-parse FETCH_HEAD)
     printf '%s\n' "$head" > "$1/head"
     if git -C "$g" cat-file -e FETCH_HEAD:release.txt 2> /dev/null; then
+        [ "$(git -C "$g" cat-file -t FETCH_HEAD:release.txt)" = blob ] || die 5 "release.txt of gh-pages is not a plain file"
         git -C "$g" show FETCH_HEAD:release.txt > "$1/record" || die 5 "cannot read release.txt of gh-pages"
     else
         subject=$(git -C "$g" log -1 --format=%s FETCH_HEAD)
@@ -214,6 +233,10 @@ release_state() {
     PG_COMMIT=$(kv_get "$1/pages/record" source_commit)
     # shellcheck disable=SC2034
     PG_SUMS=$(kv_get "$1/pages/record" sums_sha256)
+    # A record that cannot be read must not silently lift the limits.
+    if [ -n "$PG_HEAD" ] && [ -z "$PG_TAG" ]; then
+        die 5 "gh-pages says no version: release.txt is missing or has no tag, and the subject is not 'Flatpak repository for vX.Y.Z'"
+    fi
     if [ -n "$PG_TAG" ]; then
         semver_valid "$PG_TAG" || die 5 "gh-pages has an invalid tag in release.txt: $PG_TAG"
         [ "v$PG_VER" = "$PG_TAG" ] || die 5 "gh-pages release.txt: version $PG_VER does not match tag $PG_TAG"
@@ -374,18 +397,21 @@ verify_signed_repo() {
     for r in $want; do
         ostree --repo="$3/chk" rev-parse "$r" > /dev/null || die 2 "$1: $r was not pulled"
         [ "$(ostree --repo="$3/chk" rev-parse "$r")" = "$(ostree --repo="$1" rev-parse "$r")" ] || die 2 "$1: $r differs after the pull"
-        # Every commit of the ref (not only the head) is signed: the pull verified them, check there is a signature.
+        # The pull (depth 0) fetched and verified the head commit of the ref only: check that the head has a signature.
         s=$(ostree --repo="$1" show --print-detached-metadata-key=ostree.gpgsigs "$r" 2> /dev/null || true)
         [ -n "$s" ] || die 2 "$1: $r has no signature"
     done
     check_commit_content "$3/chk" "$4"
 }
 
-# pubkey_fpr FILE: the fingerprint of the primary key in a public key file.
+# pubkey_fpr FILE: the fingerprint of the key in a public key file, upper case; empty unless the file holds
+# exactly one public primary key and nothing secret (a second key in a file meant to hold one is an error for
+# the caller, which compares the result with the pinned fingerprint).
 pubkey_fpr() {
     h=$(mktemp -d "${TMPDIR:-/tmp}/pubfpr.XXXXXX")
     chmod 700 "$h"
-    f=$(gpg --homedir "$h" --batch --quiet --show-keys --with-colons "$1" 2> /dev/null | awk -F: '/^fpr/ { print $10; exit }') || true
+    f=$(gpg --homedir "$h" --batch --quiet --show-keys --with-colons "$1" 2> /dev/null |
+        awk -F: '/^pub:/ { n++; w = 1; next } /^(sec|ssb):/ { bad = 1 } /^fpr:/ && w { f = $10; w = 0 } END { if (n == 1 && !bad && f != "") print f }') || true
     gpgconf --homedir "$h" --kill all > /dev/null 2>&1 || true
     rm -rf "$h"
     printf '%s\n' "$f" | tr 'a-f' 'A-F'

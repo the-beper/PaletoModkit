@@ -1,57 +1,130 @@
 name: Release
 
+# The release graph. Every job checks out the commit the tag points to (nothing from main), and every job but
+# `publish` has read-only access to the repository. The signing key exists only in the `flatpak-signing`
+# environment, in one step of one job. Everything that parses untrusted data (the build output, gh-pages: tar,
+# ostree, gpg --show-keys, flatpak) runs in jobs without the key, on other virtual machines: `verify`,
+# `prepare-flatpak` and `finish-flatpak`. `sign-flatpak` first checks, without the key, what `prepare-flatpak` handed
+# over against the manifest of `verify` (the content checksums), then signs the commits and the summary in a keyring
+# in memory (nothing is built or generated there, and there are no static deltas) and removes it. `finish-flatpak`
+# verifies the signed repository like a client does and makes the bundle, on a machine that never held the key. Only
+# `publish` can write (the draft release, then gh-pages through a credential helper, then the release). The rules are
+# in docs/release.md, the scripts in packaging/release-*.sh and flatpak-sign.sh, simulated by
+# packaging/tests/release-sim.sh.
+#
+#   validate -> build-linux  \
+#            -> build-flatpak -> verify -> prepare-flatpak -> sign-flatpak -> finish-flatpak -> publish
+#            (-> build-windows: slot for M2, below)
+#
+# Jobs that may have a skipped ancestor (build-linux is skipped in publish-flatpak mode) say so with an explicit
+# condition: `!cancelled()` and the results they need. Without it GitHub skips them as well.
+#
+# Dispatch: tag = an existing release tag; mode = build-only (builds and verifies, publishes nothing, the
+# default), release, or publish-flatpak (only gh-pages, for a release that is published already).
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag"
+        description: "Existing release tag (vX.Y.Z or vX.Y.Z-rc.N); the run must be started from main"
         required: true
+        type: string
+      mode:
+        description: "build-only builds and verifies; release publishes; publish-flatpak only updates gh-pages"
+        required: true
+        type: choice
+        options: [build-only, release, publish-flatpak]
+        default: build-only
+      bootstrap_pages:
+        description: "gh-pages does not exist yet: create it (the very first publication only)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  MODE: ${{ inputs.mode || 'release' }}
+  BOOTSTRAP: ${{ inputs.bootstrap_pages && 'true' || 'false' }}
+  RUST_VERSION: "1.99.1"
+  DOTNET_VERSION: "10.0.403"
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_INCREMENTAL: 0
 
 jobs:
-  release:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-22.04
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      commit: ${{ steps.v.outputs.commit }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      build_linux: ${{ steps.v.outputs.build_linux }}
+      publish: ${{ steps.v.outputs.publish }}
+      plan: ${{ steps.v.outputs.plan }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate the tag and decide what to do
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: packaging/release-validate.sh --tag "$TAG" --mode "$MODE" --event "$EVENT"
+
+  build-linux:
+    needs: validate
+    if: ${{ needs.validate.outputs.plan != 'noop' && needs.validate.outputs.build_linux == 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
           submodules: true
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT"
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "10.0.x"
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Check the tag matches Cargo.toml
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, the toolchain is pinned below
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - name: Tests
         run: cargo test --locked
       - name: Install what the AppImage needs
         run: sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0 zsync
       - name: Build release artifacts
-        run: ./packaging/build-release.sh
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        env:
+          EXPECT_VERSION: ${{ needs.validate.outputs.version }}
+        run: packaging/build-release.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          files: dist/*
-          generate_release_notes: true
+          name: linux-dist-${{ needs.validate.outputs.commit }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
 
-  flatpak:
-    needs: release
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    concurrency: flatpak-pages
+  build-flatpak:
+    needs: validate
+    if: ${{ needs.validate.outputs.plan != 'noop' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
-      SITE_URL: https://the-beper.github.io/PaletoModkit
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - name: Free disk space
         run: |
@@ -61,56 +134,257 @@ jobs:
           df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.TAG }}
-          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.commit }}
           submodules: true
-      - name: Use the packaging files from main
-        run: git checkout origin/main -- packaging/
-      - name: Fetch the published repository
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT"
+      # No secret, no signing key and no token is in this job: the build runs unreviewed dependencies in a container.
+      - name: Build the unsigned Flatpak repository
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          remote="https://x-access-token:$GH_TOKEN@github.com/${GITHUB_REPOSITORY}.git"
-          mkdir -p "$RUNNER_TEMP/flatpak"
-          if git ls-remote --exit-code --heads "$remote" gh-pages >/dev/null; then
-            git clone --quiet --depth 1 --branch gh-pages "$remote" "$RUNNER_TEMP/pages"
-            # Git keeps no empty directories; OSTree wants these.
-            if [ -d "$RUNNER_TEMP/pages/repo" ]; then
-              mv "$RUNNER_TEMP/pages/repo" "$RUNNER_TEMP/flatpak/repo"
-              mkdir -p "$RUNNER_TEMP/flatpak/repo"/{tmp,state,refs/heads,refs/mirrors,refs/remotes}
-            fi
-          else
-            mkdir "$RUNNER_TEMP/pages"
-          fi
-      - name: Import the signing key
+          WORK: ${{ runner.temp }}/fp
+          OUT: ${{ runner.temp }}/out
+          BUNDLE: "0"
+          EXPORT_REPO: "1"
+        run: packaging/build-flatpak.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak-unsigned-${{ needs.validate.outputs.commit }}
+          path: |
+            ${{ runner.temp }}/out/flatpak-unsigned-repo.tar
+            ${{ runner.temp }}/out/flatpak-build.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  # build-windows (milestone M2): needs validate, runs-on windows-2025, permissions contents: read, checkout of the
+  # validated commit with persist-credentials: false, uploads windows-dist-<commit>. To switch it on: add it to
+  # `verify.needs`, add `release-verify.sh --windows DIR`, and its files to RELEASE_FILES in packaging/release.conf.
+
+  verify:
+    needs: [validate, build-linux, build-flatpak]
+    if: ${{ !cancelled() && needs.validate.outputs.plan != 'noop' && needs.build-flatpak.result == 'success' && (needs.build-linux.result == 'success' || needs.validate.outputs.build_linux == 'false') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+      - name: Install ostree
+        run: sudo apt-get install -y --no-install-recommends ostree
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ needs.validate.outputs.build_linux == 'true' }}
+        with:
+          name: linux-dist-${{ needs.validate.outputs.commit }}
+          path: in/linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flatpak-unsigned-${{ needs.validate.outputs.commit }}
+          path: in/fp
+      - name: Verify the builds (Linux and Flatpak)
+        if: ${{ needs.validate.outputs.build_linux == 'true' }}
+        run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --linux in/linux --flatpak in/fp --out out
+      - name: Verify the build (Flatpak only)
+        if: ${{ needs.validate.outputs.build_linux != 'true' }}
+        run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --flatpak in/fp --out out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-${{ needs.validate.outputs.commit }}
+          path: out/release-manifest.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  # Reads the build output and gh-pages, makes the new commits (unsigned) and the summary. No secret, no
+  # environment, read-only token: this is where untrusted data is parsed, on a machine that never sees the key.
+  prepare-flatpak:
+    needs: [validate, verify]
+    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+      - name: Install flatpak and ostree
+        run: sudo apt-get install -y --no-install-recommends flatpak ostree
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flatpak-unsigned-${{ needs.validate.outputs.commit }}
+          path: in
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-${{ needs.validate.outputs.commit }}
+          path: in
+      # The published repository, without credentials: only a stable release is added to it.
+      - name: Fetch gh-pages
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
+        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages"
+      - name: Fetch gh-pages (first publication)
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
+        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
+      - name: Check the builds and gh-pages, prepare the repository
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
+        run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
+      - name: Check the builds and gh-pages, prepare the repository (first publication)
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
+        run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --bootstrap --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
+      - name: Check the builds, prepare the repository (release candidate, a repository of its own)
+        if: ${{ needs.validate.outputs.prerelease == 'true' }}
+        run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --fresh --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak-prepared-${{ needs.validate.outputs.commit }}
+          path: ${{ runner.temp }}/prepared/
+          if-no-files-found: error
+          retention-days: 14
+
+  sign-flatpak:
+    needs: [validate, verify, prepare-flatpak]
+    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' && needs.prepare-flatpak.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The key is a secret of this environment only: configure required reviewers and the deployment branches and
+    # tags there (docs/release.md).
+    environment: flatpak-signing
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+      - name: Install flatpak and ostree
+        run: sudo apt-get install -y --no-install-recommends flatpak ostree
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flatpak-prepared-${{ needs.validate.outputs.commit }}
+          path: prepared
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-${{ needs.validate.outputs.commit }}
+          path: in
+      # Without the key: unpack what prepare-flatpak made, check its refs and compare its content with the manifest
+      # of the verify job; this names the commits the next step may sign.
+      - name: Check the prepared repository
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --check-remote
+      # The only step with the key: it signs the named commits and the summary, in a keyring in memory.
+      - name: Sign
         env:
           FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
-        run: |
-          test -n "$FLATPAK_GPG_PRIVATE_KEY" || { echo "secret FLATPAK_GPG_PRIVATE_KEY is not set (see docs/development.md)"; exit 1; }
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          mkdir -m 700 "$GNUPGHOME"
-          printf '%s\n' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
-          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
-          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')" >> "$GITHUB_ENV"
-      - name: Build and sign the Flatpak
-        run: WORK="$RUNNER_TEMP/flatpak" OUT="$PWD" ./packaging/build-flatpak.sh
-      - name: Publish to GitHub Pages
+        run: packaging/flatpak-sign.sh --sign --tag "$TAG" --commit "$COMMIT" --work "$RUNNER_TEMP/signwork" --out "$RUNNER_TEMP/signres"
+      - name: Remove the keyring and the work folder
+        if: ${{ always() }}
+        run: packaging/flatpak-sign.sh --cleanup --work "$RUNNER_TEMP/signwork"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak-sign-result-${{ needs.validate.outputs.commit }}
+          path: ${{ runner.temp }}/signres/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Verifies the signed repository with the public key only and makes the bundle, on a machine that never held the key
+  # (the disk of the signing machine is not trusted to be clean: a deleted file is not wiped).
+  finish-flatpak:
+    needs: [validate, verify, sign-flatpak]
+    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' && needs.sign-flatpak.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+      - name: Install flatpak and ostree
+        run: sudo apt-get install -y --no-install-recommends flatpak ostree
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flatpak-sign-result-${{ needs.validate.outputs.commit }}
+          path: signres
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-${{ needs.validate.outputs.commit }}
+          path: in
+      - name: Verify the signed repository and make the bundle
+        run: packaging/flatpak-sign.sh --finish --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in signres --work "$RUNNER_TEMP/finwork" --out "$RUNNER_TEMP/signed"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak-signed-${{ needs.validate.outputs.commit }}
+          path: ${{ runner.temp }}/signed/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [validate, verify, finish-flatpak]
+    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' && needs.finish-flatpak.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # the only job that writes: the draft release, gh-pages (git push) and the release itself
+    # One publication at a time, none cancelled while running. GitHub keeps only ONE pending run per group: when a
+    # third run queues while one is publishing and another is waiting, the waiting one is cancelled (its release
+    # stays a draft, gh-pages untouched). Re-run it after the others have finished (docs/release.md).
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+      - name: Install ostree
+        run: sudo apt-get install -y --no-install-recommends ostree
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ needs.validate.outputs.build_linux == 'true' }}
+        with:
+          name: linux-dist-${{ needs.validate.outputs.commit }}
+          path: in
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-${{ needs.validate.outputs.commit }}
+          path: in
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flatpak-signed-${{ needs.validate.outputs.commit }}
+          path: in
+      - name: Publish
+        if: ${{ env.BOOTSTRAP != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # The container wrote as root.
-          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/flatpak" "$GNUPGHOME"
-          mv "$RUNNER_TEMP/flatpak/repo" "$RUNNER_TEMP/pages/repo"
-          ./packaging/publish-flatpak-repo.sh "$RUNNER_TEMP/pages" "$SITE_URL"
-          cd "$RUNNER_TEMP/pages"
-          rm -rf .git repo/tmp
-          git init --quiet --initial-branch=gh-pages
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add --all
-          git commit --quiet -m "Flatpak repository for ${TAG}"
-          git push --force "https://x-access-token:$GH_TOKEN@github.com/${GITHUB_REPOSITORY}.git" gh-pages
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          tag_name: ${{ env.TAG }}
-          files: PaletoModkit-x86_64.flatpak
+          GH_REPO: ${{ github.repository }}
+          PAGES_WAIT: "600"
+        run: packaging/release-publish.sh --mode "$MODE" --tag "$TAG" --commit "$COMMIT" --in in
+      - name: Publish (first publication, creates gh-pages)
+        if: ${{ env.BOOTSTRAP == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PAGES_WAIT: "600"
+        run: packaging/release-publish.sh --mode "$MODE" --tag "$TAG" --commit "$COMMIT" --in in --bootstrap

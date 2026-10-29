@@ -177,6 +177,8 @@ push_pages() {
     if [ -n "$PG_HEAD" ]; then
         git clone -q --depth 1 --branch gh-pages "$REMOTE" "$g" || die 5 "cannot clone gh-pages"
         [ "$(git -C "$g" rev-parse HEAD)" = "$PG_HEAD" ] || die 5 "gh-pages moved while publishing"
+        link=$(find "$g" -path "$g/.git" -prune -o -type l -print | head -n1)
+        [ -z "$link" ] || die 2 "gh-pages holds a symbolic link ($link)"
         cp "$g/paleto-modkit.flatpakrepo" "$g/paleto-modkit.flatpakref" "$TMP/old/" || die 5 "gh-pages has no .flatpakrepo or .flatpakref"
         git -C "$g" checkout -q --orphan paleto-new
         git -C "$g" rm -rqf .
@@ -187,7 +189,17 @@ push_pages() {
     extract_repo_tar "$IN/flatpak-signed-repo.tar" "$TMP/ex"
     mv "$TMP/ex/repo" "$g/repo"
     rm -rf "$g/repo/tmp"
-    "$PKG_DIR/publish-flatpak-repo.sh" "$g" "$SITE_URL" "$IN/flatpak-pubkey.gpg"
+    # The key in the files users added the remote with is the PUBLISHED one, byte for byte (a fresh export of the same
+    # key need not have the same bytes): exactly one key, the pinned one, or nothing is written. The first
+    # publication has no published file and uses the key of the signing keyring (verified by release-verify.sh).
+    keyfile=$IN/flatpak-pubkey.gpg
+    if [ -n "$PG_HEAD" ]; then
+        repo_key_file "$TMP/old/paleto-modkit.flatpakrepo" "$TMP/old/published.gpg"
+        [ "$(pubkey_fpr "$TMP/old/published.gpg")" = "$(conf_hex FLATPAK_KEY_FPR 40 | tr 'a-f' 'A-F')" ] ||
+            die 3 "the published key file does not hold exactly the pinned key"
+        keyfile=$TMP/old/published.gpg
+    fi
+    "$PKG_DIR/publish-flatpak-repo.sh" "$g" "$SITE_URL" "$keyfile"
     # The files users added the remote with: the identity does not change.
     if [ -n "$PG_HEAD" ]; then
         for f in paleto-modkit.flatpakrepo paleto-modkit.flatpakref; do

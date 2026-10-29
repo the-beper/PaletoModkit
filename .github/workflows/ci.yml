@@ -23,19 +23,30 @@ on:
       - ".gitignore"
       - ".claude/**"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_INCREMENTAL: 0
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
@@ -47,3 +58,21 @@ jobs:
           desktop-file-validate packaging/io.github.the_beper.PaletoModkit.desktop
           appstreamcli validate --no-net packaging/io.github.the_beper.PaletoModkit.metainfo.xml
           xmllint --noout packaging/io.github.the_beper.PaletoModkit.mime.xml
+
+  # The release scripts and their tests: no secret, no network but the loopback, nothing of GitHub.
+  release-tooling:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak ostree shellcheck
+      - name: shellcheck
+        run: shellcheck -s sh packaging/*.sh packaging/tests/*.sh packaging/tests/gh .claude/flatpak-bg.sh
+      - name: Simulate the release pipeline
+        run: sh packaging/tests/release-sim.sh
+      - name: Offline test of the signed Flatpak repository
+        run: sh packaging/tests/flatpak-repo-test.sh

@@ -4,8 +4,9 @@
 #   release-validate.sh --tag vX.Y.Z --mode build-only|release|publish-flatpak --event push|workflow_dispatch
 #       writes tag, version, commit, prerelease, submodule, build_linux, publish and plan (build|publish|noop)
 #       to $GITHUB_OUTPUT (stdout when it is not set)
-#   release-validate.sh --check-head SHA
-#       a later job: HEAD is that commit and the submodule is at the commit the tag records
+#   release-validate.sh --check-head SHA [--no-submodule]
+#       a later job: HEAD is that commit and the submodule is at the commit the tag records (--no-submodule: a
+#       job that does not check the submodule out, it only reads the scripts)
 # Environment: GITHUB_REPOSITORY, GITHUB_REF, GITHUB_SHA (the event), GH_TOKEN and GH_REPO (the gh calls),
 # BOOTSTRAP=true (the first publication, when gh-pages does not exist yet), REMOTE, RELEASE_CONF.
 # The rules (tag format, versions in the manifests, submodule, pins, no downgrade) are in docs/release.md.
@@ -14,13 +15,14 @@ set -eu
 # shellcheck source=/dev/null
 . "$(dirname "$0")/release-lib.sh"
 
-TAG="" MODE="" EVENT="" CHECK_HEAD=""
+TAG="" MODE="" EVENT="" CHECK_HEAD="" NO_SUBMODULE=0
 while [ $# -gt 0 ]; do
     case $1 in
         --tag) TAG=${2:?}; shift 2 ;;
         --mode) MODE=${2:?}; shift 2 ;;
         --event) EVENT=${2:?}; shift 2 ;;
         --check-head) CHECK_HEAD=${2:?}; shift 2 ;;
+        --no-submodule) NO_SUBMODULE=1; shift ;;
         *) die 1 "unknown argument $1" ;;
     esac
 done
@@ -32,6 +34,7 @@ GITLINK=$(git ls-tree HEAD third_party/codewalker | awk '$1 == "160000" { print 
 if [ -n "$CHECK_HEAD" ]; then
     [ "$HEAD_SHA" = "$CHECK_HEAD" ] || die 2 "the checkout is $HEAD_SHA, not the validated $CHECK_HEAD"
     [ -n "$GITLINK" ] || die 2 "no third_party/codewalker gitlink"
+    [ "$NO_SUBMODULE" = 0 ] || exit 0
     sub=$(git -C third_party/codewalker rev-parse HEAD 2> /dev/null) || die 2 "the submodule is not checked out"
     [ "$sub" = "$GITLINK" ] || die 2 "the submodule is at $sub, the tag records $GITLINK"
     exit 0
