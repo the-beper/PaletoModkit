@@ -88,6 +88,10 @@ pub(super) struct Journal {
     pub commit: bool,
     pub committed: bool,
     pub end: Option<End>,
+    /// Where the last whole record ends in the file (what follows is a torn record, to be overwritten).
+    pub good_len: u64,
+    /// That record has no newline yet: one is written before the next record.
+    pub open_line: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,7 +318,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Journal, ParseError> {
     let mut pieces: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
     // What follows the last newline is a line that was being written.
     let tail = pieces.pop().unwrap_or_default();
-    if !tail.is_empty() {
+    let open_tail = !tail.is_empty();
+    if open_tail {
         pieces.push(tail);
     }
     if let Some(first) = pieces.first()
@@ -325,8 +330,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Journal, ParseError> {
             return Err(ParseError::Version(version));
         }
     }
-    let mut j = Journal { txn: String::new(), pid: 0, started: 0, label: String::new(), roots: Vec::new(), ops: Vec::new(), commit: false, committed: false, end: None };
-    let (mut began, mut seen) = (false, 0);
+    let mut j = Journal { txn: String::new(), pid: 0, started: 0, label: String::new(), roots: Vec::new(), ops: Vec::new(), commit: false, committed: false, end: None, good_len: 0, open_line: false };
+    let (mut began, mut seen, mut pos) = (false, 0, 0u64);
     for (n, raw) in pieces.iter().enumerate() {
         let n1 = n + 1;
         let Some(f) = fields(raw) else {
@@ -337,6 +342,10 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Journal, ParseError> {
             return Err(corrupt(n1, "damaged (its checksum does not match)".into()));
         };
         seen += 1;
+        // Where the last whole record ends: what is written next goes there, over any torn bytes after it.
+        let last_open = open_tail && n + 1 == pieces.len();
+        pos += raw.len() as u64 + u64::from(!last_open);
+        (j.good_len, j.open_line) = (pos, last_open);
         if n == 0 {
             if f != ["paleto-txn", VERSION] {
                 return Err(corrupt(n1, "not a journal header".into()));

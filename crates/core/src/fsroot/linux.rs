@@ -269,11 +269,38 @@ impl Dir {
         self.open_dir(name)
     }
 
+    /// A folder only its owner may use (the fallback home of the lock and the journals, in the user's data
+    /// folder): made with mode 0700 if `create`, never entered through a link, and refused if somebody else
+    /// owns it or it is writable by others.
+    pub fn open_private(&self, name: &str, create: bool) -> io::Result<Dir> {
+        if create && self.kind(name)?.is_none() {
+            fault!(Mkdir);
+            let c = cstr(name)?;
+            match retry(|| cvt(unsafe { libc::mkdirat(self.fd(), c.as_ptr(), 0o700) })) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
+        }
+        let dir = self.open_dir(name)?;
+        let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+        retry(|| cvt(unsafe { libc::fstat(dir.fd(), &mut st) }))?;
+        if st.st_uid != unsafe { libc::geteuid() } || st.st_mode & 0o022 != 0 {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{name:?} is not a private folder of this user")));
+        }
+        Ok(dir)
+    }
+
     /// Opens (and with `create` makes) a file to lock: never through a link.
     pub fn open_lock(&self, name: &str, create: bool) -> io::Result<File> {
         fault!(Lock);
         let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | if create { libc::O_CREAT } else { 0 };
         Ok(File::from(self.openat(name, flags, 0o644)?))
+    }
+
+    /// Opens an existing file to write at given offsets (not append: `O_APPEND` would ignore them), never through a link.
+    pub fn open_rw(&self, name: &str) -> io::Result<File> {
+        fault!(Open);
+        Dir::regular(self.openat(name, libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY, 0)?)
     }
 
     /// Opens an existing file to append to, never through a link.
@@ -304,11 +331,20 @@ impl Dir {
         Ok(kind_of(st.st_mode) == Kind::File && (st.st_dev, st.st_ino) == (m.dev(), m.ino()))
     }
 
+    /// Whether `name` is still this very folder (not replaced, renamed or removed since it was opened).
+    pub fn names_dir(&self, name: &str, dir: &Dir) -> io::Result<bool> {
+        let Some(st) = self.stat_raw(name, false)? else { return Ok(false) };
+        Ok(kind_of(st.st_mode) == Kind::Dir && (st.st_dev, st.st_ino) == dir.identity()?)
+    }
+
     pub fn mkdir(&self, name: &str) -> io::Result<Dir> {
         fault!(Mkdir);
         let c = cstr(name)?;
         retry(|| cvt(unsafe { libc::mkdirat(self.fd(), c.as_ptr(), 0o755) }))?;
-        self.open_dir(name)
+        // The folder is ours, made just now: if it cannot be opened it is not left behind for nobody to own.
+        self.open_dir(name).inspect_err(|_| {
+            let _ = unsafe { libc::unlinkat(self.fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
+        })
     }
 
     /// Hard-links `from` as `to`; fails if `to` exists. A link at `from` is linked itself.

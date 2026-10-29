@@ -95,6 +95,21 @@ fn without_temps(mut s: BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
     s
 }
 
+/// A crash between making a folder and journaling that it was made leaves that empty folder behind: a rollback
+/// removes only a folder its journal says was made by it, since one without that record may be another program's.
+/// Everything else must be exactly as it should be.
+fn minus_leaked_dirs(mut now: BTreeMap<String, Entry>, want: &BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
+    loop {
+        let leaked: Vec<String> = now.iter().filter(|(k, e)| **e == Entry::Dir && !want.contains_key(*k) && !now.keys().any(|o| o.starts_with(&format!("{k}/")))).map(|(k, _)| k.clone()).collect();
+        if leaked.is_empty() {
+            return now;
+        }
+        for k in leaked {
+            now.remove(&k);
+        }
+    }
+}
+
 /// Fails (or crashes at) the k-th system call of the scenario, for every k until none is left to hit.
 /// Returns the number of points hit.
 fn exhaust(mode: Fault, caps: Caps, with_mods: bool) -> u64 {
@@ -119,7 +134,7 @@ fn exhaust(mode: Fault, caps: Caps, with_mods: bool) -> u64 {
             let (want, committed) = expected(&game, &old, &new);
             let report = recover(&game).unwrap();
             assert!(report.failures.is_empty(), "{what}: {report:?}");
-            assert_eq!(state(&game), want, "{what}: committed={committed}");
+            assert_eq!(minus_leaked_dirs(state(&game), &want), want, "{what}: committed={committed}");
             saw_committed |= committed;
             saw_error |= want == old;
         } else {
@@ -204,7 +219,7 @@ fn a_recovery_that_crashes_again_is_recovered_by_the_next_one() {
                 break;
             }
         }
-        assert_eq!(state(&game), want, "k={k}");
+        assert_eq!(minus_leaked_dirs(state(&game), &want), want, "k={k}");
         assert_clean(&game, &format!("k={k}"));
     }
 }
@@ -704,4 +719,308 @@ fn a_replaced_file_keeps_its_permission_bits_and_a_new_file_gets_0644() {
     replace_one(&roots, &rel("scripts/brand_new.asi"), "test", |f| f.write_all(b"x")).unwrap();
     assert_eq!(mode("scripts/brand_new.asi"), 0o644);
     assert_clean(&game, "modes");
+}
+
+#[test]
+fn a_replacement_never_carries_setuid_and_the_owner_can_always_read_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let mode = |p: &str| std::fs::metadata(game.root.join(p)).unwrap().permissions().mode() & 0o7777;
+    std::fs::set_permissions(game.root.join("scripts/orig.asi"), std::fs::Permissions::from_mode(0o4755)).unwrap();
+    // A file the owner may only write: the new file is opened again to be validated.
+    std::fs::set_permissions(game.root.join("scripts/old.asi"), std::fs::Permissions::from_mode(0o200)).unwrap();
+    let roots = game.roots().unwrap();
+    for path in ["scripts/orig.asi", "scripts/old.asi"] {
+        replace_one(&roots, &rel(path), "test", |f| f.write_all(b"new")).unwrap();
+        assert_eq!(std::fs::read(game.root.join(path)).unwrap(), b"new", "{path}");
+    }
+    assert_eq!((mode("scripts/orig.asi"), mode("scripts/old.asi")), (0o755, 0o600));
+    assert_clean(&game, "modes");
+}
+
+// ---- the security review of the engine ----
+
+/// A transaction with a replace in the game folder and one in the mods folder, stopped by a crash at the
+/// `at`-th record of the journal after staging (1 is `commit`, then one `did` per file, then `committed`).
+fn crashed_two_file_change(game: &Game, at: u64) {
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "two files").unwrap();
+    let mut d = roots.dest(&rel("scripts/orig.asi")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"new script")).unwrap();
+    let mut d = roots.dest(&rel("x64/a.rpf")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"new archive")).unwrap();
+    faults::arm_at(Point::Journal, at, Fault::Crash);
+    assert!(t.commit(Vec::new()).is_err());
+    assert!(faults::disarm());
+}
+
+#[test]
+fn a_journal_for_a_mods_folder_that_was_deleted_does_not_block_every_later_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    crashed_two_file_change(&game, 1);
+    assert_eq!(journals(&game).len(), 1);
+    std::fs::remove_dir_all(game.root.join("mods")).unwrap();
+    // Nothing was put in place yet: what is left of it in the game folder is undone, and the change goes on.
+    let roots = game.roots().unwrap();
+    let t = Txn::begin(&roots, "next").unwrap();
+    assert!(t.recovered().iter().any(|l| l.contains("undid")), "{:?}", t.recovered());
+    drop(t);
+    assert_clean(&game, "after the mods folder was deleted");
+    assert_eq!(std::fs::read(game.root.join("scripts/orig.asi")).unwrap(), b"orig");
+}
+
+#[test]
+fn an_operation_that_cannot_be_recovered_is_reported_and_can_be_abandoned_without_deleting_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    // Both files are in place; only `committed` is missing.
+    crashed_two_file_change(&game, 4);
+    std::fs::remove_dir_all(game.root.join("mods")).unwrap();
+    let roots = game.roots().unwrap();
+    // The game file is put back; the file in the mods folder, which is gone, cannot be, and that is said.
+    match Txn::begin(&roots, "next") {
+        Err(Error::RecoveryNeeded(m)) => assert!(m.contains("two files") && m.contains("gone"), "{m}"),
+        other => panic!("expected RecoveryNeeded, got {:?}", other.map(|_| ())),
+    }
+    assert!(matches!(Txn::begin(&roots, "again"), Err(Error::RecoveryNeeded(_))), "it stays stuck");
+    let p = pending(&game);
+    assert_eq!((p.len(), p[0].state.clone()), (1, PendingState::Stuck), "{p:?}");
+    let before = state(&game);
+    let report = abandon(&game, &p[0].journal).unwrap();
+    // Every file and backup the journal names is listed, and none was touched.
+    let said = report.log.join("\n");
+    for f in &p[0].files {
+        assert!(said.contains(&f.display().to_string()), "{} is not listed in {said}", f.display());
+    }
+    assert_eq!(state(&game), before);
+    assert!(journals(&game).iter().all(|n| n == "abandoned"), "{:?}", journals(&game));
+    let kept: Vec<String> = std::fs::read_dir(game.root.join(".paleto/journal/abandoned")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(kept, [p[0].journal.clone()]);
+    assert!(pending(&game).is_empty());
+    drop(Txn::begin(&roots, "now it works").unwrap());
+    // What is not a journal's name is refused, and a name that is not there is not found.
+    assert!(abandon(&game, "../x").is_err() && abandon(&game, "0123456789abcdef").is_err());
+}
+
+#[test]
+fn the_fallback_home_holds_the_lock_and_journals_of_a_game_folder_that_cannot_be_written() {
+    if is_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let data = dir.path().join("data");
+    let roots_of = || {
+        let mut roots = game.roots().unwrap();
+        roots.set_data_dir(data.clone());
+        roots
+    };
+    let ro = ReadOnly::new(&game.root);
+    // The mods folder (here inside the read-only game folder, but a folder of its own) is still written.
+    let roots = roots_of();
+    let mut t = Txn::begin(&roots, "mods on another drive").unwrap();
+    let mut d = roots.dest(&rel("x64/a.rpf")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"edited")).unwrap();
+    t.commit(Vec::new()).unwrap();
+    assert_eq!(std::fs::read(game.root.join("mods/x64/a.rpf")).unwrap(), b"edited");
+    assert!(!game.root.join(".paleto").exists(), "nothing was made in the game folder");
+    // A crash leaves its journal there, and recovery and `pending` look there.
+    let mut t = Txn::begin(&roots, "interrupted").unwrap();
+    let mut d = roots.dest(&rel("x64/a.rpf")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"never")).unwrap();
+    faults::arm_at(Point::Rename, 1, Fault::Crash);
+    assert!(t.commit(Vec::new()).is_err());
+    assert!(faults::disarm());
+    drop(roots);
+    let roots = roots_of();
+    let p = pending_in(&roots);
+    assert_eq!((p.len(), p[0].state.clone(), p[0].label.as_str()), (1, PendingState::Interrupted, "interrupted"), "{p:?}");
+    assert_eq!(leftovers_in(&roots), Vec::<PathBuf>::new(), "the names a journal there accounts for are not leftovers");
+    let report = recover_in(&roots).unwrap();
+    assert!(report.failures.is_empty() && report.rolled_back == 1, "{report:?}");
+    assert_eq!(std::fs::read(game.root.join("mods/x64/a.rpf")).unwrap(), b"edited");
+    assert!(pending_in(&roots).is_empty());
+    assert_eq!(leftovers_in(&roots), Vec::<PathBuf>::new());
+    drop(ro);
+}
+
+#[test]
+fn a_folder_that_somebody_else_made_is_never_removed_by_a_rollback_even_if_the_crash_came_before_kept() {
+    for k in 1.. {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), true);
+        let roots = game.roots().unwrap();
+        let mut t = Txn::begin(&roots, "foreign").unwrap();
+        let mut d = roots.dest(&rel("plugins/x.ini")).unwrap();
+        // Another program makes the folder after the destination was resolved and before this operation makes it.
+        std::fs::create_dir(game.root.join("plugins")).unwrap();
+        faults::arm_at(Point::Journal, k, Fault::Crash);
+        let r = t.stage(&mut d, |f| f.write_all(b"x"));
+        if !faults::disarm() {
+            r.unwrap();
+            assert!(k > 3, "the crash was tried before `kept`, at the `kept` record and after it");
+            return;
+        }
+        drop(t);
+        let report = recover(&game).unwrap();
+        assert!(report.failures.is_empty(), "k={k}: {report:?}");
+        assert!(game.root.join("plugins").is_dir(), "k={k}: the folder of the other program was removed");
+        assert!(!game.root.join("plugins/x.ini").exists(), "k={k}");
+        assert_clean(&game, &format!("k={k}"));
+    }
+}
+
+#[test]
+fn a_created_file_changed_after_it_was_put_in_place_is_a_failure_not_silence() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "create then fail").unwrap();
+    let mut d = roots.dest(&rel("scripts/made.cfg")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"as made")).unwrap();
+    let mut d = roots.dest(&rel("scripts/orig.asi")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"replaced")).unwrap();
+    // The replace is the second rename and fails; before the rollback begins, another program rewrites the created file.
+    faults::arm_at(Point::Rename, 2, Fault::Fail(io::ErrorKind::Other));
+    let made = game.root.join("scripts/made.cfg");
+    ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || std::fs::write(&made, b"somebody else wrote a longer text").unwrap())));
+    let e = t.commit(Vec::new()).unwrap_err();
+    assert!(faults::disarm());
+    let Error::Txn(f) = &e else { panic!("{e:?}") };
+    assert!(!f.undone && f.failures.iter().any(|m| m.contains("made.cfg") && m.contains("changed by something else")), "{f:?}");
+    assert!(!e.to_string().contains("nothing was installed"), "{e}");
+    assert_eq!(std::fs::read(game.root.join("scripts/made.cfg")).unwrap(), b"somebody else wrote a longer text", "left as it is");
+    assert_eq!(std::fs::read(game.root.join("scripts/orig.asi")).unwrap(), b"orig", "the rest was undone");
+    assert_eq!(journals(&game).len(), 1, "the journal is kept");
+}
+
+#[test]
+fn recovery_does_not_touch_what_the_policy_forbids_whatever_a_journal_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let roots = game.roots().unwrap();
+    let exe = Edition::Enhanced.exe_name();
+    let id = "0123456789abcdef";
+    // What a planted journal could say: delete an archive of the game and its program, with matching "backups" next to them.
+    let archive = roots.game.dir.open_dir("x64").unwrap().stat("a.rpf").unwrap();
+    let program = roots.game.dir.stat(exe).unwrap();
+    std::fs::hard_link(game.root.join("x64/a.rpf"), game.root.join(format!("x64/.paleto-{id}-0.old"))).unwrap();
+    std::fs::hard_link(game.root.join(exe), game.root.join(format!(".paleto-{id}-1.old"))).unwrap();
+    let op = |i, dir: Vec<String>, name: &str, expect| journal::op(i, &journal::JOp { kind: OpKind::Delete, anchor: RootKind::Game, dir, name: name.into(), expect, mode: JMode::Move, made: None, kept: false, did: false });
+    let text = [
+        journal::header(),
+        journal::begin(id, 1, 1, "planted"),
+        journal::root(&journal::RootRec { kind: RootKind::Game, fp: roots.game.dir.fingerprint().unwrap(), shown: roots.game.shown.display().to_string() }),
+        op(0, vec!["x64".into()], "a.rpf", archive),
+        op(1, Vec::new(), exe, program),
+        journal::commit(),
+    ]
+    .concat();
+    std::fs::create_dir_all(game.root.join(".paleto/journal")).unwrap();
+    std::fs::write(game.root.join(".paleto/journal").join(format!("{id}.log")), text).unwrap();
+    let before = state(&game);
+    let report = recover(&game).unwrap();
+    assert!(report.failures.len() == 2 && report.failures.iter().all(|f| f.contains("not touched")), "{report:?}");
+    assert!(report.failures.iter().any(|f| f.contains("programs")), "{report:?}");
+    assert_eq!(state(&game), before, "not a name was removed, renamed or created");
+    // It stays, stuck, for a person to look at, and blocks other changes until it is abandoned.
+    assert!(matches!(Txn::begin(&roots, "x"), Err(Error::RecoveryNeeded(_))));
+    abandon(&game, id).unwrap();
+    drop(Txn::begin(&roots, "x").unwrap());
+}
+
+/// A new top-level foo.dll, renamed into place, and then a crash before `did` is journaled.
+fn crashed_after_a_new_dll_was_put_in_place(game: &Game) {
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "new dll").unwrap();
+    let mut d = roots.dest(&rel("foo.dll")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"our new library")).unwrap();
+    // The first record of the commit is `commit`, the second `did`.
+    faults::arm_at(Point::Journal, 2, Fault::Crash);
+    assert!(t.commit(Vec::new()).is_err());
+    assert!(faults::disarm());
+    assert_eq!(std::fs::read(game.root.join("foo.dll")).unwrap(), b"our new library");
+}
+
+#[test]
+fn the_rule_for_the_games_own_dll_and_txt_files_does_not_stop_recovery_removing_a_file_it_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let old = state(&game);
+    crashed_after_a_new_dll_was_put_in_place(&game);
+    let report = recover(&game).unwrap();
+    assert!(report.failures.is_empty() && report.rolled_back == 1, "{report:?}");
+    assert_eq!(state(&game), old, "our file is removed and the originals were never touched");
+    assert_clean(&game, "recovered");
+    // A foo.dll that is not the file this operation made is somebody else's: reported, never touched.
+    crashed_after_a_new_dll_was_put_in_place(&game);
+    std::fs::write(game.root.join("foo.dll"), b"a library of somebody else, longer than ours").unwrap();
+    let before = state(&game);
+    let report = recover(&game).unwrap();
+    assert!(report.failures.len() == 1 && report.failures[0].contains("not touched") && report.failures[0].contains("foo.dll"), "{report:?}");
+    assert_eq!(state(&game), before);
+    assert_eq!(std::fs::read(game.root.join("foo.dll")).unwrap(), b"a library of somebody else, longer than ours");
+    assert_eq!(std::fs::read(game.root.join("x64/a.rpf")).unwrap(), b"the original archive");
+}
+
+#[test]
+fn the_end_record_goes_at_the_end_of_the_last_whole_record_not_after_torn_bytes() {
+    DAMAGE.with(|d| d.set(1));
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "torn").unwrap();
+    let mut d = roots.dest(&rel("scripts/orig.asi")).unwrap();
+    t.stage(&mut d, |f| f.write_all(b"replaced content")).unwrap();
+    let d = roots.dest(&rel("scripts/old.asi")).unwrap();
+    t.delete(&d).unwrap();
+    // What a failed append whose cut-off also failed leaves behind the known end of the journal.
+    let path = game.root.join(".paleto/journal").join(&journals(&game)[0]);
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(b"half a record that was never cut off ~00000000\nand more").unwrap();
+    drop(f);
+    faults::arm_at(Point::Rename, 2, Fault::Fail(io::ErrorKind::Other));
+    let scripts = game.root.join("scripts");
+    ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || damage(&scripts))));
+    let e = t.commit(vec!["log".into()]).unwrap_err();
+    assert!(faults::disarm());
+    assert!(matches!(&e, Error::Txn(f) if !f.undone), "{e:?}");
+    let read = || journal::parse(&std::fs::read(&path).unwrap()).unwrap_or_else(|e| panic!("the journal is damaged: {e:?}"));
+    assert_eq!(read().state(), journal::State::Stuck);
+    // The same for an earlier run's journal that ends in a torn record, tried again twice.
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(b"torn tail without a newline").unwrap();
+    drop(f);
+    for _ in 0..2 {
+        let report = recover(&game).unwrap();
+        assert!(!report.failures.is_empty() && !report.failures.iter().any(|f| f.contains("damaged")), "{report:?}");
+        assert_eq!(read().state(), journal::State::Stuck);
+    }
+}
+
+#[test]
+fn a_transaction_stops_before_it_commits_if_its_lock_or_journal_was_removed() {
+    let (old, _) = references(true);
+    for what in ["lock", "journal", "paleto folder"] {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), true);
+        let roots = game.roots().unwrap();
+        let mut t = Txn::begin(&roots, what).unwrap();
+        let mut d = roots.dest(&rel("scripts/orig.asi")).unwrap();
+        t.stage(&mut d, |f| f.write_all(b"replaced")).unwrap();
+        let mut d = roots.dest(&rel("x64/a.rpf")).unwrap();
+        t.stage(&mut d, |f| f.write_all(b"new archive")).unwrap();
+        let paleto = game.root.join(".paleto");
+        match what {
+            "lock" => std::fs::remove_file(paleto.join("lock")).unwrap(),
+            "journal" => std::fs::remove_file(paleto.join("journal").join(&journals(&game)[0])).unwrap(),
+            _ => std::fs::rename(&paleto, dir.path().join("moved")).unwrap(),
+        }
+        let e = t.commit(Vec::new()).unwrap_err();
+        assert!(e.to_string().contains("removed or replaced"), "{what}: {e}");
+        assert_eq!(state(&game), old, "{what}: nothing was installed");
+        assert_eq!(leftovers(&game), Vec::<PathBuf>::new(), "{what}");
+    }
 }

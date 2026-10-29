@@ -33,8 +33,8 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::io::{self, Read};
+use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -230,7 +230,7 @@ fn dest_key(op: &JOp) -> String {
 }
 
 fn path_of(roots: &GameRoots, op: &JOp, name: &str) -> PathBuf {
-    let base = roots.anchor_root(op.anchor).map_or_else(|_| roots.game.shown.clone(), |r| r.shown.clone());
+    let base = roots.anchor_root(op.anchor).map_or_else(|_| if op.anchor == RootKind::Mods { roots.game.shown.join("mods") } else { roots.game.shown.clone() }, |r| r.shown.clone());
     base.join(op.dir.iter().collect::<PathBuf>()).join(name)
 }
 
@@ -245,16 +245,39 @@ struct Rolled {
 /// Undoes `ops` in reverse by looking at what is on disk. `committing`: the
 /// journal says `commit` was reached, so a target may already be replaced;
 /// before that only temporary names, backup links and new folders exist.
-fn rollback_ops(roots: &GameRoots, txn: &str, ops: &[JOp], committing: bool) -> Rolled {
+/// `refused` (recovery only, else empty) holds a reason for each operation the policy refuses: it is reported, not touched.
+fn rollback_ops(roots: &GameRoots, txn: &str, ops: &[JOp], committing: bool, refused: &[Option<String>]) -> Rolled {
     let mut r = Rolled::default();
     for (i, op) in ops.iter().enumerate().rev() {
         if dead() {
             r.failures.push("interrupted again while undoing".into());
             break;
         }
+        if let Some(Some(why)) = refused.get(i) {
+            r.failures.push(why.clone());
+            continue;
+        }
         rollback_op(roots, txn, i, op, committing, &mut r);
     }
     r
+}
+
+/// The reason, for each operation of a journal, that the write policy refuses it now (recovery must not
+/// touch what a planted or damaged journal points at: originals, programs, the tool's own folders).
+fn vet_ops(roots: &GameRoots, txn: &str, ops: &[JOp]) -> Vec<Option<String>> {
+    let mods_made = ops.iter().any(|o| o.kind == OpKind::Mkdir && o.anchor == RootKind::Game && o.dir.is_empty() && o.name.eq_ignore_ascii_case("mods"));
+    ops.iter()
+        .enumerate()
+        .map(|(i, op)| {
+            let replaces = matches!(op.kind, OpKind::Replace | OpKind::Delete);
+            // A file this operation staged and put in place is not one of the game's own, whatever its name: it may be undone.
+            let ours = matches!(op.kind, OpKind::Create | OpKind::Replace) && roots.open_anchor(op.anchor, &op.dir).and_then(|d| Ok(d.stat(&op.name)?)).is_ok_and(|seen| seen.is_some_and(|s| is_staged(&s, op)));
+            roots.check_journal_op(op.anchor, &op.dir, &op.name, op.kind == OpKind::Mkdir, replaces, ours, mods_made).err().map(|e| {
+                let backup = if replaces { format!(" (backup: {})", path_of(roots, op, &backup_name(txn, i)).display()) } else { String::new() };
+                format!("{}: not touched, the journal names it but it may not be changed: {e}{backup}", path_of(roots, op, &op.name).display())
+            })
+        })
+        .collect()
 }
 
 fn rollback_op(roots: &GameRoots, txn: &str, i: usize, op: &JOp, committing: bool, r: &mut Rolled) {
@@ -282,15 +305,21 @@ fn rollback_op(roots: &GameRoots, txn: &str, i: usize, op: &JOp, committing: boo
         if op.kept {
             return;
         }
+        // Only a folder this operation recorded as made is removed: one without a `made` record may be
+        // another program's (it appeared where this operation meant to make it), even if `kept` was never written.
+        let Some(made) = &op.made else {
+            if matches!(dir.kind(&op.name), Ok(Some(_))) {
+                r.notes.push(format!("{}: left in place, it is not recorded as made by this operation", shown(&op.name)));
+            }
+            return;
+        };
         match dir.kind(&op.name) {
             Ok(None) => {}
             Ok(Some(Kind::Dir)) => {
-                if let Some(made) = &op.made {
-                    match dir.open_dir(&op.name).and_then(|d| d.fingerprint()) {
-                        Ok(fp) if fp.same_file(made) => {}
-                        Ok(_) => return r.notes.push(format!("{}: left alone, it is not the folder this operation made", shown(&op.name))),
-                        Err(e) => return r.failures.push(format!("{}: cannot be looked at: {e}", shown(&op.name))),
-                    }
+                match dir.open_dir(&op.name).and_then(|d| d.fingerprint()) {
+                    Ok(fp) if fp.same_file(made) => {}
+                    Ok(_) => return r.notes.push(format!("{}: left alone, it is not the folder this operation made", shown(&op.name))),
+                    Err(e) => return r.failures.push(format!("{}: cannot be looked at: {e}", shown(&op.name))),
                 }
                 match dir.rmdir(&op.name) {
                     Ok(()) => sync(),
@@ -315,8 +344,14 @@ fn rollback_op(roots: &GameRoots, txn: &str, i: usize, op: &JOp, committing: boo
     let Some(target) = stat(&op.name, r) else { return };
     match op.kind {
         OpKind::Create => {
-            if committing && target.as_ref().is_some_and(|t| is_staged(t, op)) {
-                clean &= unlink(&op.name, r);
+            if committing && let Some(t) = &target {
+                if is_staged(t, op) {
+                    clean &= unlink(&op.name, r);
+                } else if op.did {
+                    // It was put in place and is not what was put there: not ours to remove, and not as it was before.
+                    r.failures.push(format!("{}: was created by this operation and changed by something else since; left as it is", shown(&op.name)));
+                    clean = false;
+                }
             }
             if clean {
                 sync();
@@ -383,14 +418,21 @@ fn gone(op: &JOp, committing: bool, name: &str, r: &mut Rolled) {
     }
 }
 
-/// Ends a rollback in the journal: a clean one removes the journal, otherwise
-/// it is marked stuck and kept. Writing to it is best effort: what it says is
-/// only what was hoped, recovery looks at the files.
-fn finish_rollback(jdir: &Dir, jname: &str, rolled: &Rolled) {
-    let end = if rolled.failures.is_empty() { End::RolledBack } else { End::Stuck(rolled.failures.join("; ")) };
-    if let Ok(mut f) = jdir.open_append(jname) {
-        let _ = f.write_all(journal::end(&end).as_bytes()).and_then(|()| f.sync_data());
+/// Writes `end` into a journal at `at` (where its last whole record ends), through the handle given, so that
+/// bytes of a torn record before that point cannot be left in front of it: whatever follows is overwritten and cut off.
+/// Best effort: what the journal says is only what was hoped, recovery looks at the files.
+fn write_end(file: &File, at: u64, open_line: bool, end: &End) {
+    let line = format!("{}{}", if open_line { "\n" } else { "" }, journal::end(end));
+    if append(file, at, &line).is_ok() {
+        let _ = file.set_len(at + line.len() as u64);
     }
+}
+
+/// Ends a rollback in the journal: a clean one removes the journal, otherwise
+/// it is marked stuck and kept. `write` puts the `end` record in at the right place.
+fn finish_rollback(jdir: &Dir, jname: &str, rolled: &Rolled, write: impl FnOnce(&End)) {
+    let end = if rolled.failures.is_empty() { End::RolledBack } else { End::Stuck(rolled.failures.join("; ")) };
+    write(&end);
     if rolled.failures.is_empty() {
         let _ = jdir.unlink(jname);
         let _ = jdir.sync();
@@ -411,20 +453,24 @@ fn scan(jdir: &Dir) -> Result<Vec<Scanned>, Error> {
     names.sort();
     let mut out = Vec::new();
     for name in names {
-        let parsed = match jdir.open_read(&name) {
-            Ok(file) => {
-                let mut bytes = Vec::new();
-                match file.take(journal::MAX_SIZE + 1).read_to_end(&mut bytes) {
-                    Ok(_) if bytes.len() as u64 > journal::MAX_SIZE => Err(ParseError::Corrupt("larger than any journal".into())),
-                    Ok(_) => journal::parse(&bytes),
-                    Err(e) => Err(ParseError::Corrupt(format!("cannot be read: {e}"))),
-                }
-            }
-            Err(e) => Err(ParseError::Corrupt(format!("cannot be opened: {e}"))),
-        };
+        let parsed = scan_one(jdir, &name);
         out.push((name, parsed));
     }
     Ok(out)
+}
+
+fn scan_one(jdir: &Dir, name: &str) -> Result<Journal, ParseError> {
+    match jdir.open_read(name) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            match file.take(journal::MAX_SIZE + 1).read_to_end(&mut bytes) {
+                Ok(_) if bytes.len() as u64 > journal::MAX_SIZE => Err(ParseError::Corrupt("larger than any journal".into())),
+                Ok(_) => journal::parse(&bytes),
+                Err(e) => Err(ParseError::Corrupt(format!("cannot be read: {e}"))),
+            }
+        }
+        Err(e) => Err(ParseError::Corrupt(format!("cannot be opened: {e}"))),
+    }
 }
 
 fn files_of(roots: &GameRoots, j: &Journal) -> Vec<PathBuf> {
@@ -445,6 +491,11 @@ fn files_of(roots: &GameRoots, j: &Journal) -> Vec<PathBuf> {
 /// Whether the roots this journal names are the ones open now.
 fn check_roots(roots: &GameRoots, j: &Journal) -> Result<(), String> {
     for rec in &j.roots {
+        // A mods folder that is gone has taken what the operation did there with it: what was in it is reported by the
+        // rollback (`gone`), not an obstacle to recovering the rest.
+        if rec.kind == RootKind::Mods && roots.mods_missing() {
+            continue;
+        }
         let now = roots.anchor_root(rec.kind).map_err(|e| format!("the {} folder it used cannot be used now: {e}", journal_root(rec.kind)))?;
         if !now.id.same_file(&rec.fp) && now.shown.display().to_string() != rec.shown {
             return Err(format!("the {} folder is not the one it used ({})", journal_root(rec.kind), rec.shown));
@@ -484,6 +535,13 @@ fn recover_all(roots: &GameRoots, jdir: &Dir, retry_stuck: bool) -> Result<Repor
     Ok(rep)
 }
 
+/// Writes `end` into the journal of an earlier run, over whatever torn bytes follow its last whole record.
+fn write_end_of(jdir: &Dir, name: &str, j: &Journal, end: &End) {
+    if let Ok(f) = jdir.open_rw(name) {
+        write_end(&f, j.good_len, j.open_line, end);
+    }
+}
+
 fn recover_journal(roots: &GameRoots, jdir: &Dir, name: &str, j: &Journal, retry_stuck: bool, rep: &mut Report) {
     let state = j.state();
     if state == State::Done {
@@ -499,10 +557,15 @@ fn recover_journal(roots: &GameRoots, jdir: &Dir, name: &str, j: &Journal, retry
         rep.failures.push(format!("the operation \"{}\" cannot be recovered: {why}; files: {}", j.label, files()));
         return;
     }
+    let refused = vet_ops(roots, &j.txn, &j.ops);
     if state == State::Committed {
-        let mut left = Vec::new();
+        let (mut left, mut refused_left) = (Vec::new(), Vec::new());
         for (i, op) in j.ops.iter().enumerate() {
             if !matches!(op.kind, OpKind::Replace | OpKind::Delete) {
+                continue;
+            }
+            if let Some(Some(why)) = refused.get(i) {
+                refused_left.push(format!("operation \"{}\": {why}", j.label));
                 continue;
             }
             let bak = backup_name(&j.txn, i);
@@ -515,25 +578,29 @@ fn recover_journal(roots: &GameRoots, jdir: &Dir, name: &str, j: &Journal, retry
                     Err(e) => left.push(format!("{}: {e}", path_of(roots, op, &bak).display())),
                 },
                 Err(Error::Io(e)) if is_missing(&e) => {}
+                // The mods folder is gone, and its backups with it.
+                Err(Error::UnsafePath { .. }) if op.anchor == RootKind::Mods && roots.mods_missing() => {}
                 Err(e) => left.push(format!("{}: {e}", path_of(roots, op, &bak).display())),
             }
+        }
+        if !refused_left.is_empty() {
+            rep.failures.extend(refused_left);
+            return;
         }
         if !left.is_empty() {
             // The operation is complete; only its backups could not be removed. The next run tries again.
             rep.log.push(format!("the operation \"{}\" had finished; these backups could not be removed yet: {}", j.label, left.join("; ")));
             return;
         }
-        if let Ok(mut f) = jdir.open_append(name) {
-            let _ = f.write_all(journal::end(&End::Ok).as_bytes()).and_then(|()| f.sync_data());
-        }
+        write_end_of(jdir, name, j, &End::Ok);
         let _ = jdir.unlink(name);
         let _ = jdir.sync();
         rep.finished += 1;
         rep.log.push(format!("finished the operation \"{}\" that was interrupted after its files were in place (backups removed)", j.label));
         return;
     }
-    let rolled = rollback_ops(roots, &j.txn, &j.ops, j.commit);
-    finish_rollback(jdir, name, &rolled);
+    let rolled = rollback_ops(roots, &j.txn, &j.ops, j.commit, &refused);
+    finish_rollback(jdir, name, &rolled, |end| write_end_of(jdir, name, j, end));
     rep.log.extend(rolled.notes);
     if rolled.failures.is_empty() {
         rep.rolled_back += 1;
@@ -543,6 +610,19 @@ fn recover_journal(roots: &GameRoots, jdir: &Dir, name: &str, j: &Journal, retry
     }
 }
 
+/// [`recover_all`] on the journals of both places (`.paleto/journal` of the game and the fallback in the data folder).
+fn recover_every(roots: &GameRoots, retry_stuck: bool) -> Result<Report, Error> {
+    let mut rep = Report::default();
+    for jdir in roots.journal_dirs()? {
+        let one = recover_all(roots, &jdir, retry_stuck)?;
+        rep.finished += one.finished;
+        rep.rolled_back += one.rolled_back;
+        rep.log.extend(one.log);
+        rep.failures.extend(one.failures);
+    }
+    Ok(rep)
+}
+
 fn recovery_needed(failures: &[String]) -> Error {
     Error::RecoveryNeeded(format!("an earlier operation was interrupted and could not be undone, so nothing else is changed until it is: {}", failures.join("; ")))
 }
@@ -550,12 +630,24 @@ fn recovery_needed(failures: &[String]) -> Error {
 /// Journals left by earlier runs, not counting one that is running now in another program.
 pub fn pending(g: &Game) -> Vec<Pending> {
     let Ok(roots) = g.roots() else { return Vec::new() };
+    pending_in(&roots)
+}
+
+fn pending_in(roots: &GameRoots) -> Vec<Pending> {
     if roots.lock_is_held_elsewhere() {
         return Vec::new();
     }
-    let Ok(Some(jdir)) = roots.tool_folder(&["journal"], false) else { return Vec::new() };
-    let Ok(found) = scan(&jdir) else { return Vec::new() };
-    let mut out = crate::snapshots::pending_restores(&roots, &jdir);
+    let Ok(dirs) = roots.journal_dirs() else { return Vec::new() };
+    let mut out = Vec::new();
+    for jdir in dirs {
+        let Ok(found) = scan(&jdir) else { continue };
+        out.extend(crate::snapshots::pending_restores(roots, &jdir));
+        pending_of(roots, found, &mut out);
+    }
+    out
+}
+
+fn pending_of(roots: &GameRoots, found: Vec<Scanned>, out: &mut Vec<Pending>) {
     for (name, parsed) in found {
         match parsed {
             Ok(j) if j.state() == State::Done => {}
@@ -565,24 +657,83 @@ pub fn pending(g: &Game) -> Vec<Pending> {
                     State::Stuck => PendingState::Stuck,
                     _ => PendingState::Interrupted,
                 };
-                out.push(Pending { files: files_of(&roots, &j), journal: name, label: j.label, state });
+                out.push(Pending { files: files_of(roots, &j), journal: name, label: j.label, state });
             }
             Err(ParseError::Empty) => {}
             Err(ParseError::Version(v)) => out.push(Pending { journal: name, label: String::new(), state: PendingState::Unreadable(format!("written by a newer version (format {v})")), files: Vec::new() }),
             Err(ParseError::Corrupt(why)) => out.push(Pending { journal: name, label: String::new(), state: PendingState::Unreadable(why), files: Vec::new() }),
         }
     }
-    out
 }
 
 /// Finishes or undoes what earlier runs left, retrying rollbacks that were stuck.
 /// `Err` only if the game is busy or the journals cannot be listed; what could
 /// not be recovered is in [`Report::failures`].
 pub fn recover(g: &Game) -> Result<Report, Error> {
-    let roots = g.roots()?;
+    recover_in(&g.roots()?)
+}
+
+fn recover_in(roots: &GameRoots) -> Result<Report, Error> {
     let _lock = roots.lock("recovering an interrupted operation")?;
-    let Some(jdir) = roots.tool_folder(&["journal"], false)? else { return Ok(Report::default()) };
-    recover_all(&roots, &jdir, true)
+    recover_every(roots, true)
+}
+
+/// The user's explicit decision to stop a journal from blocking: it is moved to `journal/abandoned/` and
+/// ignored from then on. Nothing it names is touched: no backup, staged file or new file is deleted or
+/// put back, so the report lists every one of them for the user to look at (and `leftovers` lists the
+/// `.paleto-*` names). For a journal that recovery cannot finish, such as one of an operation in a mods
+/// folder that is gone. `id` is the name `pending` gives, with or without `.log`. [`Error::Busy`] while a change runs.
+pub fn abandon(g: &Game, id: &str) -> Result<Report, Error> {
+    abandon_in(&g.roots()?, id)
+}
+
+fn abandon_in(roots: &GameRoots, id: &str) -> Result<Report, Error> {
+    let id = id.strip_suffix(".log").unwrap_or(id);
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, format!("{id:?} is not the name of a journal"))));
+    }
+    let name = format!("{id}.log");
+    let _lock = roots.lock("abandoning an interrupted operation")?;
+    let mut found = None;
+    for jdir in roots.journal_dirs()? {
+        if jdir.kind(&name)? == Some(Kind::File) {
+            found = Some(jdir);
+            break;
+        }
+    }
+    let Some(jdir) = found else { return Err(Error::Io(io::Error::new(io::ErrorKind::NotFound, format!("there is no journal {name}")))) };
+    let (label, files) = match scan_one(&jdir, &name) {
+        Ok(j) => {
+            let mut files = files_of(roots, &j);
+            for (i, op) in j.ops.iter().enumerate() {
+                if matches!(op.kind, OpKind::Create | OpKind::Replace) {
+                    files.push(path_of(roots, op, &staged_name(&j.txn, i)));
+                }
+            }
+            (j.label.clone(), files)
+        }
+        Err(why) => (String::new(), vec![PathBuf::from(format!("(the journal cannot be read: {why:?}; its `.paleto-*` files are listed by `leftovers`)"))]),
+    };
+    let abandoned = jdir.open_or_make_dir("abandoned")?;
+    let mut moved = None;
+    for n in 0..100 {
+        let to = if n == 0 { name.clone() } else { format!("{name}.{n}") };
+        match jdir.rename_into(&name, &abandoned, &to) {
+            Ok(()) => {
+                moved = Some(to);
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let Some(moved) = moved else { return Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, "no free name in the folder of abandoned journals"))) };
+    let _ = abandoned.sync();
+    let _ = jdir.sync();
+    let mut rep = Report::default();
+    rep.log.push(format!("abandoned the operation \"{label}\" (journal {name}, moved to the folder `abandoned` as {moved}): nothing it names was touched or deleted, and it blocks nothing now"));
+    rep.log.extend(files.iter().map(|f| format!("left as it is: {}", f.display())));
+    Ok(rep)
 }
 
 /// `.paleto-*` names in the game folder (the mods folder included) that no journal
@@ -590,12 +741,16 @@ pub fn recover(g: &Game) -> Result<Report, Error> {
 /// (`.paleto-save-*`). Only listed, never deleted: a `.old` may be the only copy of something.
 pub fn leftovers(g: &Game) -> Vec<PathBuf> {
     let Ok(roots) = g.roots() else { return Vec::new() };
+    leftovers_in(&roots)
+}
+
+fn leftovers_in(roots: &GameRoots) -> Vec<PathBuf> {
     let mut ids = Vec::new();
-    if let Ok(Some(jdir)) = roots.tool_folder(&["journal"], false)
-        && let Ok(found) = scan(&jdir)
-    {
-        ids.extend(found.into_iter().filter_map(|(_, j)| j.ok().map(|j| format!(".paleto-{}-", j.txn))));
-        ids.extend(crate::snapshots::restore_ids(&jdir).into_iter().map(|id| format!(".paleto-{id}-")));
+    for jdir in roots.journal_dirs().unwrap_or_default() {
+        if let Ok(found) = scan(&jdir) {
+            ids.extend(found.into_iter().filter_map(|(_, j)| j.ok().map(|j| format!(".paleto-{}-", j.txn))));
+            ids.extend(crate::snapshots::restore_ids(&jdir).into_iter().map(|id| format!(".paleto-{id}-")));
+        }
     }
     let mut out = Vec::new();
     let mut stack = vec![(roots.game.shown.clone(), 0usize)];
@@ -651,10 +806,8 @@ pub fn replace_resolved(roots: &GameRoots, dest: &mut Resolved, label: &str, wri
 /// counts (and recovers nothing: a change of this program may be half way).
 pub fn guard<'r>(roots: &'r GameRoots, label: &str) -> Result<LockGuard<'r>, Error> {
     let lock = roots.lock(label)?;
-    if lock.is_outer()
-        && let Some(jdir) = roots.tool_folder(&["journal"], false)?
-    {
-        let report = recover_all(roots, &jdir, false)?;
+    if lock.is_outer() {
+        let report = recover_every(roots, false)?;
         for line in report.log.iter().chain(&report.failures) {
             eprintln!("paleto: {line}");
         }
@@ -674,8 +827,8 @@ impl<'r> Txn<'r> {
     /// be undone, [`Error::RecoveryNeeded`] says which files are involved.
     pub fn begin(roots: &'r GameRoots, label: &str) -> Result<Txn<'r>, Error> {
         let lock = roots.lock(label)?.claim_txn()?;
-        let jdir = roots.tool_folder(&["journal"], true)?.expect("made above");
-        let report = recover_all(roots, &jdir, false)?;
+        let jdir = roots.journal_dir()?;
+        let report = recover_every(roots, false)?;
         for line in report.log.iter().chain(&report.failures) {
             eprintln!("paleto: {line}");
         }
@@ -743,8 +896,9 @@ impl<'r> Txn<'r> {
         if let Some(hook) = ON_ROLLBACK.with(|h| h.borrow_mut().take()) {
             hook();
         }
-        let rolled = rollback_ops(self.roots, &self.id, &self.ops, self.committing);
-        finish_rollback(&self.jdir, &self.jname, &rolled);
+        let rolled = rollback_ops(self.roots, &self.id, &self.ops, self.committing, &[]);
+        let (journal, jlen) = (&self.journal, self.jlen);
+        finish_rollback(&self.jdir, &self.jname, &rolled, |end| write_end(journal, jlen, false, end));
         self.phase = Phase::Done;
         rolled
     }
@@ -819,10 +973,17 @@ impl<'r> Txn<'r> {
                 self.ops[i].kept = true;
                 self.put(&journal::kept(i))?;
             } else {
-                dest.parent.sync()?;
-                let fp = made.fingerprint()?;
-                self.put(&journal::made(i, &fp))?;
+                // Recorded before anything else is done with it: a rollback removes only a folder it knows was made here.
+                let fp = match made.fingerprint() {
+                    Ok(fp) => fp,
+                    Err(e) => {
+                        let _ = dest.parent.rmdir(&name);
+                        return Err(e.into());
+                    }
+                };
                 self.ops[i].made = Some(fp);
+                self.put(&journal::made(i, &fp))?;
+                dest.parent.sync()?;
             }
             dest.parent = made;
             dest.logical.push(name);
@@ -867,8 +1028,9 @@ impl<'r> Txn<'r> {
         let mut file = dest.parent.create_excl(&tmp)?;
         // A replacement keeps the permission bits of the file it replaces (an executable stays one);
         // a new file, or one that replaces a link, gets the usual 0644.
+        // Never setuid, setgid or sticky, and always readable by the owner: the staged file is opened again to be validated.
         let perms = match &dest.existing {
-            Some(Existing::File(_)) => dest.parent.mode_of(&dest.name)?.unwrap_or(0o644),
+            Some(Existing::File(_)) => (dest.parent.mode_of(&dest.name)?.unwrap_or(0o644) & 0o777) | 0o400,
             _ => 0o644,
         };
         file.set_permissions(std::fs::Permissions::from_mode(perms))?;
@@ -944,10 +1106,23 @@ impl<'r> Txn<'r> {
         if let Err(e) = self.validate(&mut check) {
             return Err(self.fail(e, log, false));
         }
+        // The lock and the journal must still be what the names say: if somebody removed or replaced them, stop and undo.
+        if let Err(e) = self.check_held() {
+            return Err(self.fail(e, log, false));
+        }
         if let Err(e) = self.apply_all() {
             return Err(self.fail(e, log, true));
         }
         Ok(self.finish(log))
+    }
+
+    /// The game lock is still the one the names say, and the journal file still has a name in its folder.
+    fn check_held(&self) -> Result<(), Error> {
+        self.roots.check_lock()?;
+        if self.journal.metadata()?.nlink() == 0 || !self.jdir.names_file(&self.jname, &self.journal)? {
+            return Err(Error::Io(io::Error::other(format!("the journal {} was removed or replaced while the operation ran", self.jname))));
+        }
+        Ok(())
     }
 
     fn validate(&mut self, check: &mut impl FnMut(Staged, &File) -> Result<(), Error>) -> Result<(), Error> {

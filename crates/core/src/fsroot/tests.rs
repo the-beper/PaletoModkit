@@ -727,3 +727,111 @@ fn lock_faults_are_errors_not_a_taken_lock() {
         drop(open(dir.path()).lock("free again").unwrap());
     }
 }
+
+#[test]
+fn the_lock_guard_and_so_a_transaction_cannot_be_sent_to_another_thread() {
+    // Does not compile if the type is `Send` (two impls would apply).
+    trait AmbiguousIfSend<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+    <LockGuard<'static> as AmbiguousIfSend<_>>::check();
+    <crate::txn::Txn<'static> as AmbiguousIfSend<_>>::check();
+}
+
+#[test]
+fn a_paleto_folder_swapped_while_locking_is_not_the_lock_that_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    let roots = open(dir.path());
+    drop(roots.lock("first").unwrap());
+    let moved = dir.path().join("moved-paleto");
+    let (from, to) = (game.join(".paleto"), moved.clone());
+    // Between the locking of the file and the check of its names, `.paleto` is moved away and made again.
+    AFTER_FLOCK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&from, &to).unwrap();
+            std::fs::create_dir(&from).unwrap();
+        }))
+    });
+    let guard = roots.lock("second").unwrap();
+    // What is held is the lock of the new folder, which another handle cannot take...
+    assert!(matches!(open(dir.path()).lock("third"), Err(Error::Busy(who)) if who.contains("second")));
+    assert!(game.join(".paleto/lock").is_file());
+    roots.check_lock().unwrap();
+    drop(guard);
+    // ...and the old one was let go.
+    let old = std::fs::File::open(moved.join("lock")).unwrap();
+    assert!(Dir::try_lock(&old).unwrap());
+}
+
+#[test]
+fn a_lock_that_lost_its_name_or_its_folder_is_noticed() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    let roots = open(dir.path());
+    let held = roots.lock("held").unwrap();
+    roots.check_lock().unwrap();
+    // The lock file is removed: a second program could lock a new one.
+    std::fs::remove_file(game.join(".paleto/lock")).unwrap();
+    assert!(err(roots.check_lock()).contains("removed or replaced"));
+    std::fs::write(game.join(".paleto/lock"), b"").unwrap();
+    assert!(err(roots.check_lock()).contains("removed or replaced"), "a file of the same name is not the locked file");
+    // The folder is moved away (the file in it is still the locked one).
+    std::fs::rename(game.join(".paleto"), dir.path().join("elsewhere")).unwrap();
+    assert!(err(roots.check_lock()).contains("removed or replaced"));
+    // Not held at all.
+    drop(held);
+    assert!(roots.check_lock().is_err());
+}
+
+#[test]
+fn a_game_folder_that_cannot_be_written_to_gets_its_lock_in_the_data_folder() {
+    if is_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    let data = dir.path().join("data");
+    let with_data = || {
+        let mut roots = open(dir.path());
+        roots.set_data_dir(data.clone());
+        roots
+    };
+    let (one, two) = (with_data(), with_data());
+    let ro = ReadOnly::new(&game);
+    let held = one.lock("on a read-only game").unwrap();
+    assert!(!game.join(".paleto").exists(), "nothing is made in the game folder");
+    let home = data.join("journal").join(one.fallback_name());
+    assert!(home.join("lock").is_file());
+    for p in [data.join("journal"), home.clone()] {
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o700, "{p:?}");
+    }
+    // The lock is a real one: another handle is refused, and a probe sees it.
+    assert!(matches!(two.lock("other"), Err(Error::Busy(who)) if who.contains("on a read-only game")));
+    assert!(two.lock_is_held_elsewhere());
+    one.check_lock().unwrap();
+    assert!(one.journal_dir().unwrap().identity().unwrap() == Dir::open_path(&home).unwrap().identity().unwrap(), "the journals are there too");
+    drop(held);
+    drop(two.lock("after").unwrap());
+    // A fallback folder that others could write to is not trusted.
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(one.lock("x").is_err());
+    drop(ro);
+}
+
+#[test]
+fn a_copy_of_a_game_file_never_carries_setuid_and_the_owner_can_read_and_write_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let original = dir.path().join("game/x64/a.rpf");
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    let copy = roots.mods_copy(&rel("x64/a.rpf")).unwrap().unwrap();
+    assert_eq!(std::fs::metadata(&copy).unwrap().permissions().mode() & 0o7777, 0o755);
+    // The owner can always read and write what is made for editing.
+    std::fs::remove_file(&copy).unwrap();
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let copy = roots.mods_copy(&rel("x64/a.rpf")).unwrap().unwrap();
+    assert_eq!(std::fs::metadata(&copy).unwrap().permissions().mode() & 0o7777, 0o644);
+}

@@ -42,10 +42,14 @@ use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
+use std::marker::PhantomData;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::ThreadId;
+
+use sha2::{Digest, Sha256};
 
 pub use linux::{Dir, Fingerprint};
 pub(crate) use linux::random;
@@ -115,6 +119,8 @@ pub struct GameRoots {
     /// Why the mods folder cannot be used: its path and the reason.
     refused: OnceLock<(PathBuf, String)>,
     lock: Mutex<LockSlot>,
+    /// The tool's data folder, where the lock and the journals go if the game folder cannot be written to.
+    data: PathBuf,
 }
 
 /// The game lock as this `GameRoots` holds it. The lock itself is an `flock` on
@@ -124,6 +130,9 @@ pub struct GameRoots {
 #[derive(Debug, Default)]
 struct LockSlot {
     file: Option<File>,
+    /// The folder `file` is in (`.paleto` of the game, or the fallback in the data folder).
+    home: Option<Dir>,
+    fallback: bool,
     depth: usize,
     owner: Option<ThreadId>,
     label: String,
@@ -132,12 +141,20 @@ struct LockSlot {
 }
 
 /// Holds the game lock; releases it when the last guard of the thread is dropped.
+/// Not `Send`: the lock belongs to the thread that took it (and so does a transaction that holds one).
 #[derive(Debug)]
 pub struct LockGuard<'r> {
     roots: &'r GameRoots,
     txn: bool,
     /// The first taking of the lock, not a re-entry of the thread that holds it.
     outer: bool,
+    _not_send: PhantomData<*const ()>,
+}
+
+// Runs once between the locking of the lock file and the check that it is still the one named (tests swap it there).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_FLOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A destination found by [`GameRoots::dest`], not yet written.
@@ -464,7 +481,7 @@ impl GameRoots {
             return Err(changed(&shown));
         }
         let game = Root { dir, kind: RootKind::Game, id, shown, canon, fallback: false };
-        let roots = GameRoots { game, mods: OnceLock::new(), refused: OnceLock::new(), lock: Mutex::new(LockSlot::default()) };
+        let roots = GameRoots { game, mods: OnceLock::new(), refused: OnceLock::new(), lock: Mutex::new(LockSlot::default()), data: crate::game::data_dir() };
         // A mods folder that cannot be used is only an error for what needs it.
         match roots.mods_state() {
             Ok(_) | Err(Error::UnsafePath { .. }) => Ok(roots),
@@ -591,6 +608,60 @@ impl GameRoots {
         r.root == RootKind::Game && r.logical.is_empty() && r.missing.is_empty() && !matches!(r.existing, None | Some(Existing::Dir)) && (name.ends_with(".dll") || name.ends_with(".txt")) && !loader
     }
 
+    /// Whether the mods folder is not there (as opposed to there but not usable).
+    pub(crate) fn mods_missing(&self) -> bool {
+        matches!(self.mods_state(), Ok(None))
+    }
+
+    /// The write policy again for an operation a journal names, which recovery runs before it touches
+    /// anything: a journal is a file in a folder others may write to, and must not be able to point recovery at
+    /// the game's own data, a program, the mods folder by another name or the tool's folders. `folder`: the
+    /// operation makes a folder; `replaces`: it replaces or deletes a file; `ours`: the file at the target is the very one this operation staged (it matches the journal's `made`), which the rule for the game's own `.dll` and `.txt` files does not cover; `mods_made`: the same journal makes
+    /// the mods folder (its operations below it are then anchored at the game folder).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_journal_op(&self, anchor: RootKind, dir: &[String], name: &str, folder: bool, replaces: bool, ours: bool, mods_made: bool) -> Result<(), Error> {
+        let shown = self.anchor_root(anchor).map_or_else(|_| self.game.shown.clone(), |r| r.shown.clone()).join(dir.iter().collect::<PathBuf>()).join(name);
+        let bad = |why: &str| unsafe_path(&shown, why);
+        let first_is_mods = dir.first().is_some_and(|d| d.eq_ignore_ascii_case("mods"));
+        if anchor == RootKind::Game && mods_made && folder && dir.is_empty() && name.eq_ignore_ascii_case("mods") {
+            return Ok(());
+        }
+        let root = if anchor == RootKind::Game && mods_made && first_is_mods { RootKind::Mods } else { anchor };
+        let lower = name.to_ascii_lowercase();
+        if !folder && lower.ends_with(".exe") {
+            return Err(bad("programs are never replaced or deleted"));
+        }
+        if root == RootKind::Game {
+            let loader = lower == "dinput8.dll" || lower == "scripthookv.dll" || lower.starts_with("scripthookvdotnet");
+            if !ours && !folder && dir.is_empty() && (lower.ends_with(".dll") || lower.ends_with(".txt")) && !loader && (replaces || self.game.dir.kind(name)?.is_some()) {
+                return Err(bad("is one of the game's own files in the game folder"));
+            }
+            let full: Vec<String> = dir.iter().cloned().chain(std::iter::once(name.to_string())).collect();
+            if full[0].eq_ignore_ascii_case("mods") {
+                return Err(bad("that is the mods folder, reached by a link"));
+            }
+            if is_game_data_parts(&full) {
+                return Err(bad("that is the game's own data"));
+            }
+            if tool_owned(&full[0]) {
+                return Err(bad("that folder belongs to this tool"));
+            }
+            if let Some(mods) = self.mods.get() {
+                let mut at = self.game.dir.try_clone()?;
+                for step in dir {
+                    at = match at.open_dir(step) {
+                        Ok(d) => d,
+                        Err(_) => break,
+                    };
+                    if at.fingerprint()?.same_file(&mods.id) {
+                        return Err(bad("that is the mods folder, reached by another name or a link"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// What every write to `r` must pass, whatever writes it: the policy
     /// (programs, game data, the mods folder, the tool's folders) and the check
     /// that the folders are still where they were found.
@@ -668,52 +739,159 @@ impl GameRoots {
         if slot.depth > 0 {
             if slot.owner == Some(me) {
                 slot.depth += 1;
-                return Ok(LockGuard { roots: self, txn: false, outer: false });
+                return Ok(LockGuard { roots: self, txn: false, outer: false, _not_send: PhantomData });
             }
             return Err(Error::Busy(format!("{} (in this program)", slot.label)));
         }
-        slot.file = Some(self.acquire(label)?);
+        let (file, home, fallback) = self.acquire(label)?;
+        (slot.file, slot.home, slot.fallback) = (Some(file), Some(home), fallback);
         (slot.depth, slot.owner, slot.label, slot.txn) = (1, Some(me), label.to_string(), false);
-        Ok(LockGuard { roots: self, txn: false, outer: true })
+        Ok(LockGuard { roots: self, txn: false, outer: true, _not_send: PhantomData })
     }
 
-    /// Opens and locks `.paleto/lock`; the file is never deleted.
-    fn acquire(&self, label: &str) -> Result<File, Error> {
-        let paleto = self.tool_folder(&[], true)?.expect("made above");
-        let shown = self.game.shown.join(".paleto/lock");
+    /// Opens and locks `.paleto/lock`; the file is never deleted. If the game folder cannot be written to
+    /// (read-only mount, no permission), the lock and the journals go to the fallback home in the data
+    /// folder instead, so that the mods folder (which may be on another drive) can still be written.
+    /// Two programs that cannot both write the game folder may then not see each other's lock.
+    fn acquire(&self, label: &str) -> Result<(File, Dir, bool), Error> {
+        match self.acquire_at(false, label) {
+            Err(Error::Io(first)) if matches!(first.raw_os_error(), Some(libc::EROFS | libc::EACCES | libc::EPERM)) => match self.acquire_at(true, label) {
+                Ok((file, home)) => Ok((file, home, true)),
+                Err(Error::Busy(who)) => Err(Error::Busy(who)),
+                Err(second) => Err(Error::Io(io::Error::new(first.kind(), format!("{}: the game folder cannot be written to ({first}), and the fallback for the lock and the journal in the data folder cannot be used ({second})", self.game.shown.display())))),
+            },
+            other => other.map(|(file, home)| (file, home, false)),
+        }
+    }
+
+    fn acquire_at(&self, fallback: bool, label: &str) -> Result<(File, Dir), Error> {
+        let shown = self.lock_path(fallback);
         for _ in 0..2 {
-            let file = paleto.open_lock("lock", true).map_err(|e| if e.raw_os_error() == Some(libc::ELOOP) { unsafe_path(&shown, "the lock file is a link") } else { e.into() })?;
+            let home = if fallback { self.data_home(true)?.expect("made above") } else { self.tool_folder(&[], true)?.expect("made above") };
+            let file = home.open_lock("lock", true).map_err(|e| if e.raw_os_error() == Some(libc::ELOOP) { unsafe_path(&shown, "the lock file is a link") } else { e.into() })?;
             if !file.metadata()?.is_file() {
                 return Err(unsafe_path(&shown, "the lock file is not a regular file"));
             }
             if !Dir::try_lock(&file)? {
                 return Err(Error::Busy(holder_of(&file)));
             }
-            // The file may have been replaced between the open and the lock: lock what the name means now.
-            if paleto.names_file("lock", &file)? {
+            #[cfg(test)]
+            if let Some(hook) = AFTER_FLOCK.with(|h| h.borrow_mut().take()) {
+                hook();
+            }
+            // The file, or the folder it is in, may have been replaced between the open and the lock: lock what the names mean now.
+            if home.names_file("lock", &file)? && self.is_home(&home, fallback)? {
                 // What it says is only for whoever finds the lock busy.
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 let text = format!("{} {} {}\n", std::process::id(), now, label.replace(['\n', '\r'], " "));
                 let _ = file.set_len(0).and_then(|()| std::os::unix::fs::FileExt::write_all_at(&file, text.as_bytes(), 0));
-                return Ok(file);
+                return Ok((file, home));
             }
             Dir::unlock(&file);
         }
         Err(changed(&shown))
     }
 
-    /// Whether another holder has the lock right now (it is not taken).
-    pub(crate) fn lock_is_held_elsewhere(&self) -> bool {
-        let Ok(Some(paleto)) = self.tool_folder(&[], false) else { return false };
-        let Ok(file) = paleto.open_lock("lock", false) else { return false };
-        match Dir::try_lock(&file) {
-            Ok(true) => {
-                Dir::unlock(&file);
-                false
-            }
-            Ok(false) => true,
-            Err(_) => false,
+    fn lock_path(&self, fallback: bool) -> PathBuf {
+        if fallback { self.data.join("journal").join(self.fallback_name()).join("lock") } else { self.game.shown.join(".paleto/lock") }
+    }
+
+    /// The name of this game's fallback home: the first 16 hex digits of the SHA-256 of its real path.
+    fn fallback_name(&self) -> String {
+        Sha256::digest(self.game.canon.as_os_str().as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The fallback home `<data>/journal/<hash>` (it holds `lock` and the journals), made 0700 if `create`; `None` if it is not there.
+    /// Each folder below the data folder is the user's own and never a link.
+    pub(crate) fn data_home(&self, create: bool) -> Result<Option<Dir>, Error> {
+        if create {
+            std::fs::create_dir_all(&self.data)?;
         }
+        let mut dir = match Dir::open_path(&self.data) {
+            Ok(d) => d,
+            Err(e) if !create && matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut shown = self.data.clone();
+        for name in ["journal".to_string(), self.fallback_name()] {
+            shown.push(&name);
+            if !create && dir.kind(&name)?.is_none() {
+                return Ok(None);
+            }
+            dir = match dir.open_private(&name, create) {
+                Ok(d) => d,
+                Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => return Err(unsafe_path(&shown, "this tool's own folder is a link or a file, not a folder")),
+                Err(e) => return Err(e.into()),
+            };
+        }
+        Ok(Some(dir))
+    }
+
+    /// Whether `home` is still what the game's `.paleto` (or the fallback home) names.
+    fn is_home(&self, home: &Dir, fallback: bool) -> Result<bool, Error> {
+        if !fallback {
+            return Ok(self.game.dir.names_dir(".paleto", home)?);
+        }
+        Ok(match self.data_home(false)? {
+            Some(now) => now.identity()? == home.identity()?,
+            None => false,
+        })
+    }
+
+    /// Checks that the lock this thread holds is still what the names say: `lock` is still the locked file and
+    /// `.paleto` (or the fallback home) still the folder it is in. Whoever removed or replaced them could let
+    /// another program lock the game while this one goes on, so a change checks it before it commits.
+    pub(crate) fn check_lock(&self) -> Result<(), Error> {
+        let slot = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let (Some(file), Some(home)) = (&slot.file, &slot.home) else { return Err(Error::Io(io::Error::other("the game lock is not held"))) };
+        if home.names_file("lock", file)? && self.is_home(home, slot.fallback)? {
+            return Ok(());
+        }
+        Err(unsafe_path(&self.lock_path(slot.fallback), "the lock file or its folder was removed or replaced while the operation ran, so another program may hold the lock too"))
+    }
+
+    /// The folder for the journals of the lock this thread holds, made if needed: `.paleto/journal`, or the fallback home itself.
+    pub(crate) fn journal_dir(&self) -> Result<Dir, Error> {
+        let (home, fallback) = {
+            let slot = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(home) = &slot.home else { return Err(Error::Io(io::Error::other("the game lock is not held"))) };
+            (home.try_clone()?, slot.fallback)
+        };
+        if fallback {
+            return Ok(home);
+        }
+        home.open_or_make_dir("journal").map_err(|e| if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) { unsafe_path(&self.game.shown.join(".paleto/journal"), "this tool's own folder is a link or a file, not a folder") } else { e.into() })
+    }
+
+    /// Every folder of journals there is, in both places (`.paleto/journal` of the game and the fallback home); none is made.
+    /// A fallback home that cannot be looked at is left out.
+    pub(crate) fn journal_dirs(&self) -> Result<Vec<Dir>, Error> {
+        let mut out = Vec::new();
+        out.extend(self.tool_folder(&["journal"], false)?);
+        out.extend(self.data_home(false).ok().flatten());
+        Ok(out)
+    }
+
+    /// Whether another holder has the lock right now (it is not taken), in either place.
+    pub(crate) fn lock_is_held_elsewhere(&self) -> bool {
+        let homes = [self.tool_folder(&[], false).ok().flatten(), self.data_home(false).ok().flatten()];
+        homes.into_iter().flatten().any(|home| {
+            let Ok(file) = home.open_lock("lock", false) else { return false };
+            match Dir::try_lock(&file) {
+                Ok(true) => {
+                    Dir::unlock(&file);
+                    false
+                }
+                Ok(false) => true,
+                Err(_) => false,
+            }
+        })
+    }
+
+    /// Where the lock and the journals go if the game folder cannot be written to (tests point it at a folder of their own).
+    #[cfg(test)]
+    pub fn set_data_dir(&mut self, dir: PathBuf) {
+        self.data = dir;
     }
 
     /// Makes the folders `r` needs, one at a time under the handle of the
@@ -870,7 +1048,8 @@ impl GameRoots {
         // On btrfs/XFS this is a reflink: instant and takes no extra space.
         crate::txn::replace_resolved(self, &mut dest, LABEL, |out| {
             io::copy(&mut from, out)?;
-            out.set_permissions(from.metadata()?.permissions())
+            // Never setuid, setgid or sticky; and readable and writable by the owner, as validation and later edits must open it.
+            out.set_permissions(std::fs::Permissions::from_mode((from.metadata()?.permissions().mode() & 0o777) | 0o600))
         })?;
         Ok(Some(dest.path()))
     }
@@ -919,6 +1098,7 @@ impl Drop for LockGuard<'_> {
             if let Some(file) = slot.file.take() {
                 Dir::unlock(&file);
             }
+            slot.home = None;
         }
     }
 }
