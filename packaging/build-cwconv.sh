@@ -19,6 +19,7 @@ if [ ! -f third_party/codewalker/CodeWalker.Core/CodeWalker.Core.csproj ]; then
 fi
 ARGS="-c Release -r linux-x64 --self-contained true -p:DebugType=none"
 if command -v dotnet >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
     dotnet publish tools/$PROJECT/paleto-$PROJECT.csproj $ARGS -o "$OUT"
 else
     mkdir -p "$OUT"
