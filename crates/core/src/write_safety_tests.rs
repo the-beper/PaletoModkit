@@ -666,7 +666,6 @@ fn oiv03_a_zip_is_never_searched_for_where_it_starts() {
 // ---- OIV-01: archives saved after the loose files are final ----
 
 #[test]
-#[ignore = "repro OIV-01: archives are saved after the undo is finished, loose files stay installed"]
 fn oiv01_failing_archive_save_leaves_nothing_installed() {
     if is_root() {
         return;
@@ -695,8 +694,8 @@ fn oiv01_failing_archive_save_leaves_nothing_installed() {
 
 // ---- OIV-06: rollback errors are ignored ----
 
-/// A file deleted, then its name made a folder by a later `<add>`: the roll-back
-/// cannot put the file back, and the error says nothing was installed.
+/// A file deleted, then its name made a folder by a later `<add>`: the package is refused
+/// while it is planned, with the file where it was, and the error says so.
 #[test]
 fn oiv06_failed_rollback_is_not_reported_as_clean() {
     let dir = tempfile::tempdir().unwrap();
@@ -926,12 +925,14 @@ fn a_rollback_that_cannot_finish_says_so_and_names_the_backup() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Legacy);
     std::fs::write(game.root.join("scripts/x"), b"precious").unwrap();
-    let package = oiv(dir.path(), "x.oiv", r#"<delete>scripts\x</delete><add source="x">scripts\x\y.asi</add><xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")], false);
-    // Something else puts a file in the folder the install made, so the folder stays and the original cannot go back.
-    let user_file = game.root.join("scripts/x/user.txt");
+    let package = oiv(dir.path(), "x.oiv", r#"<delete>scripts\x</delete><add source="x">scripts\z.asi</add>"#, &[("content/x", b"new")], false);
+    // The commit fails at its second file; when it is undone, something else has put a file where the deleted one was, so the original cannot go back.
+    let user_file = game.root.join("scripts/x");
     let planted = user_file.clone();
-    crate::oiv::ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || std::fs::write(&planted, b"user").unwrap())));
+    crate::txn::ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || std::fs::write(&planted, b"user").unwrap())));
+    crate::fsroot::faults::arm_at(crate::fsroot::faults::Point::Rename, 2, crate::fsroot::faults::Mode::Fail(std::io::ErrorKind::Other));
     let err = install(&game, &package).unwrap_err();
+    assert!(crate::fsroot::faults::disarm());
     let text = err.to_string();
     assert!(!text.contains("nothing was installed") && text.contains(".paleto-") && text.contains("scripts/x"), "{text}");
     let Error::Txn(failure) = &err else { panic!("{err:?}") };

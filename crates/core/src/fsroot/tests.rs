@@ -362,6 +362,29 @@ fn unique_names_are_unique_and_exclusive() {
 }
 
 #[test]
+fn an_unnamed_file_lives_in_the_held_folder_and_leaves_no_name() {
+    use std::os::unix::fs::MetadataExt;
+    let outer = tempfile::tempdir().unwrap();
+    let dir = outer.path().join("work");
+    std::fs::create_dir(&dir).unwrap();
+    let d = Dir::open_path(&dir).unwrap();
+    let mut f = match d.tmpfile() {
+        Ok(f) => f,
+        // A filesystem without unnamed files says so, and the caller falls back.
+        Err(e) => return assert!(Dir::unnamed_unsupported(&e), "{e}"),
+    };
+    f.write_all(b"spooled").unwrap();
+    assert_eq!((f.metadata().unwrap().nlink(), f.metadata().unwrap().len()), (0, 7));
+    assert_eq!(f.metadata().unwrap().dev(), std::fs::metadata(&dir).unwrap().dev());
+    assert!(d.names().unwrap().is_empty());
+    // A folder moved or replaced by a link meanwhile does not matter: the file is made through the handle.
+    std::fs::rename(&dir, outer.path().join("moved")).unwrap();
+    symlink("/nonexistent", &dir).unwrap();
+    assert!(d.tmpfile().is_ok());
+    assert!(!outer.path().join("moved").read_dir().unwrap().any(|_| true), "something was made in the folder by name");
+}
+
+#[test]
 fn hard_links_can_be_switched_off() {
     let dir = tempfile::tempdir().unwrap();
     let d = Dir::open_path(dir.path()).unwrap();

@@ -1381,3 +1381,60 @@ fn honest_looks_at_the_failure_not_at_the_words() {
     assert!(!crate::fixtures::honest(&failure_of("boom", true, &["a"], "changed")));
     assert!(!crate::fixtures::honest(&failure_of("boom", true, &[], "removed")));
 }
+
+#[test]
+fn a_file_and_a_folder_of_one_stem_are_two_names_even_if_the_folder_is_still_to_be_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), false);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "test").unwrap();
+    let mut a = roots.dest(&rel("scripts/foo.ini")).unwrap();
+    let mut b = roots.dest(&rel("scripts/foo/foo.ini")).unwrap();
+    t.stage(&mut a, |f| f.write_all(b"one")).unwrap();
+    t.stage(&mut b, |f| f.write_all(b"two")).unwrap();
+    // The same name spelled another way is still one name.
+    let mut again = roots.dest(&rel("scripts/FOO/Foo.ini")).unwrap();
+    assert!(matches!(t.stage(&mut again, |f| f.write_all(b"three")), Err(Error::Conflict(_))));
+    drop(t);
+    let mut t = Txn::begin(&roots, "test").unwrap();
+    let mut a = roots.dest(&rel("scripts/foo.ini")).unwrap();
+    let mut b = roots.dest(&rel("scripts/foo/foo.ini")).unwrap();
+    t.stage(&mut a, |f| f.write_all(b"one")).unwrap();
+    t.stage(&mut b, |f| f.write_all(b"two")).unwrap();
+    t.commit(Vec::new()).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/foo.ini")).unwrap(), b"one");
+    assert_eq!(std::fs::read(game.root.join("scripts/foo/foo.ini")).unwrap(), b"two");
+    assert_clean(&game, "after");
+}
+
+#[test]
+fn folders_to_be_made_are_matched_by_name_as_the_resolver_does_so_one_name_is_one_folder() {
+    for deep in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), false);
+        let before = state(&game);
+        let roots = game.roots().unwrap();
+        let (first, second) = if deep { ("plugins/newdir/a.ini", "Plugins/NewDir/b.ini") } else { ("scripts/newdir/a.ini", "scripts/NewDir/b.ini") };
+        // Both are resolved before either is staged: neither folder exists then.
+        let mut a = roots.dest(&rel(first)).unwrap();
+        let mut b = roots.dest(&rel(second)).unwrap();
+        let mut t = Txn::begin(&roots, "test").unwrap();
+        t.stage(&mut a, |f| f.write_all(b"a")).unwrap();
+        t.stage(&mut b, |f| f.write_all(b"b")).unwrap();
+        // Undone, the folders made go and no other.
+        drop(t);
+        assert_eq!(state(&game), before, "deep={deep}");
+        let mut a = roots.dest(&rel(first)).unwrap();
+        let mut b = roots.dest(&rel(second)).unwrap();
+        let mut t = Txn::begin(&roots, "test").unwrap();
+        t.stage(&mut a, |f| f.write_all(b"a")).unwrap();
+        t.stage(&mut b, |f| f.write_all(b"b")).unwrap();
+        t.commit(Vec::new()).unwrap();
+        let top = game.root.join(if deep { "plugins" } else { "scripts" });
+        let mut names: Vec<String> = std::fs::read_dir(&top).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.eq_ignore_ascii_case("newdir")).collect();
+        assert_eq!(names.len(), 1, "deep={deep}: two folders for one name: {names:?}");
+        let folder = top.join(names.pop().unwrap());
+        assert_eq!((std::fs::read(folder.join("a.ini")).unwrap(), std::fs::read(folder.join("b.ini")).unwrap()), (b"a".to_vec(), b"b".to_vec()), "deep={deep}");
+        assert_clean(&game, "after");
+    }
+}

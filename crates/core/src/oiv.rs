@@ -4,20 +4,22 @@
 //! Installation always targets the mods folder for game data; the original
 //! game files are never modified.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use paleto_rpf::{ArchiveEditor, Keys};
 use zip::ZipArchive;
 
 use crate::budget::{self, Budget, Limits, Scratch};
 use crate::convert;
-use crate::fsroot::{Dir, Existing, Fingerprint, GameRoots, Resolved, RootKind};
+use crate::fsroot::{Dir, GameRoots, Resolved, RootKind};
 use crate::game::Game;
 use crate::relpath::RelPath;
-use crate::txn::{self, TxnFailure};
+use crate::txn::{self, Staged, Txn, TxnFailure};
 use crate::text::{self, Condition, TextOp};
 use crate::xml::{self, Append, XmlOp};
 use crate::Error;
@@ -218,9 +220,12 @@ impl Package {
         Ok(log)
     }
 
-    /// Installs the package. Game data goes to the mods folder (copying the
-    /// originals there first); other files go to the game folder. Returns a log
-    /// of what was done, including warnings.
+    /// Installs the package as one transaction: every command is planned first (later commands see what
+    /// earlier ones did), then each changed file is staged next to its name and the lot is committed and
+    /// journaled. Game data goes to the mods folder (a changed original is staged there as a new file, the
+    /// original is only read); other files go to the game folder. Returns a log of what was done, including
+    /// warnings. Not atomic: several files are put in place one after the other, and an error or a crash
+    /// in between is undone (at once, or by recovery at the next change), see [`crate::txn`].
     pub fn install(&mut self, game: &Game, keys: &Keys) -> Result<Vec<String>, Error> {
         self.install_with(game, Some(keys))
     }
@@ -230,22 +235,44 @@ impl Package {
         self.check(&self.content.clone(), false)?;
         self.entries.fresh();
         let roots = game.roots()?;
-        // One change at a time per game, for the whole install.
-        let _lock = txn::guard(&roots, "installing a package")?;
-        let mut inst = Installer { roots: &roots, keys, entries: &mut self.entries, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
+        // One change at a time per game, for the whole install; an interrupted one is dealt with first.
+        let mut txn = Txn::begin(&roots, "installing a package")?;
+        let strays = Strays::default();
+        let mut inst = Installer { roots: &roots, keys, entries: &mut self.entries, converted: &self.converted, plan: Plan::default(), log: txn.recovered().to_vec(), strays: strays.clone() };
         if let Err(e) = self.content.clone().iter().try_for_each(|cmd| inst.run_root(cmd)) {
-            // Archives are only saved at the end: putting the loose files back undoes it all.
-            let (failures, notes) = inst.undo.roll_back();
-            inst.log.extend(notes.into_iter().map(|n| format!("warning: {n}")));
-            return Err(Error::Txn(Box::new(TxnFailure { cause: e, log: inst.log, undone: failures.is_empty(), failures, journaled: false, verb: "installed" })));
+            // Nothing is on disk yet but the journal: the abort ends it and says so.
+            let failure = txn.abort(e, inst.log);
+            return Err(with_strays(failure, &strays.borrow()));
         }
-        let left = inst.undo.finish();
-        inst.log.extend(left.into_iter().map(|l| format!("warning: {l}")));
-        for (path, editor) in std::mem::take(&mut inst.archives) {
-            editor.save(&path)?;
-            inst.log.push(format!("saved {}", path.display()));
+        let saved = match inst.stage_all(&mut txn) {
+            Ok(saved) => saved,
+            Err(e) => return Err(with_strays(txn::failure(e, inst.log, "installed"), &strays.borrow())),
+        };
+        let mut log = std::mem::take(&mut inst.log);
+        // Every archive, and every nested archive the install edited, must still open from its new file before
+        // anything is put in place (their tables of contents are read, not the files).
+        let committed = txn.commit_validated(Vec::new(), |staged, file| {
+            if let Some(archive) = saved.iter().find(|s| s.staged == staged) {
+                #[cfg(test)]
+                if let Some(hook) = BEFORE_OPENING.with(|h| h.borrow_mut().take()) {
+                    hook();
+                }
+                let mut top = ArchiveEditor::open_file(file.try_clone()?, &archive.name, keys)?;
+                for chain in &archive.nested {
+                    chain.iter().try_fold(&mut top, |editor, name| editor.archive(name, false, keys))?;
+                }
+            }
+            Ok(())
+        });
+        match committed {
+            Ok(notes) => {
+                log.extend(notes);
+                log.extend(saved.iter().map(|s| format!("saved {}", s.shown)));
+                log.extend(strays.borrow().iter().map(|s| format!("warning: {s}")));
+                Ok(log)
+            }
+            Err(e) => Err(with_strays(txn::failure(e, log, "installed"), &strays.borrow())),
         }
-        Ok(inst.log)
     }
 
     /// Fails early on anything we cannot do, before touching any file: a missing file, or one
@@ -276,246 +303,221 @@ impl Package {
     }
 }
 
+/// A file the install changes: the root it lands in and its lower-cased logical path (links resolved), so that
+/// every spelling of one name is one key.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Key(bool, String);
+
+impl Key {
+    fn of(dest: &Resolved) -> Self {
+        Key(dest.root == RootKind::Mods, dest.relative().join("/").to_ascii_lowercase())
+    }
+}
+
+/// What the install will leave at a name; nothing is written until every command has run.
+enum Pending {
+    /// An `<add>`: the package's file, and its size, written into the new file when it is staged.
+    Source(String, u64),
+    Bytes(Vec<u8>),
+    /// A top-level archive being edited.
+    Archive(Box<Open>),
+    Deleted,
+}
+
+/// A top-level archive in memory (its nested archives are inside it), saved into one new file at the end.
+struct Open {
+    editor: ArchiveEditor,
+    work: Work,
+}
+
+/// What the commands on an archive need besides the archive itself.
+struct Work {
+    spool: Spool,
+    /// The size of the archive it was opened from, and what the commands have added since (what they bring, and
+    /// twice each nested archive they edit: it is written whole to a spool and then appended): what its new file may take.
+    base: u64,
+    added: u64,
+    /// The file it was opened from, to read the size of its nested archives from (none for a new archive).
+    file: Option<File>,
+    /// The nested archives the commands edit, as the names to open them by from the top one (case folded).
+    nested: Vec<Vec<String>>,
+}
+
+impl Work {
+    fn new(spool: Spool, base: u64, file: Option<File>) -> Self {
+        Work { spool, base, added: 0, file, nested: Vec::new() }
+    }
+
+    /// A command edits the nested archive `chain` (names from the top archive down): its new file takes up to
+    /// twice its size more, a whole copy in a spool and the same again appended. One that is not in the archive the
+    /// install opened (made by the package) is only what was added; one whose size cannot be read counts as the top archive.
+    fn nested(&mut self, chain: &[String], keys: Option<&Keys>) {
+        let folded: Vec<String> = chain.iter().map(|p| p.replace('\\', "/").to_ascii_lowercase()).collect();
+        if self.nested.contains(&folded) {
+            return;
+        }
+        let size = self.file.as_ref().map_or(0, |f| nested_len(f, &folded, keys).unwrap_or(self.base));
+        self.added = self.added.saturating_add(size.saturating_mul(2));
+        self.nested.push(folded);
+    }
+}
+
+/// The stored size of the nested archive at `chain` in the archive `file`: 0 if there is none. The table of
+/// contents is read again through `/proc` (the file is only opened, not changed); `None` if that cannot be done.
+fn nested_len(file: &File, chain: &[String], keys: Option<&Keys>) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+    let mut archive = paleto_rpf::Archive::open(Path::new(&format!("/proc/self/fd/{}", file.as_raw_fd())), keys).ok()?;
+    let mut size = 0;
+    for (i, part) in chain.iter().enumerate() {
+        let Some(idx) = archive.find(part) else { return Some(0) };
+        size = archive.entries[idx].stored_len();
+        if i + 1 < chain.len() {
+            archive = archive.open_child(idx, keys).ok()?;
+        }
+    }
+    Some(size)
+}
+
+struct Slot {
+    dest: Resolved,
+    rel: RelPath,
+    pending: Pending,
+}
+
+/// The install as a plan: what each name will hold, in the order the names were first touched. Later commands
+/// see what earlier ones planned; the engine changes each file once.
+#[derive(Default)]
+struct Plan {
+    order: Vec<Key>,
+    slots: HashMap<Key, Slot>,
+}
+
+impl Plan {
+    /// Fails if `key` would be a file and a folder at once: another name of the plan is a file at a folder of it,
+    /// or the other way round (a path below a file the package deletes or writes).
+    fn check_room(&self, key: &Key) -> Result<(), Error> {
+        for (other, slot) in self.slots.iter().filter(|(o, _)| o.0 == key.0) {
+            let (file, below) = if key.1.starts_with(&format!("{}/", other.1)) {
+                (&other.1, &key.1)
+            } else if other.1.starts_with(&format!("{}/", key.1)) {
+                (&key.1, &other.1)
+            } else {
+                continue;
+            };
+            let verb = if matches!(slot.pending, Pending::Deleted) && file == &other.1 { "deletes the file" } else { "writes the file" };
+            return Err(Error::Package(format!("the package {verb} {file} and also changes {below}, which would be below it")));
+        }
+        Ok(())
+    }
+}
+
+/// Where the spools of an archive go: its destination's volume, not the temporary folder (often memory).
+struct Spool {
+    /// The deepest folder that exists on the way to the destination (held: it cannot be redirected).
+    dir: Dir,
+    /// Where it is, for messages.
+    path: PathBuf,
+    /// Spool names that could not be removed (see [`Spool::file`]), shared by every spool of the install.
+    strays: Strays,
+}
+
+type Strays = Rc<RefCell<Vec<String>>>;
+
+// Runs once, in the check of the first staged archive (tests damage the staged file there).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_OPENING: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests make the filesystem look as if it had no unnamed files.
+    static NO_UNNAMED_FILES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl Spool {
+    fn of(dest: &Resolved, strays: &Strays) -> Result<Self, Error> {
+        let mut path = dest.path();
+        for _ in 0..=dest.missing.len() {
+            path.pop();
+        }
+        Ok(Spool { dir: dest.parent.try_clone()?, path, strays: strays.clone() })
+    }
+
+    /// A file that has no name at all (so a crash leaves nothing): `O_TMPFILE` in the folder, opened through the
+    /// held handle. Where the filesystem has none, a file made exclusively under a private name and unlinked at once;
+    /// if that name cannot be removed it stays, which is noted in `strays` (it is no part of any journal) and is an error.
+    fn file(&self) -> io::Result<File> {
+        #[cfg(test)]
+        let unnamed = if NO_UNNAMED_FILES.with(std::cell::Cell::get) { Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP)) } else { self.dir.tmpfile() };
+        #[cfg(not(test))]
+        let unnamed = self.dir.tmpfile();
+        match unnamed {
+            Err(e) if Dir::unnamed_unsupported(&e) => {
+                let (file, name) = self.dir.create_unique()?;
+                if let Err(e) = self.dir.unlink(&name) {
+                    let shown = self.path.join(&name).display().to_string();
+                    self.strays.borrow_mut().push(format!("{shown}: a temporary file of the install that could not be removed ({e}); it can be deleted"));
+                    return Err(e);
+                }
+                Ok(file)
+            }
+            result => result,
+        }
+    }
+}
+
+/// [`Txn::stage_sized`] for a `write` that fails with an [`Error`] of its own: that error, not the I/O error it
+/// had to be turned into for the engine, is the cause of what comes back.
+fn stage_with(txn: &mut Txn, dest: &mut Resolved, need: u64, write: impl FnOnce(&mut File) -> Result<(), Error>) -> Result<Staged, Error> {
+    let mut failed = None;
+    let staged = txn.stage_sized(dest, need, |f| write(f).map_err(|e| io::Error::other(failed.insert(e).to_string())));
+    staged.map_err(|e| match (failed, e) {
+        (Some(cause), Error::Txn(mut f)) => {
+            f.cause = cause;
+            Error::Txn(f)
+        }
+        (Some(cause), _) => cause,
+        (None, e) => e,
+    })
+}
+
+/// `failure` with the spool files the install could not remove: they are no part of its journal, so what is
+/// left is not clean and the message must not say "nothing was installed".
+fn with_strays(failure: Error, strays: &[String]) -> Error {
+    if strays.is_empty() {
+        return failure;
+    }
+    match failure {
+        Error::Txn(mut f) => {
+            f.undone = false;
+            f.journaled = false;
+            f.failures.extend(strays.iter().cloned());
+            Error::Txn(f)
+        }
+        cause => Error::Txn(Box::new(TxnFailure { cause, log: Vec::new(), undone: false, failures: strays.to_vec(), journaled: false, verb: "installed" })),
+    }
+}
+
+/// A top-level archive staged by [`Installer::stage_all`], to be opened again before the commit.
+struct Saved {
+    staged: Staged,
+    name: String,
+    shown: String,
+    /// The nested archives the install edited in it.
+    nested: Vec<Vec<String>>,
+}
+
 struct Installer<'a> {
     /// Where files may be written: every destination is resolved through it.
     roots: &'a GameRoots,
     keys: Option<&'a Keys>,
     entries: &'a mut Entries,
     converted: &'a HashMap<String, Converted>,
-    /// Top-level archives being edited, by path in the mods folder.
-    archives: BTreeMap<PathBuf, ArchiveEditor>,
+    plan: Plan,
     log: Vec<String>,
-    undo: Undo,
-}
-
-/// What an install changed on disk so far, to put back if it fails halfway: an interim
-/// until the install runs as a transaction (see [`crate::txn`]), and without a journal.
-/// Files are only ever replaced by a rename (never rewritten in place), so a hard link
-/// keeps the old content (the file itself is renamed aside on a filesystem without hard
-/// links). Backups are made under names nobody else can have, in the folder of the file,
-/// and only what the install made or kept is touched when undoing: a name that is not
-/// the one it wrote is left alone, and whatever cannot be put back is reported with the
-/// name of its backup, never hidden. A failure while the archives are saved, at the very
-/// end, is not undone.
-#[derive(Default)]
-struct Undo {
-    seen: HashSet<PathBuf>,
-    steps: Vec<Step>,
-    /// Folders made for the install that could not be noted, so cannot be removed again.
-    lost: Vec<String>,
-}
-
-enum Step {
-    /// A file that did not exist: removed again if it is still the one the install wrote.
-    Made { dir: Dir, name: String, path: PathBuf, wrote: Option<Fingerprint> },
-    /// A folder made for a file: removed again if it is empty.
-    Folder { parent: Dir, name: String, path: PathBuf },
-    /// A file replaced or deleted: its old content is under `backup` (a hard link to it, or the file itself renamed aside).
-    Kept { dir: Dir, name: String, backup: String, path: PathBuf, wrote: Option<Fingerprint> },
-}
-
-/// A filesystem that cannot make hard links (exFAT, some network mounts).
-fn links_unsupported(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP | libc::EXDEV | libc::EMLINK)) || e.kind() == io::ErrorKind::Unsupported
-}
-
-/// Where a destination was before its folders existed (they are made later, by somebody else).
-struct Planned {
-    anchor: RootKind,
-    logical: Vec<String>,
-    missing: Vec<String>,
-    name: String,
-    path: PathBuf,
-}
-
-impl Planned {
-    fn of(dest: &Resolved) -> Self {
-        Planned { anchor: dest.anchor(), logical: dest.logical.clone(), missing: dest.missing.clone(), name: dest.name.clone(), path: dest.path() }
-    }
-}
-
-impl Undo {
-    /// Remembers a file before its first change: a hard link to it under a name of its own, or
-    /// (`aside`, where links cannot be made) the file itself renamed to one; or, if there is
-    /// no file, that the install made it. `Ok(true)` if the file was moved aside (it is not at
-    /// its name any more). Without `aside`, a filesystem that cannot link is left alone and
-    /// nothing is remembered: the caller asks again right before it writes. The folders must exist.
-    fn keep(&mut self, dest: &Resolved, aside: bool) -> Result<bool, Error> {
-        let path = dest.path();
-        if self.seen.contains(&path) {
-            return Ok(false);
-        }
-        let dir = &dest.parent;
-        match dir.stat(&dest.name)? {
-            // The write that follows refuses a folder.
-            Some(Existing::Dir) => return Ok(false),
-            Some(_) => {
-                let (backup, moved) = match dir.link_unique(&dest.name, ".old") {
-                    Ok(backup) => (backup, false),
-                    Err(e) if links_unsupported(&e) => {
-                        if !aside {
-                            return Ok(false);
-                        }
-                        (dir.rename_unique(&dest.name, ".old")?, true)
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                self.steps.push(Step::Kept { dir: dir.try_clone()?, name: dest.name.clone(), backup, path: path.clone(), wrote: None });
-                self.seen.insert(path);
-                return Ok(moved);
-            }
-            None => self.steps.push(Step::Made { dir: dir.try_clone()?, name: dest.name.clone(), path: path.clone(), wrote: None }),
-        }
-        self.seen.insert(path);
-        Ok(false)
-    }
-
-    /// The install has written `dest` (which now says what is there): that is what undoing may remove or replace.
-    fn wrote(&mut self, dest: &Resolved) {
-        let Some(Existing::File(fp)) = &dest.existing else { return };
-        let path = dest.path();
-        for step in &mut self.steps {
-            if let Step::Made { path: p, wrote, .. } | Step::Kept { path: p, wrote, .. } = step
-                && *p == path
-            {
-                *wrote = Some(*fp);
-            }
-        }
-    }
-
-    /// A folder the install made.
-    fn folder(&mut self, parent: &Dir, name: &str, path: PathBuf) {
-        match parent.try_clone() {
-            Ok(parent) => self.steps.push(Step::Folder { parent, name: name.to_string(), path }),
-            Err(e) => self.lost.push(format!("{}: a folder made by the install cannot be removed again: {e}", path.display())),
-        }
-    }
-
-    /// A file that did not exist at `plan` was made by somebody else for the install (a copy of a
-    /// game file): remembers it, and the folders made for it. Nothing if there is no such file.
-    fn made_by_copy(&mut self, roots: &GameRoots, plan: &Planned) -> Result<(), Error> {
-        let logical = [plan.logical.as_slice(), plan.missing.as_slice()].concat();
-        let mut folders = Vec::new();
-        let mut path = plan.path.clone();
-        path.pop();
-        for name in plan.missing.iter().rev() {
-            folders.push((name.clone(), path.clone()));
-            path.pop();
-        }
-        let dir = match roots.open_anchor(plan.anchor, &logical) {
-            Ok(dir) => dir,
-            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        let Some(Existing::File(fp)) = dir.stat(&plan.name)? else { return Ok(()) };
-        // Outermost folder first, so that undoing (newest first) removes the innermost first.
-        let mut parent_logical = plan.logical.clone();
-        for (name, path) in folders.into_iter().rev() {
-            let parent = roots.open_anchor(plan.anchor, &parent_logical)?;
-            self.folder(&parent, &name, path);
-            parent_logical.push(name);
-        }
-        self.steps.push(Step::Made { dir, name: plan.name.clone(), path: plan.path.clone(), wrote: Some(fp) });
-        self.seen.insert(plan.path.clone());
-        Ok(())
-    }
-
-    /// Puts everything back, newest change first. Returns what could not be put back (each with the
-    /// name of its backup: empty means nothing is left of the install) and what was left in place on purpose.
-    fn roll_back(&mut self) -> (Vec<String>, Vec<String>) {
-        #[cfg(test)]
-        if let Some(hook) = ON_ROLLBACK.with(|h| h.borrow_mut().take()) {
-            hook();
-        }
-        let mut failures = std::mem::take(&mut self.lost);
-        let mut notes = Vec::new();
-        for step in self.steps.drain(..).rev() {
-            match step {
-                Step::Made { dir, name, path, wrote } => match dir.stat(&name) {
-                    Ok(None) => {}
-                    Ok(Some(Existing::File(fp))) if wrote.is_some_and(|w| fp.same_file(&w)) => match dir.unlink(&name) {
-                        Ok(()) => {
-                            let _ = dir.sync();
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                        Err(e) => failures.push(format!("{}: made by the install and cannot be removed: {e}", path.display())),
-                    },
-                    Ok(Some(_)) => failures.push(format!("{}: made by the install, but what is there now is not the file it wrote; left as it is", path.display())),
-                    Err(e) => failures.push(format!("{}: cannot be looked at: {e}", path.display())),
-                },
-                Step::Folder { parent, name, path } => match parent.rmdir(&name) {
-                    Ok(()) => {
-                        let _ = parent.sync();
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) => notes.push(format!("{}: a folder made by the install is not empty, left in place", path.display())),
-                    Err(e) => failures.push(format!("{}: a folder made by the install cannot be removed: {e}", path.display())),
-                },
-                Step::Kept { dir, name, backup, path, wrote } => {
-                    let shown = format!("{} (backup: {})", path.display(), path.with_file_name(&backup).display());
-                    let (target, saved) = match (dir.stat(&name), dir.stat(&backup)) {
-                        (Ok(t), Ok(Some(s))) => (t, s),
-                        (Ok(_), Ok(None)) => {
-                            failures.push(format!("{shown}: the backup is gone, so the original cannot be put back"));
-                            continue;
-                        }
-                        (Err(e), _) | (_, Err(e)) => {
-                            failures.push(format!("{shown}: cannot be looked at: {e}"));
-                            continue;
-                        }
-                    };
-                    let untouched = match (&target, &saved) {
-                        (Some(Existing::File(a)), Existing::File(b)) => a.same_file(b),
-                        (Some(Existing::Link(a)), Existing::Link(b)) => a == b,
-                        _ => false,
-                    };
-                    let ours = matches!((&target, &wrote), (Some(Existing::File(fp)), Some(w)) if fp.same_file(w));
-                    let result = if untouched {
-                        // The name was not changed: the backup is a second name of the same file.
-                        dir.unlink(&backup)
-                    } else if target.is_none() {
-                        dir.rename(&backup, &name, false)
-                    } else if ours {
-                        dir.rename(&backup, &name, true)
-                    } else {
-                        failures.push(format!("{shown}: what is there now is not what the install left (it was changed, or is a folder now); the original was not put back"));
-                        continue;
-                    };
-                    match result {
-                        Ok(()) => {
-                            let _ = dir.sync();
-                        }
-                        Err(e) => failures.push(format!("{shown}: the original cannot be put back: {e}")),
-                    }
-                }
-            }
-        }
-        self.seen.clear();
-        (failures, notes)
-    }
-
-    /// The install is done: the backups go. Returns the ones that could not be removed.
-    fn finish(&mut self) -> Vec<String> {
-        let mut left = Vec::new();
-        for step in self.steps.drain(..) {
-            if let Step::Kept { dir, backup, path, .. } = step {
-                match dir.unlink(&backup) {
-                    Ok(()) => {
-                        let _ = dir.sync();
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => left.push(format!("the backup {} of {} could not be removed: {e}", path.with_file_name(&backup).display(), path.display())),
-                }
-            }
-        }
-        left
-    }
-}
-
-// Runs once when an install is rolled back (tests damage the folder to make it fail).
-#[cfg(test)]
-thread_local! {
-    pub(crate) static ON_ROLLBACK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Spool files that could not be removed.
+    strays: Strays,
 }
 
 impl Installer<'_> {
@@ -530,8 +532,18 @@ impl Installer<'_> {
         }
     }
 
+    /// How many bytes an `<add>` source will be (the converted file if there is one).
+    fn source_len(&mut self, source: &str) -> Result<u64, Error> {
+        let entry = content_path(source);
+        match self.converted.get(&entry.to_ascii_lowercase()) {
+            Some(Converted::Bytes(data)) => Ok(data.len() as u64),
+            Some(Converted::File(_, len)) => Ok(*len),
+            None => Ok(self.entries.declared(&entry)?.0),
+        }
+    }
+
     /// An `<add>` source written to `out`, a piece at a time.
-    fn write_source(&mut self, source: &str, out: &mut File) -> Result<(), Error> {
+    fn write_source(&mut self, source: &str, out: &mut impl Write) -> Result<(), Error> {
         let entry = content_path(source);
         match self.converted.get(&entry.to_ascii_lowercase()) {
             Some(Converted::Bytes(data)) => self.entries.budget.copy(&mut data.as_slice(), data.len() as u64, out, &entry)?,
@@ -541,91 +553,124 @@ impl Installer<'_> {
         Ok(())
     }
 
-    /// An `<add>` source as a file, and its length: for the archives an archive takes from disk.
-    fn source_file(&mut self, source: &str) -> Result<(File, u64), Error> {
+    /// An `<add>` source as a file, and its length: for the archives an archive takes from disk. It is spooled
+    /// beside the archive being edited (counted by the budget as any read is), never held.
+    fn source_file(&mut self, source: &str, spool: &Spool) -> Result<(File, u64), Error> {
         if let Some(Converted::File(file, len)) = self.converted.get(&content_path(source).to_ascii_lowercase()) {
             return Ok((file.try_clone()?, *len));
         }
-        Scratch::spool(|out| {
-            self.write_source(source, out)?;
-            Ok(out.stream_position()?)
-        })
+        let mut file = spool.file()?;
+        self.write_source(source, &mut file)?;
+        let len = file.stream_position()?;
+        Ok((file, len))
+    }
+
+    /// Plans a new content for a name: the slot it has (which keeps its destination) or a new one, after the
+    /// checks no write may fail.
+    fn put(&mut self, dest: Resolved, rel: RelPath, pending: Pending) -> Result<(), Error> {
+        let key = Key::of(&dest);
+        if let Some(slot) = self.plan.slots.get_mut(&key) {
+            slot.pending = pending;
+            return Ok(());
+        }
+        self.register(&key, &dest)?;
+        self.plan.slots.insert(key, Slot { dest, rel, pending });
+        Ok(())
+    }
+
+    /// A name the plan did not have before: it must pass what any write passes (no programs, no game data in the
+    /// game folder), and not clash with a file or folder of another name.
+    fn register(&mut self, key: &Key, dest: &Resolved) -> Result<(), Error> {
+        self.roots.check_write(dest)?;
+        self.plan.check_room(key)?;
+        self.plan.order.push(key.clone());
+        Ok(())
+    }
+
+    /// What there is on disk for a name: the copy in the mods folder, else (for game data routed there, `original`
+    /// being its game-relative path) the original, read-only. Never a copy made on the way: the transaction, which
+    /// holds the game lock, makes the new file when it commits.
+    fn base(&self, dest: &Resolved, original: Option<&RelPath>) -> Result<Option<File>, Error> {
+        if let Some(file) = self.roots.read_dest(dest)? {
+            return Ok(Some(file));
+        }
+        match original {
+            Some(rel) if dest.root == RootKind::Mods => self.roots.original(rel),
+            _ => Ok(None),
+        }
     }
 
     /// A command at the game folder level.
     fn run_root(&mut self, cmd: &Command) -> Result<(), Error> {
         match cmd {
             Command::Add { source, target } => {
-                let mut dest = self.roots.dest(&RelPath::parse(target)?)?;
+                let rel = RelPath::parse(target)?;
+                let dest = self.roots.dest(&rel)?;
                 if let Some(why) = self.refused(&dest) {
                     self.log.push(format!("warning: refusing to replace {}{why}", dest.path().display()));
                     return Ok(());
                 }
-                self.ensure_dirs(&mut dest)?;
-                let path = dest.path();
-                self.archives.remove(&path);
-                self.undo.keep(&dest, true)?;
-                // A copy in the mods folder may be a link to an original: replace it, never write through it.
-                // The source goes into the new file a piece at a time; a failure of its own is not an I/O error of the file.
-                let (roots, mut failed) = (self.roots, None);
-                let written = roots.replace(&mut dest, |f| self.write_source(source, f).map_err(|e| io::Error::other(failed.insert(e).to_string())));
-                if let Some(e) = failed {
-                    return Err(e);
-                }
-                written?;
-                self.undo.wrote(&dest);
+                let (path, len) = (dest.path(), self.source_len(source)?);
+                // Whatever the plan held for the name (an archive being edited, say) is replaced.
+                self.put(dest, rel, Pending::Source(source.clone(), len))?;
                 self.log.push(format!("add {}", path.display()));
             }
             Command::Delete(target) => {
                 // Game data is only ever deleted from the mods folder.
-                let dest = self.roots.dest(&RelPath::parse(target)?)?;
+                let rel = RelPath::parse(target)?;
+                let dest = self.roots.dest(&rel)?;
                 let path = dest.path();
                 if let Some(why) = self.refused(&dest) {
                     self.log.push(format!("warning: refusing to delete {}{why}", path.display()));
-                } else if self.roots.read_dest(&dest)?.is_some() {
-                    // Without hard links the file itself was renamed aside as its backup: it is gone from its name already.
-                    if !self.undo.keep(&dest, true)? {
-                        self.roots.remove(&dest)?;
-                    }
-                    self.log.push(format!("delete {}", path.display()));
+                    return Ok(());
                 }
+                let key = Key::of(&dest);
+                // (deleted already, a file there before the plan)
+                match self.plan.slots.get(&key).map(|s| (matches!(s.pending, Pending::Deleted), s.dest.existing.is_some())) {
+                    Some((true, _)) => return Ok(()),
+                    // What the plan made is gone again, and there was nothing before it.
+                    Some((false, false)) => {
+                        self.plan.slots.remove(&key);
+                        self.plan.order.retain(|k| *k != key);
+                    }
+                    Some((false, true)) => self.put(dest, rel, Pending::Deleted)?,
+                    None if self.roots.read_dest(&dest)?.is_some() => self.put(dest, rel, Pending::Deleted)?,
+                    None => return Ok(()),
+                }
+                self.log.push(format!("delete {}", path.display()));
             }
             Command::Archive { path, create, body } => {
-                let disk = self.top_archive(path, *create)?;
-                let mut editor = self.archives.remove(&disk).unwrap();
-                let result = body.iter().try_for_each(|c| self.run_in(&mut editor, c, path));
-                self.archives.insert(disk, editor);
-                result?;
+                let (key, dest, rel, mut open) = self.take_archive(path, *create)?;
+                body.iter().try_for_each(|c| self.run_in(&mut open.editor, &mut open.work, &[], c, path))?;
+                self.plan.slots.insert(key, Slot { dest, rel, pending: Pending::Archive(Box::new(open)) });
             }
             Command::Text { path, create, ops } => {
-                let Some(mut dest) = self.loose_file(path)? else { return Ok(()) };
-                let (text, latin1) = match self.read_loose(&dest)? {
+                let Some((dest, rel)) = self.loose_file(path)? else { return Ok(()) };
+                let (text, latin1) = match self.read_loose(&dest, &rel, path)? {
                     Some(b) => decode_text(b),
                     None if *create => (String::new(), false),
                     None => return Err(Error::Package(format!("{path} not found"))),
                 };
                 let out = self.encode_text(path, &text::apply(&text, ops), latin1);
-                self.write_loose(&mut dest, out)?;
-                self.log.push(format!("edit {}", dest.path().display()));
+                self.write_loose(dest, rel, out)?;
             }
             Command::Xml { path, ops } => {
-                let Some(mut dest) = self.loose_file(path)? else { return Ok(()) };
-                let data = self.read_loose(&dest)?.ok_or_else(|| Error::Package(format!("{path} not found")))?;
+                let Some((dest, rel)) = self.loose_file(path)? else { return Ok(()) };
+                let data = self.read_loose(&dest, &rel, path)?.ok_or_else(|| Error::Package(format!("{path} not found")))?;
                 let (out, warnings) = xml::apply(&data, ops)?;
                 self.warn(path, warnings);
-                self.write_loose(&mut dest, out)?;
-                self.log.push(format!("edit {}", dest.path().display()));
+                self.write_loose(dest, rel, out)?;
             }
             Command::Defragment(path) => {
-                let disk = self.top_archive(path, false)?;
-                self.archives.get_mut(&disk).unwrap().defragment();
+                let (key, dest, rel, mut open) = self.take_archive(path, false)?;
+                open.editor.defragment();
+                self.plan.slots.insert(key, Slot { dest, rel, pending: Pending::Archive(Box::new(open)) });
             }
             Command::Pso { path, ops, source } => {
-                let Some(mut dest) = self.loose_file(path)? else { return Ok(()) };
-                let data = self.read_loose(&dest)?.ok_or_else(|| Error::Package(format!("{path} not found")))?;
+                let Some((dest, rel)) = self.loose_file(path)? else { return Ok(()) };
+                let data = self.read_loose(&dest, &rel, path)?.ok_or_else(|| Error::Package(format!("{path} not found")))?;
                 let out = self.edit_meta(path, &data, ops, source)?;
-                self.write_loose(&mut dest, out)?;
-                self.log.push(format!("edit {}", dest.path().display()));
+                self.write_loose(dest, rel, out)?;
             }
         }
         Ok(())
@@ -637,17 +682,21 @@ impl Installer<'_> {
         Ok(out)
     }
 
-    /// A command inside an archive; `at` is for messages.
-    fn run_in(&mut self, editor: &mut ArchiveEditor, cmd: &Command, at: &str) -> Result<(), Error> {
+    /// A command inside an archive; `at` is for messages. `work` has the spool where files taken from disk wait
+    /// and counts the bytes the commands bring; `chain` is the names of the nested archives `editor` is inside.
+    fn run_in(&mut self, editor: &mut ArchiveEditor, work: &mut Work, chain: &[String], cmd: &Command, at: &str) -> Result<(), Error> {
         let keys = self.keys;
         match cmd {
             Command::Add { source, target } => {
                 if spools(target) {
                     // An archive, sound or video is attached from a file, not held.
-                    let (file, len) = self.source_file(source)?;
+                    let (file, len) = self.source_file(source, &work.spool)?;
                     editor.add_file_from(target, file, len)?;
+                    work.added = work.added.saturating_add(len);
                 } else {
-                    editor.add_file(target, self.source(source)?)?;
+                    let data = self.source(source)?;
+                    work.added = work.added.saturating_add(data.len() as u64);
+                    editor.add_file(target, data)?;
                 }
                 self.log.push(format!("add {at}\\{target}"));
             }
@@ -657,9 +706,11 @@ impl Installer<'_> {
                 }
             }
             Command::Archive { path, create, body } => {
+                let chain = [chain, std::slice::from_ref(path)].concat();
+                work.nested(&chain, keys);
                 let inner = editor.archive(path, *create, keys)?;
                 let at = format!("{at}\\{path}");
-                body.iter().try_for_each(|c| self.run_in(inner, c, &at))?;
+                body.iter().try_for_each(|c| self.run_in(inner, work, &chain, c, &at))?;
             }
             Command::Text { path, create, ops } => {
                 let (text, latin1) = match editor.read(path, keys) {
@@ -668,19 +719,25 @@ impl Installer<'_> {
                     Err(e) => return Err(e.into()),
                 };
                 let out = self.encode_text(&format!("{at}\\{path}"), &text::apply(&text, ops), latin1);
+                work.added = work.added.saturating_add(out.len() as u64);
                 editor.add_file(path, out)?;
                 self.log.push(format!("edit {at}\\{path}"));
             }
             Command::Xml { path, ops } => {
                 let (out, warnings) = xml::apply(&editor.read(path, keys)?, ops)?;
                 self.warn(&format!("{at}\\{path}"), warnings);
+                work.added = work.added.saturating_add(out.len() as u64);
                 editor.add_file(path, out)?;
                 self.log.push(format!("edit {at}\\{path}"));
             }
-            Command::Defragment(path) => editor.archive(path, false, keys)?.defragment(),
+            Command::Defragment(path) => {
+                work.nested(&[chain, std::slice::from_ref(path)].concat(), keys);
+                editor.archive(path, false, keys)?.defragment();
+            }
             Command::Pso { path, ops, source } => {
                 let at = format!("{at}\\{path}");
                 let out = self.edit_meta(&at, &editor.read(path, keys)?, ops, source)?;
+                work.added = work.added.saturating_add(out.len() as u64);
                 editor.add_file(path, out)?;
                 self.log.push(format!("edit {at}"));
             }
@@ -688,40 +745,44 @@ impl Installer<'_> {
         Ok(())
     }
 
-    /// Opens (once per install) a top-level archive in the mods folder.
-    fn top_archive(&mut self, path: &str, create: bool) -> Result<PathBuf, Error> {
+    /// Takes a top-level archive out of the plan to edit it (put it back under the same key): the one an earlier
+    /// command planned, an added `.rpf` opened from its source, else the mods copy, else the original, read
+    /// through its handle and never written; with `create`, a new one.
+    fn take_archive(&mut self, path: &str, create: bool) -> Result<(Key, Resolved, RelPath, Open), Error> {
         let rel = RelPath::parse(path)?;
-        let mut dest = self.roots.dest(&rel)?;
-        let disk = dest.path();
-        if self.archives.contains_key(&disk) {
-            return Ok(disk);
-        }
-        // The archive is saved at the end: it must pass what any write passes (no programs, no
-        // game data in the game folder), whether it exists or is created.
-        self.roots.check_write(&dest)?;
-        // A copy made from the original goes again if the install fails. An
-        // archive already there is only saved at the end: nothing to keep.
-        let (was_new, plan) = (dest.existing.is_none(), Planned::of(&dest));
-        let disk = match self.roots.mods_copy(&rel.without_mods())? {
-            Some(p) => {
-                if was_new {
-                    self.undo.made_by_copy(self.roots, &plan)?;
+        let dest = self.roots.dest(&rel)?;
+        let key = Key::of(&dest);
+        if let Some(Slot { dest, rel, pending }) = self.plan.slots.remove(&key) {
+            let spool = Spool::of(&dest, &self.strays)?;
+            let open = match pending {
+                Pending::Archive(open) => *open,
+                Pending::Source(source, _) => {
+                    let (file, base) = self.source_file(&source, &spool)?;
+                    let work = Work::new(spool, base, Some(file.try_clone()?));
+                    Open { editor: ArchiveEditor::open_file(file, &dest.name, self.keys)?, work }
                 }
-                p
+                Pending::Bytes(data) => {
+                    let mut file = spool.file()?;
+                    file.write_all(&data)?;
+                    let work = Work::new(spool, data.len() as u64, Some(file.try_clone()?));
+                    Open { editor: ArchiveEditor::open_file(file, &dest.name, self.keys)?, work }
+                }
+                Pending::Deleted if create => Open { editor: ArchiveEditor::new(&dest.name), work: Work::new(spool, 0, None) },
+                Pending::Deleted => return Err(Error::Package(format!("archive {path} not found"))),
+            };
+            return Ok((key, dest, rel, open));
+        }
+        self.register(&key, &dest)?;
+        let spool = Spool::of(&dest, &self.strays)?;
+        let open = match self.base(&dest, Some(&rel.without_mods()))? {
+            Some(file) => {
+                let work = Work::new(spool, file.metadata()?.len(), Some(file.try_clone()?));
+                Open { editor: ArchiveEditor::open_file(file, &dest.name, self.keys)?, work }
             }
-            // Saved by a rename: a dangling link there is replaced, never written through.
-            None if create => {
-                self.ensure_dirs(&mut dest)?;
-                self.roots.check_write(&dest)?;
-                disk
-            }
+            None if create => Open { editor: ArchiveEditor::new(&dest.name), work: Work::new(spool, 0, None) },
             None => return Err(Error::Package(format!("archive {path} not found"))),
         };
-        {
-            let editor = if disk.is_file() { ArchiveEditor::open(&disk, self.keys)? } else { ArchiveEditor::new(&disk.file_name().unwrap().to_string_lossy()) };
-            self.archives.insert(disk.clone(), editor);
-        }
-        Ok(disk)
+        Ok((key, dest, rel, open))
     }
 
     /// Why a package may not replace or delete this destination, as text to
@@ -737,62 +798,76 @@ impl Installer<'_> {
         }
     }
 
-    /// A loose file to edit: game data is copied to the mods folder first.
-    /// `None` (after a warning) for one the package may not change.
-    fn loose_file(&mut self, path: &str) -> Result<Option<Resolved>, Error> {
+    /// A loose file to edit. `None` (after a warning) for one the package may not change.
+    fn loose_file(&mut self, path: &str) -> Result<Option<(Resolved, RelPath)>, Error> {
         let rel = RelPath::parse(path)?;
         let dest = self.roots.dest(&rel)?;
         if self.roots.is_game_file(&dest) {
             self.log.push(format!("warning: refusing to replace {}{}", dest.path().display(), self.refused(&dest).unwrap_or_default()));
             return Ok(None);
         }
-        if dest.root == RootKind::Mods && !rel.in_mods_folder() {
-            // Game data is edited in a copy in the mods folder, made first: a copy that did not
-            // exist goes again if the install fails, one that did (a link, say) is kept.
-            let plan = Planned::of(&dest);
-            if dest.existing.is_some() {
-                self.undo.keep(&dest, false)?;
-            }
-            self.roots.mods_copy(&rel)?;
-            if dest.existing.is_none() {
-                self.undo.made_by_copy(self.roots, &plan)?;
-            }
-            return Ok(Some(self.roots.dest(&rel)?));
-        }
-        Ok(Some(dest))
+        Ok(Some((dest, rel)))
     }
 
-    /// Makes the folders `dest` needs, noting each so that a failed install removes it again.
-    fn ensure_dirs(&mut self, dest: &mut Resolved) -> Result<(), Error> {
-        let mut paths = Vec::new();
-        let mut path = dest.path();
-        path.pop();
-        for _ in &dest.missing {
-            paths.push(path.clone());
-            path.pop();
+    /// What a loose file holds at this point of the plan; `None` if there is no file. An earlier command's
+    /// result comes first, then the mods copy, then (game data is edited in a copy in the mods folder) the original.
+    fn read_loose(&mut self, dest: &Resolved, rel: &RelPath, path: &str) -> Result<Option<Vec<u8>>, Error> {
+        match self.plan.slots.get(&Key::of(dest)).map(|s| &s.pending) {
+            Some(Pending::Bytes(data)) => return Ok(Some(data.clone())),
+            Some(Pending::Source(source, _)) => {
+                let source = source.clone();
+                return Ok(Some(self.source(&source)?));
+            }
+            Some(Pending::Deleted) => return Ok(None),
+            Some(Pending::Archive(_)) => return Err(Error::Package(format!("{path} is an archive the package edits, not a text file"))),
+            None => {}
         }
-        paths.reverse();
-        let (roots, undo, mut made) = (self.roots, &mut self.undo, 0);
-        roots.ensure_parent_noting(dest, &mut |parent, name| {
-            undo.folder(parent, name, paths[made].clone());
-            made += 1;
-        })
-    }
-
-    /// What a loose file holds now; `None` if there is no file.
-    fn read_loose(&mut self, dest: &Resolved) -> Result<Option<Vec<u8>>, Error> {
         let mut data = Vec::new();
-        Ok(self.roots.read_dest(dest)?.map(|mut f| f.read_to_end(&mut data).map(|_| data)).transpose()?)
+        match self.base(dest, (!rel.in_mods_folder()).then_some(rel))? {
+            Some(mut file) => {
+                file.read_to_end(&mut data)?;
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
     }
 
-    /// Writes a loose file by replacing it: never through a link, and the
-    /// old content stays for [`Undo`].
-    fn write_loose(&mut self, dest: &mut Resolved, data: Vec<u8>) -> Result<(), Error> {
-        self.ensure_dirs(dest)?;
-        self.undo.keep(dest, true)?;
-        self.roots.replace(dest, |f| f.write_all(&data))?;
-        self.undo.wrote(dest);
+    /// Plans a loose file's new content: the engine writes it as a new file that replaces the old one.
+    fn write_loose(&mut self, dest: Resolved, rel: RelPath, data: Vec<u8>) -> Result<(), Error> {
+        let path = dest.path();
+        self.put(dest, rel, Pending::Bytes(data))?;
+        self.log.push(format!("edit {}", path.display()));
         Ok(())
+    }
+
+    /// Stages every planned file in the order the names were first touched (which is the order of the commit):
+    /// loose files and archives into new files next to their names, deletions as planned removals. Returns the
+    /// archives, which the commit opens again first. Every error is the engine's, from a call that ended the transaction.
+    fn stage_all(&mut self, txn: &mut Txn) -> Result<Vec<Saved>, Error> {
+        let mut saved = Vec::new();
+        for key in std::mem::take(&mut self.plan.order) {
+            // A name that was planned and then deleted again is not there any more; one that came twice is done.
+            let Some(Slot { mut dest, pending, .. }) = self.plan.slots.remove(&key) else { continue };
+            match pending {
+                Pending::Deleted => txn.delete(&dest)?,
+                Pending::Bytes(data) => {
+                    let staged = stage_with(txn, &mut dest, data.len() as u64, |f| Ok(f.write_all(&data)?))?;
+                    txn.release(staged);
+                }
+                Pending::Source(source, len) => {
+                    let staged = stage_with(txn, &mut dest, len, |f| self.write_source(&source, f))?;
+                    txn.release(staged);
+                }
+                Pending::Archive(open) => {
+                    let Open { editor, work } = *open;
+                    let Work { spool, base, added, nested, .. } = work;
+                    let staged = stage_with(txn, &mut dest, base.saturating_add(added), |f| editor.save_to(f, &mut || spool.file()).map(drop).map_err(Error::from))?;
+                    txn.release(staged);
+                    saved.push(Saved { staged, name: dest.name.clone(), shown: dest.path().display().to_string(), nested });
+                }
+            }
+        }
+        Ok(saved)
     }
 
     /// A text edited by `<text>`, in the encoding it was read in.
@@ -1159,6 +1234,95 @@ mod tests {
         assert!(!root.join("PlayGTAV.exe").exists());
         assert_eq!(std::fs::read(root.join("dinput8.dll")).unwrap(), b"new");
         assert_eq!(log.iter().filter(|l| l.starts_with("warning: refusing")).count(), 3, "{log:?}");
+    }
+
+    #[test]
+    fn a_spool_has_no_name_and_lives_in_the_folder_of_its_destination() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("mods/x64")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        let roots = Game::open(&root).unwrap().roots().unwrap();
+        // The folders `new` and `deeper` are still to be made: the spool goes where the folders end.
+        let dest = roots.dest(&RelPath::parse(r"x64\new\deeper\f.rpf").unwrap()).unwrap();
+        let spool = Spool::of(&dest, &Strays::default()).unwrap();
+        assert_eq!(spool.path, root.join("mods/x64"));
+        for _ in 0..2 {
+            let mut file = spool.file().unwrap();
+            file.write_all(b"spooled").unwrap();
+            assert_eq!(file.metadata().unwrap().nlink(), 0, "the spool has a name");
+            let shown = std::fs::read_link(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file))).unwrap();
+            assert!(shown.starts_with(root.join("mods/x64")), "{shown:?}: not in the folder of the destination");
+        }
+        assert_eq!(std::fs::read_dir(root.join("mods/x64")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_room_for_an_archive_counts_twice_each_nested_archive_the_commands_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut outer = ArchiveEditor::new("o.rpf");
+        outer.add_file("o.txt", vec![1; 3000]).unwrap();
+        let inner = outer.archive("inner.rpf", true, None).unwrap();
+        inner.add_file("i.txt", vec![2; 5000]).unwrap();
+        inner.archive("deep.rpf", true, None).unwrap().add_file("d.txt", vec![3; 7000]).unwrap();
+        let path = dir.path().join("o.rpf");
+        outer.save(&path).unwrap();
+        let top = paleto_rpf::Archive::open(&path, None).unwrap();
+        let inner_len = top.entries[top.find("inner.rpf").unwrap()].stored_len();
+        let deep_len = paleto_rpf::Archive::open(&path, None).unwrap().open_child(top.find("inner.rpf").unwrap(), None).unwrap().entries.iter().find(|e| e.name == "deep.rpf").unwrap().stored_len();
+        assert!(inner_len > deep_len && deep_len > 0);
+        let strays = Strays::default();
+        let spool = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("game")).unwrap();
+            std::fs::write(dir.join("game/GTA5.exe"), b"game").unwrap();
+            Spool::of(&Game::open(&dir.join("game")).unwrap().roots().unwrap().dest(&RelPath::parse("scripts/x.rpf").unwrap()).unwrap(), &strays).unwrap()
+        };
+        let mut work = Work::new(spool(dir.path()), std::fs::metadata(&path).unwrap().len(), Some(File::open(&path).unwrap()));
+        work.nested(&["inner.rpf".to_string()], None);
+        assert_eq!(work.added, 2 * inner_len);
+        // The same archive again, in other letters and separators, counts once; one inside it counts its own size.
+        work.nested(&["INNER.rpf".to_string()], None);
+        work.nested(&["inner.rpf".to_string(), "deep.rpf".to_string()], None);
+        assert_eq!(work.added, 2 * (inner_len + deep_len));
+        // One the package makes is not in the file: only what is added to it counts.
+        work.nested(&["new.rpf".to_string()], None);
+        assert_eq!(work.added, 2 * (inner_len + deep_len));
+        let mut fresh = Work::new(spool(dir.path()), 0, None);
+        fresh.nested(&["new.rpf".to_string()], None);
+        assert_eq!(fresh.added, 0);
+    }
+
+    #[test]
+    fn a_spool_name_that_cannot_be_removed_is_reported_and_the_undo_is_not_called_clean() {
+        use crate::fsroot::faults::{self, Mode, Point};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("game");
+        std::fs::create_dir_all(root.join("x64")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"game").unwrap();
+        let mut original = ArchiveEditor::new("a.rpf");
+        original.add_file("a.txt", b"a".to_vec()).unwrap();
+        original.save(&root.join("x64/a.rpf")).unwrap();
+        let mut side = ArchiveEditor::new("side.rpf");
+        side.add_file("s.txt", b"s".to_vec()).unwrap();
+        side.save(&dir.path().join("side.rpf")).unwrap();
+        let content = std::fs::read(dir.path().join("side.rpf")).unwrap();
+        let oiv = package(dir.path(), r#"<archive path="x64\a.rpf"><add source="p">side.rpf</add></archive>"#, &[("content/p", &content)]);
+        // A filesystem without unnamed files: the spool is a name that is removed at once, and the removal fails.
+        NO_UNNAMED_FILES.with(|f| f.set(true));
+        faults::arm_at(Point::Unlink, 1, Mode::Fail(io::ErrorKind::Other));
+        let err = Package::open(&oiv).unwrap().install_with(&Game::open(&root).unwrap(), None).unwrap_err();
+        assert!(faults::disarm());
+        NO_UNNAMED_FILES.with(|f| f.set(false));
+        let text = err.to_string();
+        assert!(!text.contains("nothing was installed") && text.contains("could not be removed") && text.contains(".paleto-"), "{text}");
+        let Error::Txn(failure) = &err else { panic!("{err:?}") };
+        assert!(!failure.undone && failure.failures.len() == 1);
+        let strays: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".paleto-")).collect();
+        assert_eq!(strays.len(), 1, "the name the message gives is there");
+        assert!(text.contains(&strays[0].file_name().to_string_lossy().into_owned()), "{text}");
+        // Nothing else was installed.
+        assert!(!root.join("mods").exists());
     }
 
     /// A package with these commands and `content/` files.

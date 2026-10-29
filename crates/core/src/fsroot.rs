@@ -289,7 +289,7 @@ fn normal_parts(path: &Path) -> Result<Vec<String>, Error> {
 
 /// The entry of `dir` called `name`, or else the one that differs only in ASCII
 /// case (game files are named inconsistently): exact wins, else the first in order.
-fn find_ci(dir: &Dir, name: &str) -> io::Result<Option<(String, Kind)>> {
+pub(crate) fn find_ci(dir: &Dir, name: &str) -> io::Result<Option<(String, Kind)>> {
     if let Some(kind) = dir.kind(name)? {
         return Ok(Some((name.to_string(), kind)));
     }

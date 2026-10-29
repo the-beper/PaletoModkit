@@ -1,7 +1,6 @@
 //! Acceptance tests of work package A4 (OIV installs through the Transaction Engine): an install is one
 //! transaction, so every failure leaves the folders as they were, every crash is recovered, overlay commands
 //! see what earlier commands of the package did, and an existing archive file is never written in place.
-//! Tests marked `#[ignore]` fail on the interim installer and say what A4 must provide.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -80,20 +79,17 @@ fn exhaust(mode: Fault) -> u64 {
 }
 
 #[test]
-#[ignore = "A4: the install is one journaled transaction: every failure is undone and what a fault in the cleanup leaves is finished by recovery"]
 fn every_failure_point_leaves_the_folders_as_they_were() {
     let n = exhaust(Fault::Fail(std::io::ErrorKind::Other));
     assert!(n > 100, "only {n} fault points");
 }
 
 #[test]
-#[ignore = "A4: one journal for the whole install, which txn::recover rolls back or finishes"]
 fn every_crash_point_is_recovered() {
     exhaust(Fault::Crash);
 }
 
 #[test]
-#[ignore = "A4: one journal for the whole install, so recovery puts every target back or finishes them all"]
 fn a_crash_after_the_commit_began_leaves_every_target_old_or_new() {
     let (old, new) = references();
     let (mut finished, mut undone) = (0, 0);
@@ -246,7 +242,6 @@ fn renames_of_an_install() -> u64 {
 }
 
 #[test]
-#[ignore = "A4: the install runs as a txn::Txn, whose rollback is where txn::ON_ROLLBACK fires"]
 fn a_rollback_step_that_fails_is_reported_and_kept_until_recovered() {
     let (old, _) = references();
     // The last rename of an install is the last file of the commit: failing there, everything else is in place and has to go back.
@@ -468,7 +463,6 @@ fn several_commands_on_one_name_compose_in_order() {
 }
 
 #[test]
-#[ignore = "A4: archives are staged in the same transaction as the loose files, so a failure undoes them all"]
 fn a_failure_while_an_archive_is_staged_leaves_the_loose_files_as_they_were() {
     if is_root() {
         return;
@@ -498,7 +492,6 @@ fn a_failure_while_an_archive_is_staged_leaves_the_loose_files_as_they_were() {
 }
 
 #[test]
-#[ignore = "A4: every changed file, archives included, is put in place by the commit of the transaction"]
 fn a_rename_that_fails_during_the_commit_undoes_the_files_already_in_place() {
     let (old, new) = references();
     let renames = renames_of_an_install();
@@ -519,4 +512,149 @@ fn a_rename_that_fails_during_the_commit_undoes_the_files_already_in_place() {
         install(&game, &package).unwrap_or_else(|e| panic!("{what}: the next install failed: {e}"));
         assert_same(&format!("{what}: the next install"), &new, &state(&game));
     }
+}
+
+#[test]
+fn a_path_below_a_file_the_package_deletes_or_writes_is_refused_with_a_clean_undo() {
+    for (commands, why) in [
+        // A file deleted, then its name made a folder: the file is still there when the path is resolved.
+        (r#"<delete>scripts\gone.asi</delete><add source="x">scripts\gone.asi\y.asi</add>"#, "is a file, not a folder"),
+        // A file written, then its name made a folder, and the other way round.
+        (r#"<add source="x">scripts\new.asi</add><add source="x">scripts\new.asi\y.asi</add>"#, "below it"),
+        (r#"<add source="x">scripts\deep\y.asi</add><add source="x">scripts\deep</add>"#, "below it"),
+        // An archive file is a file too.
+        (r#"<archive path="x64\a.rpf"><add source="x">b.txt</add></archive><add source="x">x64\a.rpf\inner.txt</add>"#, "is a file, not a folder"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let game = setup(dir.path());
+        let package = oiv(dir.path(), "x.oiv", &format!("{commands}<add source=\"x\">scripts\\other.asi</add>"), &[("content/x", b"new")], false);
+        let before = state(&game);
+        let err = install(&game, &package).unwrap_err();
+        let Error::Txn(failure) = &err else { panic!("{commands}: {err:?}") };
+        assert!(failure.undone && honest(&err), "{commands}: {err}");
+        assert!(err.to_string().contains(why) && err.to_string().ends_with("(nothing was installed)"), "{commands}: {err}");
+        assert_same(commands, &before, &state(&game));
+        assert_clean(&game, commands);
+    }
+}
+
+#[test]
+fn an_archive_edit_that_fails_leaves_the_original_and_makes_no_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let original = game.root.join("x64/a.rpf");
+    let package = oiv(dir.path(), "x.oiv", r#"<archive path="x64\a.rpf"><add source="x">b.txt</add></archive><xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")], false);
+    let (before, snap) = (identity(&original), state(&game));
+    let err = install(&game, &package).unwrap_err();
+    assert!(err.to_string().ends_with("(nothing was installed)"), "{err}");
+    assert!(identity(&original) == before, "the original archive changed");
+    assert_same("after", &snap, &state(&game));
+    assert!(!game.root.join("mods").exists(), "a copy of the original was made");
+    // The same edit without the failure: the original is still never written, and the copy is a new file.
+    let package = oiv(dir.path(), "y.oiv", r#"<archive path="x64\a.rpf"><add source="x">b.txt</add></archive>"#, &[("content/x", b"new")], false);
+    install(&game, &package).unwrap();
+    assert!(identity(&original) == before, "the original archive changed");
+    assert_eq!(ArchiveEditor::open(&game.root.join("mods/x64/a.rpf"), None).unwrap().read("b.txt", None).unwrap(), b"new");
+    assert_clean(&game, "after");
+}
+
+#[test]
+fn an_added_archive_that_is_edited_and_then_deleted_leaves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = setup(dir.path());
+    rpf(&dir.path().join("p.rpf"), "p.rpf", &[("p.txt", b"p")]);
+    let content = std::fs::read(dir.path().join("p.rpf")).unwrap();
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="p">x64\added.rpf</add><archive path="x64\added.rpf"><add source="x">b.txt</add></archive><delete>x64\added.rpf</delete>"#, &[("content/p", &content), ("content/x", b"bee")], false);
+    let before = state(&game);
+    let log = install(&game, &package).unwrap();
+    assert_same("after", &before, &state(&game));
+    assert!(!log.iter().any(|l| l.starts_with("saved ")), "{log:?}");
+    assert_clean(&game, "after");
+}
+
+#[test]
+fn what_recovery_did_at_the_start_is_in_the_log() {
+    // Crash at the first call after the journal was made: the next install undoes that operation first.
+    let dir = tempfile::tempdir().unwrap();
+    let game = setup(dir.path());
+    let package = realistic(dir.path());
+    let mut crashed = false;
+    for k in 1..2_000 {
+        faults::arm(k, Fault::Crash);
+        let _ = install(&game, &package);
+        let fired = faults::disarm();
+        if !txn::pending(&game).is_empty() {
+            crashed = true;
+            break;
+        }
+        assert!(fired, "no crash left a journal");
+    }
+    assert!(crashed);
+    let log = install(&game, &package).unwrap();
+    assert!(log[0].contains("the operation \"installing a package\"") && (log[0].starts_with("undid") || log[0].starts_with("finished")), "{log:?}");
+    assert!(log.iter().any(|l| l.starts_with("add ")), "{log:?}");
+    assert!(txn::pending(&game).is_empty());
+    assert_clean(&game, "after");
+}
+
+#[test]
+fn files_taken_from_disk_into_an_archive_leave_no_name_behind_at_any_crash_point() {
+    // An rpf added to an archive is spooled to a file on the archive's own volume; whatever the crash point, no name of it is left.
+    let fresh = |dir: &Path| {
+        rpf(&dir.join("p.rpf"), "p.rpf", &[("p.txt", b"p")]);
+        let content = std::fs::read(dir.join("p.rpf")).unwrap();
+        (setup(dir), oiv(dir, "x.oiv", r#"<archive path="x64\a.rpf"><add source="p">side.rpf</add><archive path="side.rpf"><add source="x">s.txt</add></archive></archive>"#, &[("content/p", &content), ("content/x", b"s")], false))
+    };
+    crate::fixtures::exhaust(Fault::Crash, fresh, |game, package| install(game, package), |_, _, _, _| {});
+}
+
+#[test]
+fn a_file_and_a_folder_of_one_stem_install_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = setup(dir.path());
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\foo.ini</add><add source="y">scripts\foo\foo.ini</add><add source="x">x64\bar.bin</add><add source="y">x64\bar\bar.bin</add>"#, &[("content/x", b"one"), ("content/y", b"two")], false);
+    install(&game, &package).unwrap();
+    let root = &game.root;
+    assert_eq!((std::fs::read(root.join("scripts/foo.ini")).unwrap(), std::fs::read(root.join("scripts/foo/foo.ini")).unwrap()), (b"one".to_vec(), b"two".to_vec()));
+    assert_eq!((std::fs::read(root.join("mods/x64/bar.bin")).unwrap(), std::fs::read(root.join("mods/x64/bar/bar.bin")).unwrap()), (b"one".to_vec(), b"two".to_vec()));
+    assert_clean(&game, "after");
+}
+
+#[test]
+fn names_that_differ_in_case_are_one_folder_when_it_is_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // Neither folder exists when the package is planned; a case-sensitive filesystem would make two.
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\newdir\a.ini</add><add source="y">scripts\NewDir\b.ini</add><add source="x">x64\more\a.bin</add><add source="y">X64\More\b.bin</add>"#, &[("content/x", b"one"), ("content/y", b"two")], false);
+    install(&game, &package).unwrap();
+    let folders = |dir: &Path| std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+    let root = &game.root;
+    assert_eq!(folders(&root.join("scripts")).iter().filter(|n| n.eq_ignore_ascii_case("newdir")).count(), 1, "{:?}", folders(&root.join("scripts")));
+    assert_eq!(folders(&root.join("mods/x64")).iter().filter(|n| n.eq_ignore_ascii_case("more")).count(), 1, "{:?}", folders(&root.join("mods/x64")));
+    assert_eq!(std::fs::read(root.join("scripts/newdir/a.ini")).unwrap(), b"one");
+    assert_eq!(std::fs::read(root.join("scripts/newdir/b.ini")).unwrap(), b"two");
+    assert_eq!(std::fs::read(root.join("mods/x64/more/b.bin")).unwrap(), b"two");
+    assert_clean(&game, "after");
+}
+
+#[test]
+fn a_nested_archive_that_cannot_be_opened_again_stops_the_install_before_anything_is_put_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    nested_archive(&game.root.join("x64/o.rpf"));
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\new.asi</add><archive path="x64\o.rpf"><archive path="inner.rpf"><add source="x">j.txt</add></archive></archive>"#, &[("content/x", b"new content")], false);
+    let before = state(&game);
+    // The top archive stays readable, but the nested one's header is damaged as the check begins.
+    let root = game.root.clone();
+    crate::oiv::BEFORE_OPENING.with(|h| *h.borrow_mut() = Some(Box::new(move || {
+        let staged = std::fs::read_dir(root.join("mods/x64")).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with(".paleto-")).expect("the staged archive").path();
+        let top = paleto_rpf::Archive::open(&staged, None).unwrap();
+        let at = u64::from(top.entries[top.find("inner.rpf").unwrap()].offset().unwrap()) * 512;
+        std::os::unix::fs::FileExt::write_at(&std::fs::OpenOptions::new().write(true).open(&staged).unwrap(), &[0; 16], at).unwrap();
+    })));
+    let err = install(&game, &package).unwrap_err();
+    crate::oiv::BEFORE_OPENING.with(|h| h.borrow_mut().take());
+    assert!(honest(&err) && err.to_string().ends_with("(nothing was installed)"), "{err}");
+    assert_same("after", &before, &state(&game));
+    assert_clean(&game, "after");
 }

@@ -206,6 +206,18 @@ impl Dir {
         Ok(File::from(self.openat(name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW, 0o666)?))
     }
 
+    /// A new file in this folder that has no name at all (`O_TMPFILE`): a crash leaves nothing, and nothing
+    /// can be told to open it. Fails where the filesystem cannot (see [`Dir::unnamed_unsupported`]).
+    pub fn tmpfile(&self) -> io::Result<File> {
+        fault!(Create);
+        Ok(File::from(self.openat_c(c".", libc::O_TMPFILE | libc::O_RDWR, 0o600)?))
+    }
+
+    /// Whether an error of [`Dir::tmpfile`] says the filesystem or kernel has no unnamed files.
+    pub fn unnamed_unsupported(e: &io::Error) -> bool {
+        matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP | libc::EISDIR | libc::EINVAL | libc::ENOSYS))
+    }
+
     /// Makes a new file under a name nobody can predict, and returns it with the name.
     pub fn create_unique(&self) -> io::Result<(File, String)> {
         for _ in 0..32 {

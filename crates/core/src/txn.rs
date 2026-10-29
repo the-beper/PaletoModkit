@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::Error;
-use crate::fsroot::{Dir, Existing, Fingerprint, GameRoots, Kind, LockGuard, Resolved, RootKind, random};
+use crate::fsroot::{Dir, Existing, Fingerprint, GameRoots, Kind, LockGuard, Resolved, RootKind, find_ci, random};
 use crate::game::Game;
 use crate::relpath::RelPath;
 use journal::{End, JOp, Journal, Mode, OpKind, ParseError, RootRec, State};
@@ -1024,23 +1024,34 @@ impl<'r> Txn<'r> {
     }
 
     fn touches(&self, dest: &Resolved) -> bool {
-        self.planned.contains(&format!("{}/{}/{}", usize::from(dest.anchor() == RootKind::Mods), dest.logical.join("/"), dest.name).to_ascii_lowercase())
+        // The whole path: folders that are not made yet are part of the name (`a/b` and `a` + `b` are not one file).
+        let folders = dest.logical.iter().chain(&dest.missing).cloned().collect::<Vec<_>>().join("/");
+        self.planned.contains(&format!("{}/{}/{}", usize::from(dest.anchor() == RootKind::Mods), folders, dest.name).to_ascii_lowercase())
     }
 
     /// Makes the folders `dest` needs, one at a time, each announced first.
     fn make_parents(&mut self, dest: &mut Resolved) -> Result<(), Error> {
         while let Some(name) = dest.missing.first().cloned() {
             self.roots.verify(dest)?;
+            // The folder may exist by now under another case (one this transaction made for an earlier file, or
+            // somebody else's): names are matched as the resolver matches them, so one name is one folder.
+            let hit = find_ci(&dest.parent, &name)?;
+            let name = hit.as_ref().map_or(name, |(actual, _)| actual.clone());
             let op = JOp { kind: OpKind::Mkdir, anchor: dest.anchor(), dir: dest.logical.clone(), name: name.clone(), expect: None, mode: Mode::Move, made: None, kept: false, did: false };
             let i = self.add_op(op, &dest.parent)?;
-            let (made, kept) = match dest.parent.mkdir(&name) {
-                Ok(dir) => (dir, false),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match dest.parent.kind(&name)? {
-                    Some(Kind::Dir) => (dest.parent.open_dir(&name)?, true),
-                    Some(Kind::Link) => return Err(unsafe_dest(dest, &format!("\"{name}\" appeared as a link while it was being made"))),
-                    _ => return Err(unsafe_dest(dest, &format!("\"{name}\" is not a folder"))),
+            let (made, kept) = match hit {
+                Some((_, Kind::Dir)) => (dest.parent.open_dir(&name)?, true),
+                Some((_, Kind::Link)) => return Err(unsafe_dest(dest, &format!("\"{name}\" is a link"))),
+                Some(_) => return Err(unsafe_dest(dest, &format!("\"{name}\" is not a folder"))),
+                None => match dest.parent.mkdir(&name) {
+                    Ok(dir) => (dir, false),
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match dest.parent.kind(&name)? {
+                        Some(Kind::Dir) => (dest.parent.open_dir(&name)?, true),
+                        Some(Kind::Link) => return Err(unsafe_dest(dest, &format!("\"{name}\" appeared as a link while it was being made"))),
+                        _ => return Err(unsafe_dest(dest, &format!("\"{name}\" is not a folder"))),
+                    },
+                    Err(e) => return Err(e.into()),
                 },
-                Err(e) => return Err(e.into()),
             };
             if kept {
                 self.ops[i].kept = true;
