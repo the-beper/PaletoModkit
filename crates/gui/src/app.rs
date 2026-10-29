@@ -120,6 +120,8 @@ pub struct App {
     script_hook: Option<ScriptHookWindow>,
     /// The checks made at start and the notices they bring.
     startup: Startup,
+    /// Changes an earlier run left interrupted in the chosen game: mutating actions are refused until they are settled.
+    interrupted: Vec<paleto_core::txn::Pending>,
     snapshots: Option<SnapshotsWindow>,
     prefix_tweaks: Option<PrefixWindow>,
     crash: Option<CrashWindow>,
@@ -427,6 +429,8 @@ enum Outcome {
     Done { message: String, reload: Option<ArchivePath> },
     Installed(Result<Vec<String>, String>),
     Failed(String),
+    /// What undoing or setting aside interrupted changes did.
+    Recovered(Result<paleto_core::txn::Report, String>, bool),
 }
 
 struct NameDialog {
@@ -471,11 +475,90 @@ impl Action {
         self.starts_task() || matches!(self, Action::SelectGame(_) | Action::PickGame)
     }
 
+    /// Whether it changes the game's files or its mods folder: refused while an interrupted change is pending.
+    fn mutates(&self) -> bool {
+        match self {
+            Action::Install
+                | Action::EditTextures(..)
+                | Action::ReplaceSound(..)
+                | Action::EditTexture(..)
+                | Action::SavePreview
+                | Action::Add(..)
+                | Action::AddLegacy { .. }
+                | Action::InstallAddonPacks
+                | Action::DeleteCopies(..)
+                | Action::UndoConversion(..)
+                | Action::Rename { .. }
+                | Action::CreateFolder(..)
+                | Action::Delete
+                | Action::ToggleMod(..)
+                | Action::ScriptHookUpdate(..)
+                | Action::TurnOff(..)
+                | Action::HuntStart
+                | Action::HuntAnswer(..)
+                | Action::HuntStop
+                | Action::HuntInside(..)
+                | Action::SaveSnapshot(..)
+                | Action::RestoreSnapshot(..)
+                | Action::DeleteSnapshot(..)
+                | Action::AddDlcPacks(..)
+                | Action::ConvertMods(..) => true,
+            Action::Quit
+                | Action::CheckMods(..)
+                | Action::ScriptHook(..)
+                | Action::Snapshots(..)
+                | Action::PrefixTweaks(..)
+                | Action::Export(..)
+                | Action::WriteExport(..)
+                | Action::CrashDetection(..)
+                | Action::AskAddonPacks(..)
+                | Action::RecoverInterrupted
+                | Action::AbandonInterrupted(..)
+                | Action::FindCopies
+                | Action::Unsaved(..)
+                | Action::SelectGame(..)
+                | Action::PickGame
+                | Action::PickArchive
+                | Action::PickPackage
+                | Action::CloseInstall
+                | Action::Go(..)
+                | Action::Reveal(..)
+                | Action::Back
+                | Action::Forward
+                | Action::Enter(..)
+                | Action::Preview(..)
+                | Action::ClosePreview
+                | Action::ExportTextures(..)
+                | Action::ExportModel(..)
+                | Action::ExportSounds(..)
+                | Action::PickTexture(..)
+                | Action::AskTexture(..)
+                | Action::PickTextureBatch { .. }
+                | Action::AskTextureBatch(..)
+                | Action::FormatPreview
+                | Action::Extract(..)
+                | Action::PickAdd { .. }
+                | Action::AskDelete(..)
+                | Action::AskRename(..)
+                | Action::AskNewFolder
+                | Action::ToggleOriginals
+                | Action::PeekOriginal(..)
+                | Action::Refresh
+                | Action::ExpandAll
+                | Action::CollapseAll
+                | Action::CancelTask
+                | Action::ShowInfo(..)
+                | Action::Settings(..) => false,
+        }
+    }
+
     /// Whether running it starts the background task.
     fn starts_task(&self) -> bool {
         matches!(
             self,
-            Action::Install
+            Action::RecoverInterrupted
+                | Action::AbandonInterrupted(_)
+                | Action::Install
                 | Action::EditTextures(_)
                 | Action::ReplaceSound(..)
                 | Action::ExportSounds(..)
@@ -555,6 +638,10 @@ enum Action {
     InstallAddonPacks,
     /// Put back the Legacy files of a conversion of the mods folder.
     UndoConversion(String),
+    /// Undo (or finish) the changes an earlier run left interrupted.
+    RecoverInterrupted,
+    /// Set these interrupted journals (by id) aside, after the confirmation.
+    AbandonInterrupted(Vec<String>),
     FindCopies,
     DeleteCopies(Vec<paleto_core::cleanup::Copy>),
     /// Add the files of the Legacy dialog, converting them or not.
@@ -654,6 +741,7 @@ impl App {
             mods_check: None,
             script_hook: None,
             startup: Startup::default(),
+            interrupted: Vec::new(),
             snapshots: None,
             prefix_tweaks: None,
             crash: None,
@@ -1069,6 +1157,19 @@ impl App {
         self.startup.offer_crash(time, verdict.to_string());
     }
 
+    /// Tells the app of changes an earlier run left interrupted, as if they were found when the game was chosen.
+    #[doc(hidden)]
+    pub fn offer_interrupted(&mut self, pending: Vec<paleto_core::txn::Pending>) {
+        self.interrupted = pending.clone();
+        self.startup.offer_interrupted(pending);
+    }
+
+    /// How many interrupted changes are pending in the chosen game.
+    #[doc(hidden)]
+    pub fn interrupted_count(&self) -> usize {
+        self.interrupted.len()
+    }
+
     /// Installs this zip as the Script Hook V update instead of downloading one.
     pub fn set_script_hook_zip(&mut self, zip: Vec<u8>) {
         self.startup.zip = Some(zip);
@@ -1155,6 +1256,9 @@ impl App {
         self.expand_task = None;
         self.listing_task = None;
         let root = game.root.clone();
+        self.startup.forget_interrupted();
+        self.interrupted = paleto_core::txn::pending(&game);
+        self.startup.offer_interrupted(self.interrupted.clone());
         self.game = Some(game);
         self.startup.begin(self.game.as_ref(), ctx);
         self.go(Location::Folder(root));
@@ -1478,6 +1582,9 @@ impl App {
 
     /// Runs an action, first asking about unsaved edits it would throw away.
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        if self.refused_while_interrupted(&action) {
+            return;
+        }
         // Refused before asking about unsaved edits: discarding them would be for nothing.
         if action.waits_for_task() && self.busy() {
             self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
@@ -1490,7 +1597,28 @@ impl App {
         self.run(action, ctx);
     }
 
+    /// Refuses a change to the game while an interrupted one is pending: the next change would undo it
+    /// without telling, and what it names should be seen first. Reads stay available.
+    fn refused_while_interrupted(&mut self, action: &Action) -> bool {
+        if self.interrupted.is_empty() || !action.mutates() {
+            return false;
+        }
+        // Settled meanwhile (by the command line, say): the gate lifts. Else the notice comes back, so Undo can be chosen.
+        if let Some(game) = &self.game {
+            self.interrupted = paleto_core::txn::pending(game);
+        }
+        if self.interrupted.is_empty() {
+            return false;
+        }
+        self.startup.offer_interrupted(self.interrupted.clone());
+        self.status = Status::Error("An interrupted change must be undone first".into());
+        true
+    }
+
     fn run(&mut self, action: Action, ctx: &egui::Context) {
+        if self.refused_while_interrupted(&action) {
+            return;
+        }
         // A second operation would replace the running one halfway.
         if action.waits_for_task() && self.busy() {
             self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
@@ -1956,6 +2084,24 @@ impl App {
                     Err(e) => Outcome::Failed(e.to_string()),
                 }));
                 self.after_task = Some(Action::Refresh);
+            }
+            Action::RecoverInterrupted => {
+                let Some(game) = self.game.clone() else { return };
+                self.clear_preview();
+                self.task = Some(Task::spawn("Undoing the interrupted change", ctx, move || Outcome::Recovered(paleto_core::txn::recover(&game).map_err(|e| e.to_string()), false)));
+            }
+            Action::AbandonInterrupted(ids) => {
+                let Some(game) = self.game.clone() else { return };
+                self.task = Some(Task::spawn("Setting the interrupted change aside", ctx, move || {
+                    let mut all = paleto_core::txn::Report::default();
+                    for id in ids {
+                        match paleto_core::txn::abandon(&game, &id) {
+                            Ok(report) => all.log.extend(report.log),
+                            Err(e) => all.failures.push(format!("{id}: {e}")),
+                        }
+                    }
+                    Outcome::Recovered(Ok(all), true)
+                }));
             }
             Action::UndoConversion(time) => {
                 let Some(game) = self.game.clone() else { return };
@@ -2532,6 +2678,7 @@ impl App {
                     Outcome::Failed(err) => {
                         desktop_notify(&label, &format!("Failed: {err}"));
                     }
+                    Outcome::Recovered(..) => {}
                 }
             }
 
@@ -2578,6 +2725,37 @@ impl App {
                     if let Some(d) = &mut self.install {
                         d.result = Some(result);
                     }
+                }
+                Outcome::Recovered(result, aside) => {
+                    let mut lines = Vec::new();
+                    let failed;
+                    match result {
+                        Ok(report) => {
+                            if report.rolled_back + report.finished > 0 {
+                                lines.push(format!("{} undone, {} finished.", report.rolled_back, report.finished));
+                            }
+                            lines.extend(report.log);
+                            failed = !report.failures.is_empty();
+                            lines.extend(report.failures.into_iter().map(|f| format!("Not done: {f}")));
+                        }
+                        Err(e) => {
+                            failed = true;
+                            lines.push(format!("Not done: {e}"));
+                        }
+                    }
+                    if let Some(game) = &self.game {
+                        self.interrupted = paleto_core::txn::pending(game);
+                    }
+                    let title = match (failed, aside) {
+                        (true, _) => "Something is still left from an interrupted change",
+                        (false, true) => "Interrupted change set aside",
+                        (false, false) => "Interrupted change settled",
+                    };
+                    self.status = if failed { Status::Error("An interrupted change could not be settled".into()) } else { Status::Info(title.into()) };
+                    self.startup.offer_report(title, lines, failed);
+                    self.startup.offer_interrupted(self.interrupted.clone());
+                    self.clear_tree();
+                    self.refresh_then(AfterListing::default());
                 }
                 Outcome::Failed(e) => {
                     self.status = Status::Error(e);
@@ -4416,12 +4594,24 @@ impl eframe::App for App {
             }
         }
         if let Some(reply) = self.startup.show(&ctx) {
-            self.startup.dismiss();
             match reply {
-                notices::Reply::Update(release) => actions.push(Action::ScriptHookUpdate(release)),
-                notices::Reply::OpenScriptHook => actions.push(Action::ScriptHook(true)),
-                notices::Reply::OpenCrash => actions.push(Action::CrashDetection(true)),
-                notices::Reply::Dismiss => {}
+                notices::Reply::AskAbandon => self.startup.confirm_abandon(true),
+                notices::Reply::Back => self.startup.confirm_abandon(false),
+                notices::Reply::Undo | notices::Reply::Abandon(_) if self.busy() => {
+                    // Kept on screen: the choice is made again once the operation is done.
+                    self.status = Status::Error("Wait for the current operation to finish, then try again.".into());
+                }
+                reply => {
+                    self.startup.dismiss();
+                    match reply {
+                        notices::Reply::Update(release) => actions.push(Action::ScriptHookUpdate(release)),
+                        notices::Reply::OpenScriptHook => actions.push(Action::ScriptHook(true)),
+                        notices::Reply::OpenCrash => actions.push(Action::CrashDetection(true)),
+                        notices::Reply::Undo => actions.push(Action::RecoverInterrupted),
+                        notices::Reply::Abandon(ids) => actions.push(Action::AbandonInterrupted(ids)),
+                        notices::Reply::AskAbandon | notices::Reply::Back | notices::Reply::Dismiss => {}
+                    }
+                }
             }
         }
         for action in actions {

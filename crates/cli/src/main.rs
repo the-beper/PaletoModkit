@@ -86,6 +86,17 @@ enum SnapshotAction {
 enum Command {
     /// Prepare the encryption keys (downloads CodeWalker's magic.dat once).
     Setup,
+    /// Undo or finish the changes an earlier run left interrupted (a crash, a
+    /// power cut). Every command that changes the game does this first.
+    Recover {
+        /// Only list the interrupted changes and the `.paleto-*` files no journal accounts for.
+        #[arg(long, conflicts_with = "abandon")]
+        status: bool,
+        /// Set a journal aside (its id, as --status shows it) when it cannot be undone: it stops blocking,
+        /// and nothing it names is deleted or put back.
+        #[arg(long, value_name = "ID")]
+        abandon: Option<String>,
+    },
     /// Check that the game will load the mods folder, and which of its files the last game session read.
     Check,
     /// Show archive header and statistics.
@@ -299,7 +310,51 @@ fn main() -> Result<()> {
     // Exit quietly when piped into `head` and the like.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let cli = Cli::parse();
+    recover_first(&cli)?;
     match cli.command {
+        Command::Recover { status, abandon } => {
+            use paleto_core::txn;
+            let game = find_game(cli.game.as_deref(), None)?;
+            if status {
+                let pending = txn::pending(&game);
+                for p in &pending {
+                    let label = if p.label.is_empty() { "(unnamed change)" } else { p.label.as_str() };
+                    println!("{}  {}  {}", p.journal.trim_end_matches(".log"), pending_state(&p.state), label);
+                    for f in &p.files {
+                        println!("    {}", f.display());
+                    }
+                }
+                let left = txn::leftovers(&game);
+                for f in &left {
+                    println!("no journal accounts for {}", f.display());
+                }
+                if pending.is_empty() && left.is_empty() {
+                    // Journals of a change that is running now are not listed.
+                    match game.roots().map(|r| r.lock("listing interrupted changes").map(drop)) {
+                        Ok(Err(paleto_core::Error::Busy(who))) => bail!("the game is busy ({who}): interrupted changes are not listed while a change runs"),
+                        _ => println!("no interrupted change"),
+                    }
+                }
+            } else if let Some(id) = abandon {
+                for line in txn::abandon(&game, &id)?.log {
+                    println!("{line}");
+                }
+            } else {
+                let report = txn::recover(&game)?;
+                for line in &report.log {
+                    println!("recovered: {line}");
+                }
+                for line in &report.failures {
+                    eprintln!("! {line}");
+                }
+                if !report.failures.is_empty() {
+                    bail!("{} things of an interrupted change could not be undone; `paleto recover --status` lists them, `--abandon ID` sets a journal aside", report.failures.len());
+                }
+                if report.log.is_empty() {
+                    println!("no interrupted change");
+                }
+            }
+        }
         Command::Setup => {
             let game = find_game(cli.game.as_deref(), None)?;
             game.keys()?;
@@ -1242,6 +1297,59 @@ fn age(secs: u64) -> String {
         7200..172_800 => format!("{} h", secs / 3600),
         _ => format!("{} days", secs / 86400),
     }
+}
+
+/// What a pending journal is in a word.
+fn pending_state(state: &paleto_core::txn::PendingState) -> String {
+    use paleto_core::txn::PendingState;
+    match state {
+        PendingState::Interrupted => "interrupted".into(),
+        PendingState::Committed => "finished-cleanup-left".into(),
+        PendingState::Stuck => "stuck".into(),
+        PendingState::Unreadable(why) => format!("unreadable ({why})"),
+    }
+}
+
+/// The path a command that changes a game is about (None: the game is found from `--game` or the folder).
+fn changes_game(command: &Command) -> Option<Option<PathBuf>> {
+    let inside = |path: &str| Some(ArchivePath::parse(path).and_then(|a| std::path::absolute(a.disk).ok()));
+    match command {
+        Command::Add { dest: path, .. } | Command::Rm { path } | Command::Mv { path, .. } | Command::Mkdir { path } => inside(path),
+        Command::Textures { path, replace, add, remove, rename, replace_matching, .. }
+            if !(replace.is_empty() && add.is_empty() && remove.is_empty() && rename.is_empty() && replace_matching.is_empty()) =>
+        {
+            inside(path)
+        }
+        Command::Xml { path, import: Some(_), .. } | Command::Text { path, import: Some(_), .. } => inside(path),
+        Command::Audio { path, replace, .. } if !replace.is_empty() => inside(path),
+        Command::Install { .. } | Command::Clean { delete: true } => Some(None),
+        Command::Hunt { action } if !matches!(action, None | Some(HuntAction::Status)) => Some(None),
+        Command::Snapshot { action: Some(SnapshotAction::Save { .. } | SnapshotAction::Restore { .. } | SnapshotAction::Delete { .. }) } => Some(None),
+        Command::Convert { undo: Some(_), .. } => Some(None),
+        Command::Convert { files, undo: None, .. } if files.is_empty() => Some(None),
+        _ => None,
+    }
+}
+
+/// Before a command that changes a game: finish or undo what an earlier run left interrupted, say so
+/// (lines starting `recovered:`), and stop if some of it cannot be undone.
+fn recover_first(cli: &Cli) -> Result<()> {
+    let Some(near) = changes_game(&cli.command) else { return Ok(()) };
+    // No game found: the command says so itself.
+    // The game the command will write, found as its handler finds it.
+    let owned = near.as_deref().and_then(|p| owner(p, cli.game.as_deref()).ok().flatten()).map(|(game, _)| game);
+    let Some(game) = owned.or_else(|| find_game(cli.game.as_deref(), near.as_deref()).ok()) else { return Ok(()) };
+    let report = paleto_core::txn::recover(&game)?;
+    for line in &report.log {
+        println!("recovered: {line}");
+    }
+    if !report.failures.is_empty() {
+        for line in &report.failures {
+            eprintln!("! {line}");
+        }
+        bail!("an interrupted change could not be undone, so nothing was changed; `paleto recover --status` lists what is left, `paleto recover --abandon ID` sets a journal aside");
+    }
+    Ok(())
 }
 
 /// The game folder: explicit, or found above `near` or the current directory.

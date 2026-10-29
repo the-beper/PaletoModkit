@@ -196,6 +196,7 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | Command | What it does |
 | :--- | :--- |
 | `setup` | Prepare the encryption keys (downloads CodeWalker's `magic.dat` once) |
+| `recover [--status] [--abandon ID]` | Undo or finish a change an earlier run left interrupted (every command that changes a game does this first); `--status` only lists, `--abandon` sets a stuck journal aside. See [troubleshooting](troubleshooting.md#one-change-at-a-time-and-interrupted-changes) |
 | `check` | Check that the game will load the mods folder, and which of its files the last game session read |
 | `info PATH` | Archive header and statistics |
 | `ls PATH [-r]` | List an archive or a folder inside it |

@@ -94,7 +94,15 @@ A restore copies the snapshot beside `mods`, swaps the two folders, then removes
 
 Anything that changes a game's files (installing a package or an add-on pack, snapshots, turning mods off, converting, cleaning up, installing Script Hook V, editing an archive or a loose file, renaming, deleting or making folders in the file browser) runs under a lock on that game. If another change to the same game is running, in this program or another one, you get a "busy" message that says which; wait for it to finish and try again. Other games, and everything that only reads, are not held up.
 
-If a change is interrupted (a crash, a power cut, the program killed), the next change to that game first undoes it, or finishes the clean-up if all its files were already in place, and says so. If it cannot be undone (a backup was deleted by hand, a folder became read-only), the message names the files and their backups and nothing else is changed until that is sorted out. Files called `.paleto-…` next to the game's files are this program's temporaries and backups; they are never deleted unless this program made them in the run that is finishing.
+If a change is interrupted (a crash, a power cut, the program killed), it is undone, or its clean-up is finished if all its files were already in place, before anything else changes that game. If it cannot be undone (a backup was deleted by hand, a folder became read-only), the message names the files and their backups and nothing else is changed until that is sorted out.
+
+| Where | What happens |
+| :--- | :--- |
+| Window | Choosing a game with an interrupted change opens "A change was interrupted", before any other notice, naming the change, its state and its files. **Undo** puts the files back (or finishes the clean-up) and then shows what was done. **Later** closes it; the next refused change brings it back, and until it is undone, changes to that game are refused with "An interrupted change must be undone first", while reading stays available. |
+| Window, stuck change | For a change that cannot be undone, or whose journal cannot be read, **Abandon…** asks first and lists the files and backups the journal names. Confirming moves the journal to `.paleto/journal/abandoned/`; nothing is deleted or put back, so the files and backups it names stay for you to look at. |
+| Command line | `paleto recover` undoes it and prints what was done (`recovered: …`). `paleto recover --status` lists the interrupted changes and the `.paleto-…` files no journal accounts for, and changes nothing. `paleto recover --abandon ID` does what Abandon… does, for the id `--status` shows. Every command that changes a game does the `recover` first and stops if it fails. |
+
+Files called `.paleto-…` next to the game's files are this program's temporaries and backups; they are never deleted unless this program made them in the run that is finishing.
 
 The `.paleto` folder in the game folder holds the lock (`lock`) and the records of changes in progress (`journal/`). Leave it alone; it is safe to keep.
 
