@@ -750,14 +750,15 @@ done
     fn scratch_folders_are_new_and_private() {
         use std::os::unix::fs::PermissionsExt;
         let first = scratch_dir().unwrap();
-        // The next name already taken, as someone else could in a shared /tmp.
+        // The next name already taken, as someone else could in a shared /tmp. Another test may have got it from
+        // `scratch_dir` first and still be using it: only a folder made here is removed here.
         let n: u32 = first.to_string_lossy().rsplit('-').next().unwrap().parse().unwrap();
         let taken = std::env::temp_dir().join(format!("paleto-{}-{}", std::process::id(), n + 1));
-        let _ = std::fs::create_dir(&taken);
+        let made = std::fs::create_dir(&taken).is_ok();
         let next = scratch_dir().unwrap();
         assert_ne!(next, taken);
         assert_eq!(std::fs::metadata(&next).unwrap().permissions().mode() & 0o777, 0o700);
-        for dir in [first, taken, next] {
+        for dir in [first, next].into_iter().chain(made.then_some(taken)) {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
