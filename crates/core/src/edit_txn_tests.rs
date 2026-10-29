@@ -598,7 +598,11 @@ fn every_failure_and_crash_point_of_deleting_a_folder() {
             // The folders are removed after the commit: there empty, or gone; the files are all there or all gone.
             &["mods/folder"],
             |dir| (game_with_a_mods_folder(dir), ()),
-            |game, ()| vfs::delete_local(game, &[rel("mods/folder")]).map(|()| Vec::new()),
+            |game, ()| match vfs::delete_local(game, &[rel("mods/folder")]) {
+                // The files went and a folder was left: said, and the same end as the folders gone.
+                Err(Error::Io(e)) if e.to_string().starts_with("the files were deleted, but") => Ok(Vec::new()),
+                other => other.map(|()| Vec::new()),
+            },
             |game, (), what, done| {
                 for name in ["mods/folder/a.txt", "mods/folder/sub/b.txt"] {
                     assert_eq!(game.root.join(name).exists(), !done, "{what}: {name}");
@@ -682,4 +686,61 @@ fn a_hunt_step_that_moved_parts_and_failed_is_not_gone_on_from() {
     assert_eq!(crash_hunt::load(&game).as_ref(), Some(&hunt));
     crash_hunt::stop(&game, None).unwrap();
     assert!(["A.asi", "B.asi", "C.asi", "D.asi"].iter().all(|p| root.join(p).exists()) && crash_hunt::turned_off(&game).is_empty());
+}
+
+// ---- second review ----
+
+#[test]
+fn a_name_like_mods_in_another_case_is_not_the_mods_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_with_a_mods_folder(dir.path());
+    std::fs::create_dir_all(game.root.join("MODS")).unwrap();
+    std::fs::write(game.root.join("MODS/x.txt"), b"x").unwrap();
+    let before = state(&game);
+    for result in [
+        vfs::delete_local(&game, &[rel("MODS")]),
+        vfs::delete_local(&game, &[rel("Mods")]),
+        vfs::rename_local(&game, &rel("MODS"), "other"),
+        vfs::rename_local(&game, &rel("scripts"), "Mods"),
+        vfs::rename_local(&game, &rel("mods"), "MODS"),
+        vfs::mkdir_local(&game, &rel("mODS")),
+    ] {
+        let e = result.unwrap_err().to_string();
+        assert!(e.contains("named like the mods folder"), "{e}");
+    }
+    // The real one is untouched by all of them, and says why when asked.
+    assert_unchanged(&before, &state(&game));
+    let (name, why) = vfs::local_refusal(&game.root, &["MODS".to_string()]).unwrap();
+    assert!(name == "MODS" && why.contains("named like the mods folder"), "{why}");
+}
+
+#[test]
+fn a_folder_that_cannot_be_removed_after_the_files_went_is_reported() {
+    if is_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_with_a_mods_folder(dir.path());
+    std::fs::create_dir_all(game.root.join("mods/outer/inner")).unwrap();
+    std::fs::write(game.root.join("mods/outer/inner/f.txt"), b"f").unwrap();
+    // `inner` can be emptied, but `outer` cannot be changed, so `inner` cannot be removed.
+    let _locked = ReadOnly::new(&game.root.join("mods/outer"));
+    let e = vfs::delete_local(&game, &[rel("mods/outer/inner")]).unwrap_err().to_string();
+    assert!(e.contains("the files were deleted") && e.contains("folder mods/outer/inner") && !e.contains("nothing was"), "{e}");
+    assert!(!game.root.join("mods/outer/inner/f.txt").exists() && game.root.join("mods/outer/inner").is_dir());
+}
+
+#[test]
+fn dots_in_a_folder_reached_through_a_link_go_where_the_link_leads() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_with_a_mods_folder(dir.path());
+    let outside = dir.path().join("outside/sub");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(dir.path().join("outside/f.txt"), b"outside").unwrap();
+    std::os::unix::fs::symlink(&outside, game.root.join("mods/link")).unwrap();
+    // Not `mods/f.txt` (what the name says), but `outside/f.txt`, which is not in the game.
+    assert!(vfs::local_rel(&game.root.join("mods/link/../f.txt"), &game).is_err());
+    assert!(vfs::delete_local(&game, &[vfs::local_rel(&game.root.join("mods/folder/../c.txt"), &game).unwrap()]).is_ok());
+    assert!(!game.root.join("mods/c.txt").exists());
+    assert_eq!(std::fs::read(dir.path().join("outside/f.txt")).unwrap(), b"outside");
 }

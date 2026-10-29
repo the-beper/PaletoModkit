@@ -351,14 +351,30 @@ const ORIGINAL: &str = "is an original game file: it is never changed here (its 
 pub fn local_rel(path: &Path, game: &Game) -> Result<RelPath, Error> {
     let not_in_game = || Error::UnsafePath { path: path.display().to_string(), why: format!("is not in the game folder {}", game.root.display()) };
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return Err(not_in_game()) };
+    // `..` in a folder reached through a link goes where the link leads: the real place is looked for then.
+    let real;
+    let parent = if parent.components().any(|c| c == std::path::Component::ParentDir) {
+        real = std::fs::canonicalize(parent).map_err(|_| not_in_game())?;
+        real.as_path()
+    } else {
+        parent
+    };
     let rel = in_game(parent, game).ok_or_else(not_in_game)?.join(name);
     RelPath::parse(&rel.to_string_lossy())
 }
 
 /// Whether `rel` names the mods folder itself (the game folder's `mods`, a folder or a link to one).
 fn is_mods_itself(rel: &RelPath) -> bool {
-    rel.parts().len() == 1 && rel.name().eq_ignore_ascii_case("mods")
+    rel.parts().len() == 1 && rel.name() == "mods"
 }
+
+/// Whether `rel` is a name of the game folder that is `mods` in another case (`MODS`): not the mods folder, which the
+/// tool finds by its exact name, and too much like it to be changed here.
+fn is_mods_lookalike(rel: &RelPath) -> bool {
+    rel.parts().len() == 1 && rel.name() != "mods" && rel.name().eq_ignore_ascii_case("mods")
+}
+
+const MODS_LOOKALIKE: &str = "is named like the mods folder but is not it (that is `mods`, in lower case): it is not renamed, deleted or made here";
 
 /// The mods folder as it is in the game folder (named `mods`, as [`GameRoots`] looks for it) and what it is,
 /// without following it. `None` if there is none.
@@ -373,6 +389,9 @@ fn mods_entry(roots: &GameRoots) -> Result<Option<(String, Kind)>, Error> {
 /// leaves the game and mods folders is refused. `mods/...` is the mods folder, any other path the game folder.
 /// The mods folder itself is not resolved here (see [`is_mods_itself`]).
 fn local_dest(roots: &GameRoots, rel: &RelPath) -> Result<Resolved, Error> {
+    if is_mods_lookalike(rel) {
+        return Err(Error::UnsafePath { path: rel.to_string(), why: MODS_LOOKALIKE.to_string() });
+    }
     let dest = if rel.in_mods_folder() {
         roots.mods_dest(&rel.without_mods())?
     } else if rel.is_game_data() {
@@ -387,7 +406,7 @@ fn local_dest(roots: &GameRoots, rel: &RelPath) -> Result<Resolved, Error> {
 /// What a refusal of [`local_dest`] says to the user.
 fn refusal_text(e: &Error) -> String {
     match e {
-        Error::UnsafePath { why, .. } if why == ORIGINAL => why.clone(),
+        Error::UnsafePath { why, .. } if why == ORIGINAL || why == MODS_LOOKALIKE => why.clone(),
         Error::UnsafePath { why, .. } => format!("cannot be changed here: {why}"),
         e => format!("cannot be changed here: {e}"),
     }
@@ -425,7 +444,12 @@ pub fn delete_local(game: &Game, rels: &[RelPath]) -> Result<(), Error> {
                     None => return Err(Error::Io(io::Error::new(io::ErrorKind::NotFound, format!("{rel} does not exist")))),
                     Some((name, Kind::Link)) => mods_link = Some(name),
                     Some((name, Kind::Dir)) => {
-                        for child in roots.game.dir.open_dir(&name)?.names()? {
+                        // The files are listed in the folder they are deleted through.
+                        let mods = roots.mods().ok_or_else(|| Error::UnsafePath { path: rel.to_string(), why: "cannot be used as the mods folder".into() })?;
+                        if roots.game.dir.open_dir(&name)?.identity()? != mods.dir.identity()? {
+                            return Err(Error::Io(io::Error::other("the mods folder changed while it was being used")));
+                        }
+                        for child in mods.dir.names()? {
                             plan_delete(&roots, txn, &RelPath::parse(&format!("mods/{child}"))?, &mut folders)?;
                         }
                         folders.push(rel.clone());
@@ -439,11 +463,8 @@ pub fn delete_local(game: &Game, rels: &[RelPath]) -> Result<(), Error> {
         Ok(((), Vec::new()))
     })?;
     // A folder is noted after the folders in it: the deepest first. One that cannot go (somebody put a file in
-    // it, say) stays, as the empty or full folder it is: the files that were asked for are gone.
-    for rel in &folders {
-        let _ = remove_folder(&roots, rel);
-    }
-    let mut left: Vec<String> = Vec::new();
+    // it, a folder that cannot be written to) stays, and is said: the files that were asked for are gone.
+    let mut left: Vec<String> = folders.iter().filter_map(|rel| remove_folder(&roots, rel).err().map(|e| format!("folder {rel}: {e}"))).collect();
     if let Some(name) = mods_link {
         // The link itself, if it is still one: what it points to is never touched.
         let removed = match roots.game.dir.kind(&name) {
@@ -451,12 +472,12 @@ pub fn delete_local(game: &Game, rels: &[RelPath]) -> Result<(), Error> {
             Ok(_) => Err(io::Error::other("is no longer a link")),
             Err(e) => Err(e),
         };
-        left.extend(removed.err().map(|e| format!("{name}: {e}")));
+        left.extend(removed.err().map(|e| format!("link {name}: {e}")));
     }
     if left.is_empty() {
         return Ok(());
     }
-    Err(Error::Io(io::Error::other(format!("the files were deleted, but the link could not be removed: {}", left.join("; ")))))
+    Err(Error::Io(io::Error::other(format!("the files were deleted, but these could not be removed and stay: {}", left.join("; ")))))
 }
 
 /// Plans the deletion of `rel` in `txn`: a file or link at once, a folder file by file; the folders are noted.
@@ -541,7 +562,7 @@ pub fn rename_local(game: &Game, from: &RelPath, to: &str) -> Result<(), Error> 
         return Ok(());
     }
     // A folder of the game folder (or a link to one) becomes the mods folder, if there is none.
-    if from.parts().len() == 1 && to.eq_ignore_ascii_case("mods") {
+    if from.parts().len() == 1 && to == "mods" {
         if !matches!(roots.game.dir.kind(&src.name)?, Some(Kind::Dir | Kind::Link)) {
             return Err(Error::UnsafePath { path: from.to_string(), why: "is not a folder".into() });
         }
@@ -578,18 +599,18 @@ fn rename_mods(roots: &GameRoots, new: &RelPath, to: &str) -> Result<(), Error> 
     if name == to {
         return Ok(());
     }
-    let case_only = name.eq_ignore_ascii_case(to);
-    if !case_only {
-        if new.is_game_data() {
-            return Err(Error::UnsafePath { path: to.to_string(), why: ORIGINAL.to_string() });
-        }
-        let dst = roots.dest(new)?;
-        roots.check_write(&dst)?;
-        if dst.existing.is_some() {
-            return Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} already exists"))));
-        }
+    if is_mods_lookalike(new) {
+        return Err(Error::UnsafePath { path: to.to_string(), why: MODS_LOOKALIKE.to_string() });
     }
-    rename_noreplace(&roots.game.dir, &name, to, case_only)?;
+    if new.is_game_data() {
+        return Err(Error::UnsafePath { path: to.to_string(), why: ORIGINAL.to_string() });
+    }
+    let dst = roots.dest(new)?;
+    roots.check_write(&dst)?;
+    if dst.existing.is_some() {
+        return Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} already exists"))));
+    }
+    rename_noreplace(&roots.game.dir, &name, to, false)?;
     let _ = roots.game.dir.sync();
     Ok(())
 }
