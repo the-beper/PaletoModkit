@@ -174,6 +174,31 @@ pub struct Resolved {
     /// Which root `logical` is relative to (the game's, while the mods folder is yet to be made).
     anchor: RootKind,
     base: PathBuf,
+    /// Set by [`GameRoots::owned_dest`]: the tool's own folder this lies in, which the write policy then accepts.
+    owned: Option<Owned>,
+}
+
+/// A folder of the game folder the tool keeps its own files in, where a transaction may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owned {
+    /// `mods_disabled/`: parts of the mods put aside.
+    Disabled,
+    /// `mods_legacy/`: backups of archives before a conversion.
+    Legacy,
+}
+
+impl Owned {
+    fn folder(self) -> &'static str {
+        match self {
+            Owned::Disabled => "mods_disabled",
+            Owned::Legacy => "mods_legacy",
+        }
+    }
+
+    /// The owned folder `name` (the first name of a path in the game folder) is, in any case.
+    fn of(name: &str) -> Option<Owned> {
+        [Owned::Disabled, Owned::Legacy].into_iter().find(|o| name.eq_ignore_ascii_case(o.folder()))
+    }
 }
 
 impl Resolved {
@@ -540,6 +565,43 @@ impl GameRoots {
         self.resolve(RootKind::Mods, p.parts(), p)
     }
 
+    /// `rel` in one of the tool's own folders of the game folder, for a transaction to write (a backup, a part put
+    /// aside): the names are matched exactly, a link or a file anywhere on the way (the folder itself and the last
+    /// name included) is refused so nothing is ever written through one, and the folders that are missing are made by
+    /// the transaction. The write policy accepts the result only for its own `top`.
+    pub fn owned_dest(&self, top: Owned, rel: &RelPath) -> Result<Resolved, Error> {
+        let names: Vec<&str> = std::iter::once(top.folder()).chain(rel.parts().iter().map(String::as_str)).collect();
+        let (name, folders) = names.split_last().expect("the folder and at least one name");
+        let mut parent = self.game.dir.try_clone()?;
+        let mut shown = self.game.shown.clone();
+        let (mut logical, mut missing) = (Vec::new(), Vec::new());
+        for folder in folders {
+            shown.push(folder);
+            if !missing.is_empty() {
+                missing.push(folder.to_string());
+                continue;
+            }
+            match parent.kind(folder)? {
+                None => missing.push(folder.to_string()),
+                Some(Kind::Dir) => match parent.open_dir(folder) {
+                    Ok(dir) => {
+                        parent = dir;
+                        logical.push(folder.to_string());
+                    }
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => return Err(unsafe_path(&shown, "this tool's own folder is a link or a file, not a folder")),
+                    Err(e) => return Err(e.into()),
+                },
+                Some(_) => return Err(unsafe_path(&shown, "this tool's own folder is a link or a file, not a folder")),
+            }
+        }
+        shown.push(name);
+        let existing = if missing.is_empty() { parent.stat(name)? } else { None };
+        if matches!(existing, Some(Existing::Link(_))) {
+            return Err(unsafe_path(&shown, "that is a link, and nothing is written through one in this tool's own folder"));
+        }
+        Ok(Resolved { root: RootKind::Game, parent, logical, name: name.to_string(), existing, missing, anchor: RootKind::Game, base: self.game.shown.clone(), owned: Some(top) })
+    }
+
     fn resolve(&self, kind: RootKind, comps: &[String], p: &RelPath) -> Result<Resolved, Error> {
         let shown = p.to_string();
         let root = match (kind, if kind == RootKind::Mods { self.mods_state()? } else { None }) {
@@ -549,7 +611,7 @@ impl GameRoots {
                 // No mods folder yet: the first write makes it, then the folders below it.
                 let mut missing = vec!["mods".to_string()];
                 missing.extend(comps[..comps.len() - 1].iter().cloned());
-                return Ok(Resolved { root: kind, parent: self.game.dir.try_clone()?, logical: Vec::new(), name: comps[comps.len() - 1].clone(), existing: None, missing, anchor: RootKind::Game, base: self.game.shown.clone() });
+                return Ok(Resolved { root: kind, parent: self.game.dir.try_clone()?, logical: Vec::new(), name: comps[comps.len() - 1].clone(), existing: None, missing, anchor: RootKind::Game, base: self.game.shown.clone(), owned: None });
             }
         };
         let mut w = root.walk(comps, false, &shown)?;
@@ -568,7 +630,7 @@ impl GameRoots {
                 }
             }
         }
-        let r = Resolved { root: kind, parent: w.stack.pop().expect("the root"), logical: w.logical, name: w.name, existing: w.existing, missing: w.missing, anchor: kind, base: root.shown.clone() };
+        let r = Resolved { root: kind, parent: w.stack.pop().expect("the root"), logical: w.logical, name: w.name, existing: w.existing, missing: w.missing, anchor: kind, base: root.shown.clone(), owned: None };
         self.policy(&r, false)?;
         Ok(r)
     }
@@ -588,12 +650,17 @@ impl GameRoots {
             if full[0].eq_ignore_ascii_case("mods") {
                 return Err(bad("that is the mods folder, reached by a link"));
             }
-            if is_game_data_parts(&full) {
-                return Err(bad("that is the game's own data (a link leads there); changes go to the mods folder"));
+            // The tool's own folders are written only through `owned_dest`, and only in the one it was made for
+            // (what it keeps there, backups of archives, is named like game data below it, and is not).
+            match r.owned {
+                Some(o) if full[0] == o.folder() => {}
+                Some(_) => return Err(bad("that is not in the folder this tool made it for")),
+                None if is_game_data_parts(&full) => return Err(bad("that is the game's own data (a link leads there); changes go to the mods folder")),
+                None if tool_owned(&full[0]) => return Err(bad("that folder belongs to this tool")),
+                None => {}
             }
-            if tool_owned(&full[0]) {
-                return Err(bad("that folder belongs to this tool"));
-            }
+        } else if r.owned.is_some() {
+            return Err(bad("that is not in the game folder"));
         }
         Ok(())
     }
@@ -640,10 +707,13 @@ impl GameRoots {
             if full[0].eq_ignore_ascii_case("mods") {
                 return Err(bad("that is the mods folder, reached by a link"));
             }
-            if is_game_data_parts(&full) {
+            // What the tool itself writes in `mods_disabled` and `mods_legacy` (the folder, or something below it, an
+            // archive's backup included) may be undone; `.paleto`, `mods_snapshots`, `.mods.*` and the rest of its names never are.
+            let in_owned = Owned::of(&full[0]).is_some() && (!dir.is_empty() || folder);
+            if !in_owned && is_game_data_parts(&full) {
                 return Err(bad("that is the game's own data"));
             }
-            if tool_owned(&full[0]) {
+            if !in_owned && tool_owned(&full[0]) {
                 return Err(bad("that folder belongs to this tool"));
             }
             if let Some(mods) = self.mods.get() {

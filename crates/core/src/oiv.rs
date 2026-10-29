@@ -237,7 +237,7 @@ impl Package {
             // Archives are only saved at the end: putting the loose files back undoes it all.
             let (failures, notes) = inst.undo.roll_back();
             inst.log.extend(notes.into_iter().map(|n| format!("warning: {n}")));
-            return Err(Error::Txn(Box::new(TxnFailure { cause: e, log: inst.log, undone: failures.is_empty(), failures, journaled: false })));
+            return Err(Error::Txn(Box::new(TxnFailure { cause: e, log: inst.log, undone: failures.is_empty(), failures, journaled: false, verb: "installed" })));
         }
         let left = inst.undo.finish();
         inst.log.extend(left.into_iter().map(|l| format!("warning: {l}")));

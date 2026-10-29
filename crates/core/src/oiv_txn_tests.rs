@@ -21,40 +21,6 @@ fn install(game: &Game, oiv: &Path) -> Result<Vec<String>, Error> {
     Package::open(oiv)?.install_with(game, None)
 }
 
-fn state(game: &Game) -> BTreeMap<String, Entry> {
-    snapshot(&game.root)
-}
-
-fn journals(game: &Game) -> Vec<String> {
-    std::fs::read_dir(game.root.join(".paleto/journal")).map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
-}
-
-fn journal_has(game: &Game, record: &str) -> bool {
-    journals(game).iter().any(|n| std::fs::read_to_string(game.root.join(".paleto/journal").join(n)).unwrap_or_default().lines().any(|l| l.split_whitespace().next() == Some(record)))
-}
-
-fn assert_clean(game: &Game, what: &str) {
-    assert_eq!(journals(game), Vec::<String>::new(), "{what}: a journal is left");
-    assert_eq!(leftovers(&game.root), Vec::<String>::new(), "{what}: temporary names are left");
-}
-
-fn without_temps(mut s: BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
-    s.retain(|k, _| !k.rsplit('/').next().unwrap().starts_with(".paleto-"));
-    s
-}
-
-/// Fails with the names that differ, never with the contents (they are whole archives).
-fn assert_same(what: &str, want: &BTreeMap<String, Entry>, got: &BTreeMap<String, Entry>) {
-    let mut diffs: Vec<String> = want.iter().filter(|(k, v)| got.get(*k) != Some(*v)).map(|(k, _)| format!("{} {k}", if got.contains_key(k) { "changed" } else { "missing" })).collect();
-    diffs.extend(got.keys().filter(|k| !want.contains_key(*k)).map(|k| format!("extra {k}")));
-    assert!(diffs.is_empty(), "{what}: {diffs:?}");
-}
-
-/// An error that claims nothing false: the plain cause (nothing had been changed), or a failure that says the undo was complete.
-fn honest(e: &Error) -> bool {
-    e.to_string().contains("nothing was installed") || !matches!(e, Error::Txn(_))
-}
-
 /// An Enhanced game with the loose files, the text, the XML and the archive copy the package works on.
 fn setup(dir: &Path) -> Game {
     let game = game_folder(dir, Edition::Enhanced);
@@ -101,58 +67,16 @@ fn references() -> (BTreeMap<String, Entry>, BTreeMap<String, Entry>) {
 
 /// Fails (or crashes at) the k-th system call of the install, for every k until none is left to hit.
 fn exhaust(mode: Fault) -> u64 {
-    let (old, new) = references();
-    let crash = matches!(mode, Fault::Crash);
-    let (mut saw_error, mut saw_committed) = (false, false);
-    for k in 1..20_000 {
-        let dir = tempfile::tempdir().unwrap();
-        let game = setup(dir.path());
-        let package = realistic(dir.path());
-        faults::arm(k, mode);
-        let result = install(&game, &package);
-        if !faults::disarm() {
-            result.unwrap();
-            assert_same("no fault", &new, &state(&game));
-            assert!(saw_error, "the install hit no fault point at all");
-            assert!(!crash || saw_committed, "no crash happened after `committed`");
-            return k - 1;
-        }
-        let what = format!("{mode:?} at {k}");
-        let mut installed = false;
-        if crash {
-            let committed = journal_has(&game, "committed");
-            let report = txn::recover(&game).unwrap();
-            assert!(report.failures.is_empty(), "{what}: {report:?}");
-            let now = state(&game);
-            // The journal may be gone too, if the crash was at the last call of the install: then everything was in place.
-            installed = committed || now == new;
-            assert_same(&format!("{what}: committed={committed}"), if installed { &new } else { &old }, &now);
-            saw_committed |= installed;
-            saw_error |= !installed;
-        } else {
-            match result {
-                Err(e) => {
-                    assert_unchanged(&old, &state(&game));
-                    assert!(honest(&e), "{what}: {e}");
-                    saw_error = true;
-                }
-                Ok(_) => {
-                    // The fault hit the cleanup after the commit: the files are in place and recovery finishes it.
-                    assert_same(&what, &new, &without_temps(state(&game)));
-                    installed = true;
-                    txn::recover(&game).unwrap();
-                }
-            }
-        }
-        assert_clean(&game, &what);
-        // Whatever happened, the next install works; after an undo it gives what an unfaulted one gives.
-        install(&game, &package).unwrap_or_else(|e| panic!("{what}: the next install failed: {e}"));
+    let (_, new) = references();
+    let fresh = |dir: &Path| (setup(dir), realistic(dir));
+    // Whatever happened, the next install works; after an undo it gives what an unfaulted one gives.
+    let check = |game: &Game, package: &PathBuf, what: &str, installed: bool| {
+        install(game, package).unwrap_or_else(|e| panic!("{what}: the next install failed: {e}"));
         if !installed {
-            assert_same(&format!("{what}: the next install differs from an unfaulted one"), &new, &state(&game));
+            assert_same(&format!("{what}: the next install differs from an unfaulted one"), &new, &state(game));
         }
-        assert_clean(&game, &what);
-    }
-    unreachable!()
+    };
+    crate::fixtures::exhaust(mode, fresh, |game, package| install(game, package), check)
 }
 
 #[test]

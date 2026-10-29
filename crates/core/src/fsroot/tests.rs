@@ -835,3 +835,58 @@ fn a_copy_of_a_game_file_never_carries_setuid_and_the_owner_can_read_and_write_i
     let copy = roots.mods_copy(&rel("x64/a.rpf")).unwrap().unwrap();
     assert_eq!(std::fs::metadata(&copy).unwrap().permissions().mode() & 0o7777, 0o644);
 }
+
+#[test]
+fn an_owned_destination_is_found_link_free_with_its_missing_folders_and_passes_only_its_own_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let game = dir.path().join("game");
+    // Nothing yet: the transaction makes every folder, the top one included.
+    let d = roots.owned_dest(Owned::Legacy, &rel("20260101/x64/a.rpf")).unwrap();
+    assert_eq!((d.root, d.logical.clone(), d.missing.clone(), d.name.as_str()), (RootKind::Game, Vec::<String>::new(), vec!["mods_legacy".to_string(), "20260101".to_string(), "x64".to_string()], "a.rpf"));
+    assert_eq!(d.path(), game.join("mods_legacy/20260101/x64/a.rpf"));
+    roots.check_write(&d).unwrap();
+    // Some of it there: the deepest folder that exists is held, a file that exists is seen.
+    std::fs::create_dir_all(game.join("mods_disabled/sub")).unwrap();
+    std::fs::write(game.join("mods_disabled/sub/p.asi"), b"part").unwrap();
+    let d = roots.owned_dest(Owned::Disabled, &rel("sub/p.asi")).unwrap();
+    assert_eq!((d.logical.clone(), d.missing.is_empty()), (vec!["mods_disabled".to_string(), "sub".to_string()], true));
+    assert!(matches!(d.existing, Some(Existing::File(_))));
+    roots.check_write(&d).unwrap();
+    let d = roots.owned_dest(Owned::Disabled, &rel("sub/deeper/n.asi")).unwrap();
+    assert_eq!((d.logical.clone(), d.missing.clone()), (vec!["mods_disabled".to_string(), "sub".to_string()], vec!["deeper".to_string()]));
+    // The policy accepts it for its own top only, and refuses the same names reached the ordinary way.
+    let mut other = roots.owned_dest(Owned::Disabled, &rel("sub/p.asi")).unwrap();
+    other.owned = Some(Owned::Legacy);
+    assert!(err(roots.check_write(&other)).contains("not in the folder"));
+    other.owned = None;
+    assert!(err(roots.check_write(&other)).contains("belongs to this tool"));
+    for tool in ["mods_disabled/x.asi", "mods_legacy/x.asi", ".paleto/x.asi", "mods_snapshots/x.asi", ".mods.x/x.asi"] {
+        assert!(roots.dest(&rel(tool)).is_err(), "{tool}");
+    }
+}
+
+#[test]
+fn an_owned_destination_refuses_a_link_or_a_file_anywhere_on_the_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let game = dir.path().join("game");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("sub")).unwrap();
+    std::fs::write(elsewhere.join("sub/f.bin"), b"theirs").unwrap();
+    // The folder itself is a link.
+    symlink(&elsewhere, game.join("mods_legacy")).unwrap();
+    assert!(err(roots.owned_dest(Owned::Legacy, &rel("s/a.rpf"))).contains("link or a file"));
+    std::fs::remove_file(game.join("mods_legacy")).unwrap();
+    // A folder below it, a file where a folder belongs, a link as the last name.
+    std::fs::create_dir(game.join("mods_legacy")).unwrap();
+    symlink(elsewhere.join("sub"), game.join("mods_legacy/s")).unwrap();
+    assert!(err(roots.owned_dest(Owned::Legacy, &rel("s/f.bin"))).contains("link or a file"));
+    std::fs::remove_file(game.join("mods_legacy/s")).unwrap();
+    std::fs::write(game.join("mods_legacy/s"), b"a file").unwrap();
+    assert!(err(roots.owned_dest(Owned::Legacy, &rel("s/f.bin"))).contains("link or a file"));
+    std::fs::remove_file(game.join("mods_legacy/s")).unwrap();
+    symlink(elsewhere.join("sub/f.bin"), game.join("mods_legacy/f.bin")).unwrap();
+    assert!(err(roots.owned_dest(Owned::Legacy, &rel("f.bin"))).contains("a link"));
+    assert_eq!(std::fs::read(elsewhere.join("sub/f.bin")).unwrap(), b"theirs");
+}

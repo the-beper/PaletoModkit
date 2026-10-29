@@ -5,7 +5,7 @@ use std::path::Path;
 use super::journal::{self, Mode as JMode, OpKind, ParseError};
 use super::*;
 use crate::fixtures::{Entry, ReadOnly, is_root, snapshot};
-use crate::fsroot::Caps;
+use crate::fsroot::{Caps, Owned};
 use crate::fsroot::faults::{self, Mode as Fault, Point};
 use crate::game::Edition;
 
@@ -558,12 +558,12 @@ fn leftovers_lists_temporary_names_that_no_journal_accounts_for() {
 
 #[test]
 fn the_failure_message_says_nothing_was_installed_only_when_that_is_true() {
-    let clean = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: Vec::new(), journaled: true };
+    let clean = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: Vec::new(), journaled: true, verb: "installed" };
     assert_eq!(clean.to_string(), "package: boom (nothing was installed)");
-    let left = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: false, failures: vec!["/g/a.asi: gone (backup: /g/.paleto-1-0.old)".into()], journaled: true };
+    let left = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: false, failures: vec!["/g/a.asi: gone (backup: /g/.paleto-1-0.old)".into()], journaled: true, verb: "installed" };
     let text = left.to_string();
     assert!(!text.contains("nothing was installed") && text.contains("/g/.paleto-1-0.old") && text.contains("journal"), "{text}");
-    let odd = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: vec!["x".into()], journaled: true };
+    let odd = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: vec!["x".into()], journaled: true, verb: "installed" };
     assert!(!odd.to_string().contains("nothing was installed"));
 }
 
@@ -1022,5 +1022,238 @@ fn a_transaction_stops_before_it_commits_if_its_lock_or_journal_was_removed() {
         assert!(e.to_string().contains("removed or replaced"), "{what}: {e}");
         assert_eq!(state(&game), old, "{what}: nothing was installed");
         assert_eq!(leftovers(&game), Vec::<PathBuf>::new(), "{what}");
+    }
+}
+
+// ---- what the installers call: abort, failure, stage_sized, the tool's own folders ----
+
+#[test]
+fn abort_undoes_what_was_staged_and_says_nothing_was_installed_only_when_the_undo_was_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let before = state(&game);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "abort").unwrap();
+    t.stage(&mut roots.dest(&rel("plugins/deep/a.ini")).unwrap(), |f| f.write_all(b"1")).unwrap();
+    t.stage(&mut roots.dest(&rel("scripts/orig.asi")).unwrap(), |f| f.write_all(b"2")).unwrap();
+    let e = t.abort(Error::Package("a command failed".into()), vec!["did this".into()]);
+    let Error::Txn(f) = &e else { panic!("not a transaction failure: {e:?}") };
+    assert!(f.undone && f.failures.is_empty(), "{f:?}");
+    assert_eq!(f.log, ["did this"]);
+    assert_eq!(e.to_string(), "package: a command failed (nothing was installed)");
+    assert_eq!(state(&game), before);
+    assert_clean(&game, "after the abort");
+    drop(Txn::begin(&roots, "next").unwrap());
+}
+
+#[test]
+fn an_abort_whose_undo_fails_keeps_the_journal_and_the_backups_and_never_says_nothing_was_installed() {
+    if is_root() {
+        return;
+    }
+    DAMAGE.with(|d| d.set(0));
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let before = state(&game);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "abort").unwrap();
+    t.stage(&mut roots.dest(&rel("scripts/orig.asi")).unwrap(), |f| f.write_all(b"replaced")).unwrap();
+    let scripts = game.root.join("scripts");
+    ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || damage(&scripts))));
+    let e = t.abort(Error::Package("a command failed".into()), vec!["log".into()]);
+    let Error::Txn(f) = &e else { panic!("not a transaction failure: {e:?}") };
+    assert!(!f.undone && !f.failures.is_empty() && f.journaled, "{f:?}");
+    assert_eq!(f.log, ["log"]);
+    let text = e.to_string();
+    assert!(!text.contains("nothing was") && text.contains("a command failed") && text.contains(".paleto-"), "{text}");
+    assert_eq!(journals(&game).len(), 1, "the journal is kept");
+    let kept: Vec<String> = std::fs::read_dir(game.root.join("scripts")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".paleto-")).collect();
+    assert!(kept.iter().any(|n| n.ends_with(".old")), "the backup is kept: {kept:?}");
+    assert!(matches!(Txn::begin(&roots, "again"), Err(Error::RecoveryNeeded(_))));
+    // Fixed (the folder is writable again): recovery finishes the undo.
+    drop(ReadOnly::new(&game.root.join("scripts")));
+    let report = recover(&game).unwrap();
+    assert!(report.failures.is_empty() && report.rolled_back == 1, "{report:?}");
+    assert_eq!(state(&game), before);
+    assert_clean(&game, "recovered");
+}
+
+#[test]
+fn failure_gives_the_callers_log_to_a_plain_error_and_passes_a_transaction_failure_through() {
+    let plain = failure(Error::Package("boom".into()), vec!["a".into()], "changed");
+    let Error::Txn(f) = &plain else { panic!("not wrapped: {plain:?}") };
+    assert!(f.undone && f.failures.is_empty() && f.log == ["a"], "{f:?}");
+    assert_eq!(plain.to_string(), "package: boom (nothing was changed)");
+    // A real error of `stage`: the undo was clean.
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "w").unwrap();
+    let e = t.stage(&mut roots.dest(&rel("plugins/b.ini")).unwrap(), |_| Err(std::io::Error::other("disk full"))).unwrap_err();
+    assert_eq!(failure(e, vec!["x".into()], "installed").to_string(), "disk full (nothing was installed)");
+    assert_clean(&game, "after the failed stage");
+    // One that already says what is left passes through: the caller's log goes in front of its own, the verb is the caller's.
+    let left = Error::Txn(Box::new(TxnFailure { cause: Error::Package("inner".into()), log: vec!["b".into()], undone: false, failures: vec!["/g/x: gone (backup: /g/.paleto-1-0.old)".into()], journaled: true, verb: "installed" }));
+    let e = failure(left, vec!["a".into()], "changed");
+    let Error::Txn(f) = &e else { panic!("not a transaction failure: {e:?}") };
+    assert!(!f.undone && f.log == ["a", "b"] && f.verb == "changed", "{f:?}");
+    let text = e.to_string();
+    assert!(!text.contains("nothing was") && text.contains("/g/.paleto-1-0.old") && text.contains("inner"), "{text}");
+    let clean = failure(failure(Error::Package("boom".into()), vec!["b".into()], "installed"), vec!["a".into()], "changed");
+    assert_eq!(clean.to_string(), "package: boom (nothing was changed)");
+    assert!(matches!(&clean, Error::Txn(f) if f.log == ["a", "b"]));
+}
+
+#[test]
+fn stage_sized_refuses_what_would_not_leave_a_gigabyte_free_before_creating_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let before = state(&game);
+    let roots = game.roots().unwrap();
+    // An impossible size, and the smallest one whose sum with the margin overflows.
+    for need in [u64::MAX, u64::MAX - FREE_MARGIN + 1] {
+        let mut t = Txn::begin(&roots, "big").unwrap();
+        t.stage(&mut roots.dest(&rel("scripts/first.asi")).unwrap(), |f| f.write_all(b"1")).unwrap();
+        let mut d = roots.dest(&rel("plugins/deep/big.bin")).unwrap();
+        let e = t.stage_sized(&mut d, need, |_| panic!("nothing may be written")).unwrap_err();
+        let text = e.to_string();
+        assert!(matches!(&e, Error::Io(io) if io.kind() == io::ErrorKind::StorageFull), "{e:?}");
+        assert!(text.contains("plugins/deep") && text.contains("GiB") && text.contains("free"), "{text}");
+        assert_eq!(state(&game), before, "no file and no folder was made, and the file staged before was undone");
+        assert_clean(&game, "after the refusal");
+        assert!(t.stage(&mut d, |f| f.write_all(b"x")).is_err(), "the transaction is over");
+    }
+    // A modest file is staged, when this filesystem has the space.
+    if roots.game.dir.free_space().unwrap() > 2 * FREE_MARGIN {
+        let mut t = Txn::begin(&roots, "small").unwrap();
+        let mut d = roots.dest(&rel("plugins/deep/small.bin")).unwrap();
+        t.stage_sized(&mut d, 1024, |f| f.write_all(b"small")).unwrap();
+        t.commit(Vec::new()).unwrap();
+        assert_eq!(std::fs::read(game.root.join("plugins/deep/small.bin")).unwrap(), b"small");
+    }
+}
+
+/// The folders and files `owned_scenario` works on: a replaced part and a deleted one in `mods_disabled`
+/// (and, if `folders`, the folders it would make).
+fn owned_game(dir: &Path, folders: bool) -> Game {
+    let game = crate::fixtures::game_folder(dir, Edition::Enhanced);
+    std::fs::create_dir_all(game.root.join("mods_disabled")).unwrap();
+    std::fs::write(game.root.join("mods_disabled/old.asi"), b"old").unwrap();
+    std::fs::write(game.root.join("mods_disabled/gone.asi"), b"gone").unwrap();
+    if folders {
+        std::fs::create_dir_all(game.root.join("mods_legacy/20260101/x64")).unwrap();
+    }
+    game
+}
+
+/// A backup created below `mods_legacy`, a part replaced and a part deleted in `mods_disabled`.
+fn owned_scenario(game: &Game) -> Result<Vec<String>, Error> {
+    let roots = game.roots()?;
+    let mut t = Txn::begin(&roots, "owned")?;
+    t.stage(&mut roots.owned_dest(Owned::Legacy, &rel("20260101/x64/a.rpf"))?, |f| f.write_all(b"backup of a"))?;
+    t.stage(&mut roots.owned_dest(Owned::Disabled, &rel("old.asi"))?, |f| f.write_all(b"new"))?;
+    t.delete(&roots.owned_dest(Owned::Disabled, &rel("gone.asi"))?)?;
+    t.commit(vec!["done".to_string()])
+}
+
+#[test]
+fn a_transaction_writes_in_the_tools_own_folders_and_makes_the_ones_that_are_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = owned_game(dir.path(), false);
+    assert_eq!(owned_scenario(&game).unwrap(), ["done"]);
+    let root = &game.root;
+    assert_eq!(std::fs::read(root.join("mods_legacy/20260101/x64/a.rpf")).unwrap(), b"backup of a");
+    assert_eq!(std::fs::read(root.join("mods_disabled/old.asi")).unwrap(), b"new");
+    assert!(!root.join("mods_disabled/gone.asi").exists());
+    assert_clean(&game, "after");
+    // A name changed twice in one transaction is a conflict, as for any file.
+    let roots = game.roots().unwrap();
+    let mut t = Txn::begin(&roots, "twice").unwrap();
+    t.stage(&mut roots.owned_dest(Owned::Legacy, &rel("20260101/x64/a.rpf")).unwrap(), |f| f.write_all(b"again")).unwrap();
+    let e = t.stage(&mut roots.owned_dest(Owned::Legacy, &rel("20260101/x64/a.rpf")).unwrap(), |f| f.write_all(b"twice")).unwrap_err();
+    assert!(matches!(e, Error::Conflict(_)), "{e:?}");
+    assert_eq!(std::fs::read(root.join("mods_legacy/20260101/x64/a.rpf")).unwrap(), b"backup of a");
+}
+
+#[test]
+fn a_crash_after_the_folders_were_made_is_rolled_back_by_recovery_and_the_folders_go() {
+    // The three renames of the commit: the backup is created, the part replaced, the part deleted.
+    for k in 1..=3 {
+        let dir = tempfile::tempdir().unwrap();
+        let game = owned_game(dir.path(), false);
+        let before = state(&game);
+        faults::arm_at(Point::Rename, k, Fault::Crash);
+        let _ = owned_scenario(&game);
+        assert!(faults::disarm(), "no rename {k}");
+        let report = recover(&game).unwrap();
+        assert!(report.failures.is_empty() && report.rolled_back == 1, "k={k}: {report:?}");
+        assert_eq!(state(&game), before, "k={k}: the tool's folders, the ones made included, are as they were");
+        assert_clean(&game, &format!("k={k}"));
+    }
+}
+
+#[test]
+fn every_failure_point_of_a_change_in_the_tools_own_folders_leaves_them_as_they_were() {
+    let setup = |dir: &Path| (owned_game(dir, true), ());
+    for mode in [Fault::Fail(std::io::ErrorKind::Other), Fault::Crash] {
+        // Whatever happened, the next run works.
+        let check = |game: &Game, _: &(), what: &str, _: bool| drop(owned_scenario(game).unwrap_or_else(|e| panic!("{what}: the next run failed: {e}")));
+        let n = crate::fixtures::exhaust(mode, setup, |game, ()| owned_scenario(game), check);
+        assert!(n > 30, "only {n} fault points in {mode:?}");
+    }
+}
+
+/// A committed `Delete` of `dir/name`, as a journal that somebody planted would say it, with its backup next to it.
+fn plant_delete(game: &Game, id: &str, dir: &[&str], name: &str) -> PathBuf {
+    let roots = game.roots().unwrap();
+    let logical: Vec<String> = dir.iter().map(|d| d.to_string()).collect();
+    let at = dir.iter().fold(game.root.clone(), |p, d| p.join(d));
+    std::fs::create_dir_all(&at).unwrap();
+    if !at.join(name).exists() {
+        std::fs::write(at.join(name), b"data").unwrap();
+    }
+    let backup = at.join(format!(".paleto-{id}-0.old"));
+    std::fs::hard_link(at.join(name), &backup).unwrap();
+    let expect = roots.open_anchor(RootKind::Game, &logical).unwrap().stat(name).unwrap();
+    let delete = journal::JOp { kind: OpKind::Delete, anchor: RootKind::Game, dir: logical, name: name.into(), expect, mode: JMode::Move, made: None, kept: false, did: false };
+    let text = [journal::header(), journal::begin(id, 1, 1, "planted"), journal::root(&journal::RootRec { kind: RootKind::Game, fp: roots.game.dir.fingerprint().unwrap(), shown: roots.game.shown.display().to_string() }), journal::op(0, &delete), journal::commit()].concat();
+    std::fs::create_dir_all(game.root.join(".paleto/journal")).unwrap();
+    std::fs::write(game.root.join(".paleto/journal").join(format!("{id}.log")), text).unwrap();
+    backup
+}
+
+#[test]
+fn recovery_accepts_the_two_owned_folders_and_refuses_every_other_name_of_the_tool_and_the_originals() {
+    let id = "0123456789abcdef";
+    // The tool's own folders for parts and backups: the journal's delete of a part is undone, from its backup.
+    for top in ["mods_disabled", "mods_legacy"] {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), true);
+        let backup = plant_delete(&game, id, &[top, "sub"], "f.bin");
+        let target = game.root.join(top).join("sub/f.bin");
+        std::fs::remove_file(&target).unwrap();
+        let report = recover(&game).unwrap();
+        assert!(report.failures.is_empty() && report.rolled_back == 1, "{top}: {report:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"data", "{top}: put back from its backup");
+        assert!(!backup.exists(), "{top}");
+        assert_clean(&game, top);
+    }
+    // Anything else of the tool's, the game's own data and a file named like an owned folder: reported, nothing touched.
+    let cases: [(&[&str], &str); 5] = [(&[".paleto"], "f.bin"), (&["mods_snapshots", "s1"], "f.bin"), (&[".mods.x"], "f.bin"), (&["x64"], "a.rpf"), (&[], "mods_disabled")];
+    for (folders, name) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), true);
+        let backup = plant_delete(&game, id, folders, name);
+        let target = folders.iter().fold(game.root.clone(), |p, f| p.join(f)).join(name);
+        let content = std::fs::read(&target).unwrap();
+        let report = recover(&game).unwrap();
+        let what = format!("{folders:?} {name}");
+        assert!(report.failures.len() == 1 && report.failures[0].contains("not touched"), "{what}: {report:?}");
+        assert!(report.rolled_back == 0, "{what}: {report:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), content, "{what}: the target");
+        assert!(backup.exists(), "{what}: the backup was removed on the word of a planted journal");
+        assert_eq!(journals(&game).len(), 1, "{what}: the journal stays for a person to look at");
+        // It blocks other changes until it is abandoned, as before.
+        assert!(matches!(Txn::begin(&game.roots().unwrap(), "x"), Err(Error::RecoveryNeeded(_))), "{what}");
     }
 }

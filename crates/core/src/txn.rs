@@ -57,13 +57,15 @@ pub struct TxnFailure {
     /// A journal of the operation was kept, so the next run can finish the recovery (the
     /// operations that do not yet run as a transaction have none: what is left stays as it is).
     pub journaled: bool,
+    /// What the operation does, for "(nothing was {verb})": "installed" or "changed".
+    pub verb: &'static str,
 }
 
 impl fmt::Display for TxnFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.cause)?;
         if self.undone && self.failures.is_empty() {
-            write!(f, " (nothing was installed)")
+            write!(f, " (nothing was {})", self.verb)
         } else if !self.journaled {
             write!(f, ": the changes could not be fully undone ({}); the files named, with the backups next to them, were left as they are", self.failures.join("; "))
         } else {
@@ -440,7 +442,44 @@ fn finish_rollback(jdir: &Dir, jname: &str, rolled: &Rolled, write: impl FnOnce(
 }
 
 fn txn_error(cause: Error, log: Vec<String>, rolled: &Rolled) -> Error {
-    Error::Txn(Box::new(TxnFailure { cause, log, undone: rolled.failures.is_empty(), failures: rolled.failures.clone(), journaled: true }))
+    Error::Txn(Box::new(TxnFailure { cause, log, undone: rolled.failures.is_empty(), failures: rolled.failures.clone(), journaled: true, verb: "installed" }))
+}
+
+/// Gives the caller's `log` and `verb` to an error from [`Txn::stage`], [`Txn::delete`] or a `commit*`:
+/// a plain error there means the undo was clean ("nothing was {verb}"); an [`Error::Txn`] already says what
+/// is left and passes through, with `log` in front of what it logged and `verb` for its message.
+pub fn failure(e: Error, mut log: Vec<String>, verb: &'static str) -> Error {
+    match e {
+        Error::Txn(mut f) => {
+            log.append(&mut f.log);
+            f.log = log;
+            f.verb = verb;
+            Error::Txn(f)
+        }
+        cause => Error::Txn(Box::new(TxnFailure { cause, log, undone: true, failures: Vec::new(), journaled: false, verb })),
+    }
+}
+
+/// Free space that must stay after a staged file is written.
+const FREE_MARGIN: u64 = 1 << 30;
+
+/// A size for a message, in the largest unit that keeps it above 1.
+fn size_text(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 30 => format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{:.1} MiB", b as f64 / (1u64 << 20) as f64),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// `need` bytes leave [`FREE_MARGIN`] free where `dest` will be made.
+fn enough_space(dest: &Resolved, need: u64) -> Result<(), Error> {
+    let free = dest.parent.free_space()?;
+    if need.checked_add(FREE_MARGIN).is_some_and(|total| total <= free) {
+        return Ok(());
+    }
+    let folder = dest.path().parent().map(|p| p.display().to_string()).unwrap_or_default();
+    Err(Error::Io(io::Error::new(io::ErrorKind::StorageFull, format!("{folder}: not enough free space: {} are needed and at least {} must stay free, but only {} are free", size_text(need), size_text(FREE_MARGIN), size_text(free)))))
 }
 
 // ---- recovery ----
@@ -883,6 +922,13 @@ impl<'r> Txn<'r> {
         }
     }
 
+    /// An error raised by the caller while the transaction is open (a command of a package that cannot be
+    /// applied): everything staged is undone, and the answer is always an [`Error::Txn`] carrying `log`. It says
+    /// "(nothing was installed)" only if the undo was clean, else what is left and where; [`failure`] changes the verb.
+    pub fn abort(mut self, cause: Error, log: Vec<String>) -> Error {
+        self.fail(cause, log, true)
+    }
+
     /// Undoes everything (idempotent). Ends the transaction either way.
     fn rollback_now(&mut self) -> Rolled {
         if self.phase != Phase::Open {
@@ -1052,6 +1098,17 @@ impl<'r> Txn<'r> {
         self.ops[i].made = Some(fp);
         self.staged[i] = Some(file);
         Ok(Staged(i))
+    }
+
+    /// [`Txn::stage`] after checking that `need` bytes (what `write` will write, over-estimated if need be)
+    /// leave at least 1 GiB free on the filesystem of `dest`. Nothing is created if they do not: the error
+    /// names the folder and the sizes, and ends the transaction like any error of `stage`.
+    pub fn stage_sized(&mut self, dest: &mut Resolved, need: u64, write: impl FnOnce(&mut File) -> io::Result<()>) -> Result<Staged, Error> {
+        self.ensure_open()?;
+        if let Err(e) = enough_space(dest, need) {
+            return Err(self.fail(e, Vec::new(), false));
+        }
+        self.stage(dest, write)
     }
 
     /// Plans the removal of `dest` (the link itself, if it is one); it happens at
