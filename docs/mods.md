@@ -47,7 +47,16 @@ Add-on cars, maps and other new content usually come as a DLC pack: a `dlc.rpf` 
 ![Installing an add-on pack](images/addon-pack.png)
 
 1. It copies the pack to `mods/update/x64/dlcpacks/<name>/dlc.rpf`. The name comes from the mod's folder, or from the pack's own `setup2.xml` when the folder has a generic name; you can change it (letters, digits, `_` and `-`).
-2. It adds the pack to the DLC list in the mods copy of `update.rpf`.
+2. It adds the pack to the DLC list in the mods copy of `update.rpf`, made from the game's `update.rpf` the first time. The game's own file is only read.
+
+Several packs dropped together are one install: one journaled transaction for the pack files and the list. It is recoverable, not atomic (see below).
+
+- A pack already in `mods/` byte for byte, and one already in the list, are left alone: installing the same pack again writes nothing. A pack of the same name with other contents replaces the old one. A pack found identical is looked at again just before the files are put in place, and the install stops if somebody changed it meanwhile.
+- A name that is in the game's own DLC list (`update/update.rpf`, for example `mpheist`) is refused: a pack under it in `mods/` would take the place of the game's. Install it under another name.
+- Before anything is changed, the install refuses a bad or repeated name and stops at a failed conversion, with a plain error. After it starts, a name of the game, a pack that does not open as an archive, a missing or damaged `update.rpf` or a full disk stop it, and everything done so far is undone: the error says "nothing was installed" only when that undo was clean. If some file cannot be put back, the error names it and its backup and keeps the journal, and does not say so.
+- Without the game keys, an encrypted pack cannot be opened: it is only checked for an archive header, a table of contents that fits in the file and is not empty. With the keys it is opened and read fully.
+- Packs are put in place first and the list last, so an interruption (a crash, a power cut) never leaves a pack in the list that is missing. Until it finishes, a pack may be there but not listed (harmless), or some files new and others old. The next change to the game undoes that first and says so at the start of its log; see [Troubleshooting](troubleshooting.md#one-change-at-a-time-and-interrupted-changes).
+- While it runs, another change to the same game (an install, a snapshot) is refused with a "busy" message, and the other way round.
 
 Packs copied into the mods folder by hand, but missing from the DLC list, are found by **Tools → Mods in game**, which can add them (see [troubleshooting.md](troubleshooting.md#mods-in-game)).
 

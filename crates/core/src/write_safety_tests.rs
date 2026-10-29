@@ -1,13 +1,14 @@
 //! Reproductions of write-path findings (OIV-01/02/03/06, FS-04, DLC-05):
 //! tests marked `#[ignore]` fail on the current code and say why.
 
-use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::os::unix::fs::{MetadataExt, symlink};
+use std::path::{Path, PathBuf};
 
 use paleto_rpf::ArchiveEditor;
 
 use crate::budget::Limits;
 use crate::fixtures::*;
+use crate::fsroot::faults::{self, Mode as Fault, Point};
 use crate::game::{Edition, Game};
 use crate::{Error, Package};
 
@@ -715,10 +716,31 @@ fn oiv06_failed_rollback_is_not_reported_as_clean() {
     assert!(restored || !err.contains("nothing was installed"), "scripts/x is lost but the error says: {err}");
 }
 
-// ---- DLC-05: the pack is written before the list is known to work ----
+// ---- DLC-05: the packs and the list are one transaction ----
+
+/// `dir/src/<name>/dlc.rpf` for each name, to install under that name.
+fn dlc_sources(dir: &Path, names: &[&str]) -> Vec<(PathBuf, String)> {
+    names
+        .iter()
+        .map(|name| {
+            let path = dir.join(format!("src/{name}/dlc.rpf"));
+            dlc_pack(&path, name);
+            (path, name.to_string())
+        })
+        .collect()
+}
+
+fn install_packs(game: &Game, packs: &[(PathBuf, String)]) -> Result<Vec<String>, Error> {
+    crate::addon::install_packs(game, None, packs, None)
+}
+
+/// The identity of a file: a rewrite or a replacement shows in it.
+fn identity(path: &Path) -> (u64, u64, i64, i64) {
+    let m = std::fs::metadata(path).unwrap();
+    (m.dev(), m.ino(), m.mtime(), m.mtime_nsec())
+}
 
 #[test]
-#[ignore = "repro DLC-05: dlc.rpf stays installed when the list update fails"]
 fn dlc05_list_update_failure_leaves_no_pack() {
     if is_root() {
         return;
@@ -729,45 +751,301 @@ fn dlc05_list_update_failure_leaves_no_pack() {
     std::fs::create_dir_all(game.root.join("mods/update/x64/dlcpacks")).unwrap();
     let original = snapshot(&game.root.join("update"));
     let _guard = ReadOnly::new(&game.root.join("mods/update"));
-    assert!(crate::addon::install_pack(&game, None, &dir.path().join("dlc.rpf"), "piccolo", None).is_err());
+    let err = crate::addon::install_pack(&game, None, &dir.path().join("dlc.rpf"), "piccolo", None).unwrap_err();
+    assert!(honest(&err) && matches!(err, Error::Txn(_)), "{err}");
     assert!(!crate::addon::pack_path(&game, "piccolo").exists(), "dlc.rpf was left installed but not listed");
     assert_unchanged(&original, &snapshot(&game.root.join("update")));
     assert!(leftovers(&game.root).is_empty(), "{:?}", leftovers(&game.root));
+    assert!(journals(&game).is_empty());
 }
 
 #[test]
-#[ignore = "repro DLC-05: dlc.rpf stays installed when update.rpf is corrupt"]
 fn dlc05_corrupt_update_rpf_leaves_no_pack() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
     dlc_pack(&dir.path().join("dlc.rpf"), "piccolo");
     std::fs::write(game.root.join("update/update.rpf"), b"garbage that is not an archive").unwrap();
-    let original = snapshot(&game.root.join("update"));
-    assert!(crate::addon::install_pack(&game, None, &dir.path().join("dlc.rpf"), "piccolo", None).is_err());
+    let before = snapshot(&game.root);
+    let err = crate::addon::install_pack(&game, None, &dir.path().join("dlc.rpf"), "piccolo", None).unwrap_err();
+    assert!(honest(&err), "{err}");
     assert!(!crate::addon::pack_path(&game, "piccolo").exists(), "dlc.rpf was left installed but not listed");
-    assert_unchanged(&original, &snapshot(&game.root.join("update")));
+    assert_unchanged(&before, &snapshot(&game.root));
     assert!(leftovers(&game.root).is_empty(), "{:?}", leftovers(&game.root));
+    assert!(journals(&game).is_empty());
+}
+
+#[test]
+fn dlc05_a_missing_update_rpf_is_refused_before_anything_is_staged() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
+    std::fs::remove_file(game.root.join("update/update.rpf")).unwrap();
+    let before = snapshot(&game.root);
+    let err = install_packs(&game, &packs).unwrap_err();
+    assert!(honest(&err) && err.to_string().contains("update/update.rpf not found"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert!(!game.root.join("mods").exists(), "a folder was made for nothing");
+    assert!(journals(&game).is_empty());
 }
 
 #[test]
 fn dlc05_registered_pack_installs_again_without_touching_the_list() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
-    update_rpf(&game.root.join("update/update.rpf"), &["mpheist", "piccolo"]);
-    dlc_pack(&dir.path().join("dlc.rpf"), "piccolo");
-    let original_bytes = std::fs::read(game.root.join("update/update.rpf")).unwrap();
+    // A pack of a mod, listed in the mods copy of the list (by an earlier install, or by hand).
+    update_rpf(&game.root.join("mods/update/update.rpf"), &["mpheist", "piccolo"]);
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
     let original = snapshot(&game.root.join("update"));
-    let log = crate::addon::install_pack(&game, None, &dir.path().join("dlc.rpf"), "piccolo", None).unwrap();
+    let list = identity(&game.root.join("mods/update/update.rpf"));
+    let log = install_packs(&game, &packs).unwrap();
+    assert!(log[0].starts_with("installed "), "{log:?}");
     assert_eq!(log[1], "piccolo is already in the DLC list");
-    let copy = game.root.join("mods/update/update.rpf");
-    let copy_bytes = std::fs::read(&copy).unwrap();
-    assert_eq!(copy_bytes, original_bytes, "the list was rewritten");
-    let log = crate::addon::install_pack(&game, None, &dir.path().join("dlc.rpf"), "piccolo", None).unwrap();
-    assert_eq!(log[1], "piccolo is already in the DLC list");
-    assert_eq!(std::fs::read(&copy).unwrap(), copy_bytes);
-    assert_eq!(list_of(&copy).matches("piccolo").count(), 1);
+    assert_eq!(identity(&game.root.join("mods/update/update.rpf")), list, "a registered pack rewrote the list");
+    // Again: the pack is the same, byte for byte, and nothing is written (not even a replacement by the same bytes).
+    let (before, pack) = (snapshot(&game.root), identity(&crate::addon::pack_path(&game, "piccolo")));
+    let log = install_packs(&game, &packs).unwrap();
+    assert_eq!(log, ["piccolo: already installed (identical)", "piccolo is already in the DLC list"]);
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert_eq!(identity(&crate::addon::pack_path(&game, "piccolo")), pack, "the same pack was written again");
     assert_unchanged(&original, &snapshot(&game.root.join("update")));
-    assert!(leftovers(&game.root).is_empty());
+    assert!(journals(&game).is_empty() && leftovers(&game.root).is_empty());
+}
+
+#[test]
+fn dlc05_a_reinstall_of_unlisted_identical_pack_stages_only_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
+    // The pack is in the mods folder already but not listed (what a crash between the two renames used to leave).
+    let dest = crate::addon::pack_path(&game, "piccolo");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::copy(&packs[0].0, &dest).unwrap();
+    let pack = identity(&dest);
+    let log = install_packs(&game, &packs).unwrap();
+    assert_eq!(log[0], "piccolo: already installed (identical)");
+    assert!(log[1].starts_with("added piccolo to the DLC list of "), "{log:?}");
+    assert_eq!(identity(&dest), pack);
+    assert!(list_of(&game.root.join("mods/update/update.rpf")).contains("<Item>dlcpacks:/piccolo/</Item>"));
+}
+
+#[test]
+fn dlc05_a_pack_of_the_same_size_but_other_bytes_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let (a, b) = (dlc_sources(dir.path(), &["piccolo"]), dlc_sources(dir.path(), &["piccolx"]));
+    let (bytes_a, bytes_b) = (std::fs::read(&a[0].0).unwrap(), std::fs::read(&b[0].0).unwrap());
+    assert!(bytes_a != bytes_b && bytes_a.len() == bytes_b.len(), "the fixture must differ in content only");
+    install_packs(&game, &a).unwrap();
+    let log = install_packs(&game, &[(b[0].0.clone(), "piccolo".into())]).unwrap();
+    assert!(log[0].starts_with("installed "), "{log:?}");
+    assert_eq!(std::fs::read(crate::addon::pack_path(&game, "piccolo")).unwrap(), bytes_b);
+}
+
+#[test]
+fn dlc05_two_packs_one_of_them_already_listed_are_one_install_and_the_original_list_is_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // `extra` is listed by the mods copy already (not by the game), `piccolo` is not listed.
+    update_rpf(&game.root.join("mods/update/update.rpf"), &["mpheist", "extra"]);
+    let packs = dlc_sources(dir.path(), &["extra", "piccolo"]);
+    let (original_path, original_bytes) = (game.root.join("update/update.rpf"), std::fs::read(game.root.join("update/update.rpf")).unwrap());
+    let original = identity(&original_path);
+    let log = install_packs(&game, &packs).unwrap();
+    assert!(log[0].starts_with("installed ") && log[1] == "extra is already in the DLC list", "{log:?}");
+    assert!(log[2].starts_with("installed ") && log[3].starts_with("added piccolo to the DLC list of "), "{log:?}");
+    assert_eq!(log.len(), 4, "{log:?}");
+    let list = list_of(&game.root.join("mods/update/update.rpf"));
+    assert_eq!((list.matches("extra").count(), list.matches("piccolo").count()), (1, 1), "{list}");
+    for name in ["extra", "piccolo"] {
+        assert_eq!(std::fs::read(crate::addon::pack_path(&game, name)).unwrap(), std::fs::read(dir.path().join(format!("src/{name}/dlc.rpf"))).unwrap());
+    }
+    assert_eq!(std::fs::read(&original_path).unwrap(), original_bytes, "the game's update.rpf changed");
+    assert_eq!(identity(&original_path), original, "the game's update.rpf was replaced or touched");
+    assert!(journals(&game).is_empty() && leftovers(&game.root).is_empty());
+}
+
+#[test]
+fn dlc05_a_name_in_the_games_own_list_is_refused_with_nothing_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    // `mpheist` is in the game's list: a pack of that name in mods/ would take the place of the game's.
+    let packs = dlc_sources(dir.path(), &["piccolo", "mpheist"]);
+    let before = snapshot(&game.root);
+    let err = install_packs(&game, &packs).unwrap_err();
+    assert!(honest(&err) && matches!(err, Error::Txn(_)) && err.to_string().contains("mpheist is the name of one of the game's own DLC packs"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    // Also once the mods folder has a list of its own (which names it too, as a copy of the game's does).
+    update_rpf(&game.root.join("mods/update/update.rpf"), &["mpheist"]);
+    let before = snapshot(&game.root);
+    assert!(install_packs(&game, &packs).unwrap_err().to_string().contains("game's own DLC"));
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert!(journals(&game).is_empty() && leftovers(&game.root).is_empty());
+}
+
+/// A file that looks like an encrypted `dlc.rpf` and has `count` entries (16 bytes each, all zero), no names.
+fn encrypted_pack(path: &Path, count: u32) {
+    let mut bytes = [&0x5250_4637u32.to_le_bytes()[..], &count.to_le_bytes(), &0u32.to_le_bytes(), &0x0FFF_FFF9u32.to_le_bytes()].concat();
+    bytes.extend(vec![0u8; count as usize * 16]);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn dlc05_without_keys_an_encrypted_pack_needs_at_least_a_table_of_contents_that_fits() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let (empty, body) = (dir.path().join("src/empty/dlc.rpf"), dir.path().join("src/body/dlc.rpf"));
+    encrypted_pack(&empty, 0);
+    encrypted_pack(&body, 3);
+    let before = snapshot(&game.root);
+    let err = install_packs(&game, &[(empty, "empty".into())]).unwrap_err();
+    assert!(honest(&err) && err.to_string().contains("empty table of contents"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    // The table of contents past the end of the file is refused by the opening itself.
+    let short = dir.path().join("src/short/dlc.rpf");
+    encrypted_pack(&short, 3);
+    let bytes = std::fs::read(&short).unwrap();
+    std::fs::write(&short, &bytes[..bytes.len() - 1]).unwrap();
+    let err = install_packs(&game, &[(short, "short".into())]).unwrap_err();
+    assert!(honest(&err) && err.to_string().contains("table of contents"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    // What cannot be read is let through when it is plausible: that is all that is known without the keys.
+    install_packs(&game, &[(body, "body".into())]).unwrap();
+}
+
+#[test]
+fn dlc05_a_pack_found_identical_is_looked_at_again_before_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
+    // Installed but not listed: the install stages the list only, and leaves the pack alone.
+    let dest = crate::addon::pack_path(&game, "piccolo");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::copy(&packs[0].0, &dest).unwrap();
+    let before = snapshot(&game.root);
+    // Somebody writes the pack, with the same size, after it was compared.
+    let target = dest.clone();
+    crate::addon::BEFORE_COMMIT.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            let mut bytes = std::fs::read(&target).unwrap();
+            bytes[20] ^= 0xFF;
+            std::fs::write(&target, bytes).unwrap();
+        }))
+    });
+    let err = install_packs(&game, &packs).unwrap_err();
+    let Error::Txn(failure) = &err else { panic!("{err:?}") };
+    assert!(matches!(failure.cause, Error::Conflict(_)) && failure.undone, "{err}");
+    assert!(!game.root.join("mods/update/update.rpf").exists(), "the list was put in place for a pack that is not there");
+    // Nothing but the pack's own change is different.
+    let mut after = snapshot(&game.root);
+    assert!(after.remove("mods/update/x64/dlcpacks/piccolo/dlc.rpf") != before.get("mods/update/x64/dlcpacks/piccolo/dlc.rpf").cloned());
+    let mut before = before;
+    before.remove("mods/update/x64/dlcpacks/piccolo/dlc.rpf");
+    assert_unchanged(&before, &after);
+    assert!(journals(&game).is_empty());
+}
+
+#[test]
+fn dlc05_a_batch_with_a_bad_or_repeated_name_installs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let mut packs = dlc_sources(dir.path(), &["piccolo", "extra"]);
+    let before = snapshot(&game.root);
+    packs[1].1 = "my car".into();
+    assert!(matches!(install_packs(&game, &packs), Err(Error::Package(_))));
+    packs[1].1 = "PICCOLO".into();
+    let err = install_packs(&game, &packs).unwrap_err();
+    assert!(matches!(err, Error::Package(_)) && err.to_string().contains("more than one"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert!(!game.root.join(".paleto").exists(), "a transaction began for a batch that was refused");
+}
+
+#[test]
+fn dlc05_a_pack_that_is_not_an_archive_is_refused_with_a_clean_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let mut packs = dlc_sources(dir.path(), &["piccolo", "extra"]);
+    std::fs::write(&packs[1].0, b"not an archive at all").unwrap();
+    packs.reverse();
+    let before = snapshot(&game.root);
+    let err = install_packs(&game, &packs).unwrap_err();
+    assert!(honest(&err) && matches!(err, Error::Txn(_)) && err.to_string().contains("does not open as an archive"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert!(journals(&game).is_empty() && leftovers(&game.root).is_empty());
+}
+
+#[test]
+fn dlc05_a_crash_between_the_two_renames_leaves_a_pack_never_a_listed_missing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
+    let old = state(&game);
+    // The 1st rename puts the pack in place, the 2nd the list.
+    faults::arm_at(Point::Rename, 2, Fault::Crash);
+    assert!(install_packs(&game, &packs).is_err());
+    assert!(faults::disarm());
+    assert!(crate::addon::pack_path(&game, "piccolo").is_file(), "the pack is put in place before the list");
+    assert!(!game.root.join("mods/update/update.rpf").exists(), "the list was put in place before the pack");
+    assert_eq!(journals(&game).len(), 1);
+    // The next change undoes it: the folders are as they were.
+    let report = crate::txn::recover(&game).unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    assert_same("after recovery", &old, &without_temps(state(&game)));
+    assert_clean(&game, "after recovery");
+    // And the install works.
+    install_packs(&game, &packs).unwrap();
+    assert!(list_of(&game.root.join("mods/update/update.rpf")).contains("piccolo"));
+}
+
+/// Two packs, one new in the list, in a fresh game folder (with `old` given, the first already installed from other bytes).
+fn pack_setup(dir: &Path, old: bool) -> (Game, Vec<(PathBuf, String)>) {
+    let game = game_folder(dir, Edition::Enhanced);
+    let packs = dlc_sources(dir, &["piccolo", "extra"]);
+    if old {
+        let older = dir.join("older/dlc.rpf");
+        dlc_pack(&older, "older-pack");
+        crate::addon::install_pack(&game, None, &older, "piccolo", None).unwrap();
+    }
+    (game, packs)
+}
+
+/// After any fault the next install works and gives what an unfaulted one gives.
+fn packs_check(new: &std::collections::BTreeMap<String, Entry>) -> impl Fn(&Game, &Vec<(PathBuf, String)>, &str, bool) + '_ {
+    move |game, packs, what, done| {
+        let log = install_packs(game, packs).unwrap_or_else(|e| panic!("{what}: the next install failed: {e}"));
+        if done {
+            assert!(log[0].contains("already installed (identical)"), "{what}: {log:?}");
+        }
+        assert_same(&format!("{what}: the next install differs from an unfaulted one"), new, &state(game));
+    }
+}
+
+fn reference(old: bool) -> std::collections::BTreeMap<String, Entry> {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, packs) = pack_setup(dir.path(), old);
+    install_packs(&game, &packs).unwrap();
+    state(&game)
+}
+
+#[test]
+fn dlc05_every_failure_point_leaves_the_folders_as_they_were() {
+    let new = reference(false);
+    let n = exhaust(Fault::Fail(std::io::ErrorKind::Other), |dir| pack_setup(dir, false), |game, packs| install_packs(game, packs), packs_check(&new));
+    assert!(n > 30, "only {n} fault points");
+}
+
+#[test]
+fn dlc05_every_crash_point_is_recovered() {
+    let new = reference(false);
+    exhaust(Fault::Crash, |dir| pack_setup(dir, false), |game, packs| install_packs(game, packs), packs_check(&new));
+}
+
+#[test]
+fn dlc05_a_replaced_pack_is_restored_whatever_fails_after_it() {
+    let new = reference(true);
+    let n = exhaust(Fault::Fail(std::io::ErrorKind::Other), |dir| pack_setup(dir, true), |game, packs| install_packs(game, packs), packs_check(&new));
+    assert!(n > 30, "only {n} fault points");
+    exhaust(Fault::Crash, |dir| pack_setup(dir, true), |game, packs| install_packs(game, packs), packs_check(&new));
 }
 
 // ---- A2b: unique exclusive names, the game lock, interrupted restores, rollback reports ----
