@@ -15,8 +15,9 @@
 //!   drive), but not to the game folder, a folder holding it, or the game's data.
 //! * Originals are read through any link, as the game does.
 //!
-//! Journaling, locking and atomic multi-file commits come with the transaction
-//! engine; this layer gives it directory handles that cannot be redirected.
+//! Journaling and the multi-file commit are in the transaction engine
+//! ([`crate::txn`]); this layer gives it directory handles that cannot be
+//! redirected, and the lock that keeps two programs from changing one game at once.
 
 /// Tells the fault injection of the tests (see `faults`) that a system call is
 /// about to be made; compiles to nothing outside tests.
@@ -43,9 +44,11 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::thread::ThreadId;
 
 pub use linux::{Dir, Fingerprint};
+pub(crate) use linux::random;
 
 use crate::Error;
 use crate::relpath::{RelPath, is_game_data_parts};
@@ -111,6 +114,28 @@ pub struct GameRoots {
     mods: OnceLock<Root>,
     /// Why the mods folder cannot be used: its path and the reason.
     refused: OnceLock<(PathBuf, String)>,
+    lock: Mutex<LockSlot>,
+}
+
+/// The game lock as this `GameRoots` holds it. The lock itself is an `flock` on
+/// `.paleto/lock`, which belongs to the open file, so every `GameRoots` (and so
+/// every operation and every thread of a program) excludes every other one;
+/// inside one `GameRoots` the thread that holds it may take it again.
+#[derive(Debug, Default)]
+struct LockSlot {
+    file: Option<File>,
+    depth: usize,
+    owner: Option<ThreadId>,
+    label: String,
+    /// A transaction is open (only one at a time).
+    txn: bool,
+}
+
+/// Holds the game lock; releases it when the last guard of the thread is dropped.
+#[derive(Debug)]
+pub struct LockGuard<'r> {
+    roots: &'r GameRoots,
+    txn: bool,
 }
 
 /// A destination found by [`GameRoots::dest`], not yet written.
@@ -133,6 +158,11 @@ pub struct Resolved {
 }
 
 impl Resolved {
+    /// The root `logical` is relative to.
+    pub(crate) fn anchor(&self) -> RootKind {
+        self.anchor
+    }
+
     /// Where it is, as a path through the root as it was reached (links inside the root resolved).
     pub fn path(&self) -> PathBuf {
         let mut path = self.base.clone();
@@ -432,7 +462,7 @@ impl GameRoots {
             return Err(changed(&shown));
         }
         let game = Root { dir, kind: RootKind::Game, id, shown, canon, fallback: false };
-        let roots = GameRoots { game, mods: OnceLock::new(), refused: OnceLock::new() };
+        let roots = GameRoots { game, mods: OnceLock::new(), refused: OnceLock::new(), lock: Mutex::new(LockSlot::default()) };
         // A mods folder that cannot be used is only an error for what needs it.
         match roots.mods_state() {
             Ok(_) | Err(Error::UnsafePath { .. }) => Ok(roots),
@@ -570,6 +600,112 @@ impl GameRoots {
     /// Checks the folders of `r` are still where they were found.
     pub fn verify(&self, r: &Resolved) -> Result<(), Error> {
         self.root(r.anchor)?.verify(&r.logical, &r.parent)
+    }
+
+    /// The root of this kind, looking at the mods folder again if it was not there before.
+    pub(crate) fn anchor_root(&self, kind: RootKind) -> Result<&Root, Error> {
+        match kind {
+            RootKind::Game => Ok(&self.game),
+            RootKind::Mods => self.mods_state()?.ok_or_else(|| unsafe_path(&self.game.shown.join("mods"), "the mods folder does not exist")),
+        }
+    }
+
+    /// [`Root::verify`] for the root of this kind.
+    pub(crate) fn verify_at(&self, anchor: RootKind, logical: &[String], held: &Dir) -> Result<(), Error> {
+        self.anchor_root(anchor)?.verify(logical, held)
+    }
+
+    /// The folder at `logical` below a root, entered one name at a time and never through a link.
+    pub(crate) fn open_anchor(&self, anchor: RootKind, logical: &[String]) -> Result<Dir, Error> {
+        let mut dir = self.anchor_root(anchor)?.dir.try_clone()?;
+        for name in logical {
+            dir = dir.open_dir(name)?;
+        }
+        Ok(dir)
+    }
+
+    /// `.paleto/<names>` in the game folder, where the tool keeps its lock and
+    /// journals: made if `create`, `None` if it is not there. A link or a file
+    /// on the way is refused, so nothing is ever written through one.
+    pub(crate) fn tool_folder(&self, names: &[&str], create: bool) -> Result<Option<Dir>, Error> {
+        let mut dir = self.game.dir.try_clone()?;
+        let mut shown = self.game.shown.clone();
+        for name in std::iter::once(".paleto").chain(names.iter().copied()) {
+            shown.push(name);
+            let next = if create {
+                dir.open_or_make_dir(name)
+            } else {
+                match dir.kind(name)? {
+                    None => return Ok(None),
+                    Some(_) => dir.open_dir(name),
+                }
+            };
+            dir = match next {
+                Ok(d) => d,
+                Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => return Err(unsafe_path(&shown, "this tool's own folder is a link or a file, not a folder")),
+                Err(e) => return Err(e.into()),
+            };
+        }
+        Ok(Some(dir))
+    }
+
+    /// Takes the lock of this game, which every change to the game or mods folder
+    /// holds for its whole run: [`Error::Busy`] if another program, another
+    /// `GameRoots` or another thread holds it. The thread that holds it may take it
+    /// again, so code under a transaction can call helpers that lock. The lock is
+    /// the kernel's: it is gone when the holder exits or dies, never stale.
+    pub fn lock(&self, label: &str) -> Result<LockGuard<'_>, Error> {
+        let me = std::thread::current().id();
+        let mut slot = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.depth > 0 {
+            if slot.owner == Some(me) {
+                slot.depth += 1;
+                return Ok(LockGuard { roots: self, txn: false });
+            }
+            return Err(Error::Busy(format!("{} (in this program)", slot.label)));
+        }
+        slot.file = Some(self.acquire(label)?);
+        (slot.depth, slot.owner, slot.label, slot.txn) = (1, Some(me), label.to_string(), false);
+        Ok(LockGuard { roots: self, txn: false })
+    }
+
+    /// Opens and locks `.paleto/lock`; the file is never deleted.
+    fn acquire(&self, label: &str) -> Result<File, Error> {
+        let paleto = self.tool_folder(&[], true)?.expect("made above");
+        let shown = self.game.shown.join(".paleto/lock");
+        for _ in 0..2 {
+            let file = paleto.open_lock("lock", true).map_err(|e| if e.raw_os_error() == Some(libc::ELOOP) { unsafe_path(&shown, "the lock file is a link") } else { e.into() })?;
+            if !file.metadata()?.is_file() {
+                return Err(unsafe_path(&shown, "the lock file is not a regular file"));
+            }
+            if !Dir::try_lock(&file)? {
+                return Err(Error::Busy(holder_of(&file)));
+            }
+            // The file may have been replaced between the open and the lock: lock what the name means now.
+            if paleto.names_file("lock", &file)? {
+                // What it says is only for whoever finds the lock busy.
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let text = format!("{} {} {}\n", std::process::id(), now, label.replace(['\n', '\r'], " "));
+                let _ = file.set_len(0).and_then(|()| std::os::unix::fs::FileExt::write_all_at(&file, text.as_bytes(), 0));
+                return Ok(file);
+            }
+            Dir::unlock(&file);
+        }
+        Err(changed(&shown))
+    }
+
+    /// Whether another holder has the lock right now (it is not taken).
+    pub(crate) fn lock_is_held_elsewhere(&self) -> bool {
+        let Ok(Some(paleto)) = self.tool_folder(&[], false) else { return false };
+        let Ok(file) = paleto.open_lock("lock", false) else { return false };
+        match Dir::try_lock(&file) {
+            Ok(true) => {
+                Dir::unlock(&file);
+                false
+            }
+            Ok(false) => true,
+            Err(_) => false,
+        }
     }
 
     /// Makes the folders `r` needs, one at a time under the handle of the
@@ -716,6 +852,48 @@ impl GameRoots {
             out.set_permissions(from.metadata()?.permissions())
         })?;
         Ok(Some(dest.path()))
+    }
+}
+
+/// Who holds a lock, from what they wrote in the file (`pid unix label`).
+fn holder_of(file: &File) -> String {
+    let mut buf = [0u8; 512];
+    let n = std::os::unix::fs::FileExt::read_at(file, &mut buf, 0).unwrap_or(0);
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let mut parts = text.trim().splitn(3, ' ');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(pid), Some(_), Some(label)) if !label.is_empty() => format!("{label} (process {pid})"),
+        _ => "another operation on this game".to_string(),
+    }
+}
+
+impl LockGuard<'_> {
+    /// Marks the lock as taken for a transaction: only one at a time per `GameRoots`.
+    pub(crate) fn claim_txn(mut self) -> Result<Self, Error> {
+        let mut slot = self.roots.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.txn {
+            return Err(Error::Busy(format!("{} (a transaction is already open here)", slot.label)));
+        }
+        slot.txn = true;
+        self.txn = true;
+        drop(slot);
+        Ok(self)
+    }
+}
+
+impl Drop for LockGuard<'_> {
+    fn drop(&mut self) {
+        let mut slot = self.roots.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.txn {
+            slot.txn = false;
+        }
+        slot.depth = slot.depth.saturating_sub(1);
+        if slot.depth == 0 {
+            slot.owner = None;
+            if let Some(file) = slot.file.take() {
+                Dir::unlock(&file);
+            }
+        }
     }
 }
 

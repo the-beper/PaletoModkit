@@ -609,3 +609,121 @@ fn a_game_folder_reached_through_a_link_is_confined_by_its_real_place() {
     symlink(dir.path().join("lib"), real.join("game/up")).unwrap();
     assert!(write(&roots, "up/game/scripts/b.asi", b"x").is_err(), "a link to the folder that holds the game leaves it");
 }
+
+// ---- the game lock ----
+
+#[test]
+fn a_second_handle_on_the_same_game_is_busy_until_the_first_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = open(dir.path());
+    let second = open(dir.path());
+    let held = first.lock("installing mod A").unwrap();
+    let e = second.lock("installing mod B").unwrap_err();
+    assert!(matches!(&e, Error::Busy(who) if who.contains("installing mod A") && who.contains(&std::process::id().to_string())), "{e:?}");
+    assert!(e.to_string().contains("installing mod A"));
+    assert!(matches!(crate::txn::Txn::begin(&second, "b"), Err(Error::Busy(_))));
+    drop(held);
+    drop(second.lock("installing mod B").unwrap());
+    // The lock file stays (it is never deleted) and says who had it last.
+    let text = std::fs::read_to_string(dir.path().join("game/.paleto/lock")).unwrap();
+    assert!(text.trim_end().ends_with("installing mod B"), "{text:?}");
+}
+
+#[test]
+fn different_games_do_not_wait_for_each_other() {
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (one, two) = (open(a.path()), open(b.path()));
+    let _x = one.lock("one").unwrap();
+    let _y = two.lock("two").unwrap();
+}
+
+#[test]
+fn the_holder_may_lock_again_but_another_thread_may_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let other = open(dir.path());
+    let outer = roots.lock("outer").unwrap();
+    let inner = roots.lock("inner").unwrap();
+    std::thread::scope(|s| {
+        // The same handle on another thread is another holder.
+        assert!(matches!(s.spawn(|| roots.lock("thread").map(drop)).join().unwrap(), Err(Error::Busy(who)) if who.contains("outer")));
+    });
+    drop(inner);
+    assert!(matches!(other.lock("x"), Err(Error::Busy(_))), "the outer guard still holds it");
+    drop(outer);
+    drop(other.lock("x").unwrap());
+}
+
+#[test]
+fn a_holder_that_dies_leaves_no_stale_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    // A panic unwinds and drops the file; a killed process has its descriptors closed by the kernel, which is the same.
+    let died = std::thread::spawn(move || {
+        let roots = open(&path);
+        let _held = roots.lock("dies").unwrap();
+        panic!("died holding the lock");
+    })
+    .join();
+    assert!(died.is_err());
+    drop(open(dir.path()).lock("alive").unwrap());
+    // A lock file left by somebody who is long gone, with a pid and all, is only text.
+    std::fs::write(dir.path().join("game/.paleto/lock"), "1 2 gone\n").unwrap();
+    drop(open(dir.path()).lock("alive").unwrap());
+}
+
+#[test]
+fn the_lock_folder_and_file_are_never_followed_through_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let game = dir.path().join("game");
+    let roots = open(dir.path());
+    // `.paleto` is a link.
+    symlink(&outside, game.join(".paleto")).unwrap();
+    let e = err(roots.lock("x").map(drop));
+    assert!(e.contains("link"), "{e}");
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none(), "nothing was made through the link");
+    assert!(matches!(crate::txn::Txn::begin(&roots, "x"), Err(Error::UnsafePath { .. })));
+    std::fs::remove_file(game.join(".paleto")).unwrap();
+    // `.paleto` is a file.
+    std::fs::write(game.join(".paleto"), b"x").unwrap();
+    assert!(roots.lock("x").is_err());
+    std::fs::remove_file(game.join(".paleto")).unwrap();
+    // The lock file is a link to something else.
+    std::fs::create_dir(game.join(".paleto")).unwrap();
+    std::fs::write(outside.join("target"), b"keep").unwrap();
+    symlink(outside.join("target"), game.join(".paleto/lock")).unwrap();
+    let e = err(roots.lock("x").map(drop));
+    assert!(e.contains("link"), "{e}");
+    assert_eq!(std::fs::read(outside.join("target")).unwrap(), b"keep");
+    // The lock file is a folder.
+    std::fs::remove_file(game.join(".paleto/lock")).unwrap();
+    std::fs::create_dir(game.join(".paleto/lock")).unwrap();
+    assert!(roots.lock("x").is_err());
+}
+
+#[test]
+fn a_busy_probe_does_not_take_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    assert!(!roots.lock_is_held_elsewhere());
+    let held = roots.lock("a").unwrap();
+    assert!(open(dir.path()).lock_is_held_elsewhere());
+    drop(held);
+    assert!(!open(dir.path()).lock_is_held_elsewhere());
+    drop(open(dir.path()).lock("b").unwrap());
+}
+
+#[test]
+fn lock_faults_are_errors_not_a_taken_lock() {
+    use crate::fsroot::faults::{self, Mode, Point};
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    for point in [Point::Mkdir, Point::Open, Point::Lock] {
+        faults::arm_at(point, 1, Mode::Fail(io::ErrorKind::Other));
+        assert!(roots.lock("x").is_err(), "{point:?}");
+        assert!(faults::disarm());
+        drop(open(dir.path()).lock("free again").unwrap());
+    }
+}

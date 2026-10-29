@@ -100,7 +100,7 @@ fn not_found(e: &io::Error) -> bool {
 }
 
 /// A pseudo-random number for unique names.
-fn random() -> u64 {
+pub(crate) fn random() -> u64 {
     let mut bytes = [0u8; 8];
     if unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) } == bytes.len() as isize {
         return u64::from_le_bytes(bytes);
@@ -207,6 +207,55 @@ impl Dir {
             }
         }
         Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free temporary name"))
+    }
+
+    /// A folder the tool keeps its own files in: made if there is none, never
+    /// entered through a link (a link or a file there is an error of its own).
+    pub fn open_or_make_dir(&self, name: &str) -> io::Result<Dir> {
+        if self.kind(name)?.is_none() {
+            fault!(Mkdir);
+            let c = cstr(name)?;
+            match retry(|| cvt(unsafe { libc::mkdirat(self.fd(), c.as_ptr(), 0o755) })) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
+        }
+        self.open_dir(name)
+    }
+
+    /// Opens (and with `create` makes) a file to lock: never through a link.
+    pub fn open_lock(&self, name: &str, create: bool) -> io::Result<File> {
+        fault!(Lock);
+        let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | if create { libc::O_CREAT } else { 0 };
+        Ok(File::from(self.openat(name, flags, 0o644)?))
+    }
+
+    /// Opens an existing file to append to, never through a link.
+    pub fn open_append(&self, name: &str) -> io::Result<File> {
+        fault!(Open);
+        Ok(File::from(self.openat(name, libc::O_WRONLY | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY, 0)?))
+    }
+
+    /// Takes the exclusive lock of an open file without waiting; `false` if somebody else holds it.
+    pub fn try_lock(file: &File) -> io::Result<bool> {
+        fault!(Lock);
+        match retry(|| cvt(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) })) {
+            Ok(_) => Ok(true),
+            Err(e) if e.raw_os_error() == Some(libc::EWOULDBLOCK) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Releases the lock now (closing the file does too, unless a forked child still holds it open).
+    pub fn unlock(file: &File) {
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    }
+
+    /// Whether `name` is still this very file (not replaced or removed since it was opened).
+    pub fn names_file(&self, name: &str, file: &File) -> io::Result<bool> {
+        let Some(st) = self.stat_raw(name, false)? else { return Ok(false) };
+        let m = file.metadata()?;
+        Ok(kind_of(st.st_mode) == Kind::File && (st.st_dev, st.st_ino) == (m.dev(), m.ino()))
     }
 
     pub fn mkdir(&self, name: &str) -> io::Result<Dir> {

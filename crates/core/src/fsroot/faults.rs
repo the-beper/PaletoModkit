@@ -22,6 +22,12 @@ pub enum Point {
     ReadLink,
     List,
     Openat2,
+    /// Taking, probing or releasing the game lock.
+    Lock,
+    /// Appending a record to a transaction's journal.
+    Journal,
+    /// Flushing a file's data to disk.
+    SyncFile,
 }
 
 #[derive(Debug, Clone, Copy)]

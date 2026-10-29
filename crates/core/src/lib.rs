@@ -7,6 +7,7 @@ pub mod crash_hunt;
 pub mod crash_report;
 pub mod diagnosis;
 pub mod export;
+#[macro_use]
 pub mod fsroot;
 pub mod game;
 pub mod loader;
@@ -18,6 +19,7 @@ pub mod shared_textures;
 pub mod snapshots;
 pub mod texture_batch;
 pub mod text;
+pub mod txn;
 pub mod vfs;
 pub mod xml;
 
@@ -72,4 +74,16 @@ pub enum Error {
     /// Stopped because nobody wants the result any more.
     #[error("cancelled")]
     Cancelled,
+    /// Another operation holds the lock of this game; says which.
+    #[error("another change to this game is in progress: {0}")]
+    Busy(String),
+    /// An earlier operation was interrupted and could not be undone: the files involved.
+    #[error("{0}")]
+    RecoveryNeeded(String),
+    /// A file changed between being read and being replaced: nothing of it was written.
+    #[error("{0}")]
+    Conflict(String),
+    /// A transaction failed after it began to change files, and was rolled back.
+    #[error("{0}")]
+    Txn(Box<txn::TxnFailure>),
 }
