@@ -1,0 +1,188 @@
+#!/bin/sh
+# A stand-in for the GitHub CLI, for packaging/tests/release-sim.sh: the few calls of release-lib.sh (the gh_*
+# wrappers), served from a folder, never from the network.
+#   GH_STUB_DIR     the state: rel/<id>/{tag,draft,prerelease}, rel/<id>/assets/<name> (+ .meta), latest, log
+#   GH_STUB_REMOTE  the git remote that tags are looked up in (--verify-tag)
+#   GH_REPO         must be sim/<something>: the stub refuses any other repository
+# A one-shot failure is a line in $GH_STUB_DIR/fail: "upload:N" (the Nth file of an upload stops half way and
+# stays a "starter" asset) or "edit" (the publish call fails). The line is removed when it fires.
+# The listings run the --jq program of the caller with jq on JSON shaped like the API's.
+set -eu
+
+: "${GH_STUB_DIR:?GH_STUB_DIR is not set}"
+case ${GH_REPO:-} in sim/*) ;; *) echo "gh stub: refusing GH_REPO=${GH_REPO:-unset}" >&2; exit 1 ;; esac
+R=$GH_STUB_DIR/rel
+mkdir -p "$R"
+echo "$*" >> "$GH_STUB_DIR/log"
+
+next_id() {
+    n=$(cat "$GH_STUB_DIR/next" 2> /dev/null || echo 1000)
+    echo $((n + 1)) > "$GH_STUB_DIR/next"
+    echo "$n"
+}
+
+# the releases of a tag, one id per line
+ids_of() {
+    for d in "$R"/*; do
+        [ -d "$d" ] || continue
+        [ "$(cat "$d/tag")" = "$1" ] && basename "$d"
+    done
+    return 0
+}
+
+assets_json() { # release id
+    first=1
+    printf '['
+    for m in "$R/$1/assets"/*.meta; do
+        [ -f "$m" ] || continue
+        n=$(basename "$m" .meta)
+        f=$R/$1/assets/$n
+        IFS=: read -r aid state < "$m"
+        [ "$first" = 1 ] || printf ','
+        first=0
+        if [ "$state" = uploaded ]; then d="\"sha256:$(sha256sum "$f" | cut -d' ' -f1)\""; else d=null; fi
+        printf '{"id":%s,"name":"%s","size":%s,"state":"%s","digest":%s}' "$aid" "$n" "$(stat -c %s "$f")" "$state" "$d"
+    done
+    printf ']'
+}
+
+releases_json() {
+    first=1
+    printf '['
+    for d in "$R"/*; do
+        [ -d "$d" ] || continue
+        [ "$first" = 1 ] || printf ','
+        first=0
+        printf '{"id":%s,"tag_name":"%s","draft":%s,"prerelease":%s,"assets":%s}' "$(basename "$d")" "$(cat "$d/tag")" "$(cat "$d/draft")" "$(cat "$d/prerelease")" "$(assets_json "$(basename "$d")")"
+    done
+    printf ']'
+}
+
+fail_now() { # name: fires a one-shot failure
+    [ -f "$GH_STUB_DIR/fail" ] && grep -qx "$1" "$GH_STUB_DIR/fail" || return 1
+    grep -vx "$1" "$GH_STUB_DIR/fail" > "$GH_STUB_DIR/fail.new" || true
+    mv "$GH_STUB_DIR/fail.new" "$GH_STUB_DIR/fail"
+    return 0
+}
+
+one_release() { # tag -> id (exactly one)
+    ids=$(ids_of "$1")
+    [ -n "$ids" ] || { echo "gh: release not found: $1" >&2; exit 1; }
+    [ "$(printf '%s\n' "$ids" | wc -l)" = 1 ] || { echo "gh: several releases for $1" >&2; exit 1; }
+    printf '%s\n' "$ids"
+}
+
+case ${1:-} in
+api)
+    shift
+    METHOD=GET JQ="." PATH_ARG=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --paginate) shift ;;
+            --jq) JQ=$2; shift 2 ;;
+            -X) METHOD=$2; shift 2 ;;
+            *) PATH_ARG=$1; shift ;;
+        esac
+    done
+    case $METHOD:$PATH_ARG in
+        GET:repos/"$GH_REPO"/releases\?*) releases_json | jq -r "$JQ" ;;
+        GET:repos/"$GH_REPO"/releases/*/assets\?*)
+            id=${PATH_ARG#repos/"$GH_REPO"/releases/}
+            id=${id%%/*}
+            [ -d "$R/$id" ] || { echo "gh: no release $id" >&2; exit 1; }
+            assets_json "$id" | jq -r "$JQ" ;;
+        DELETE:repos/"$GH_REPO"/releases/assets/*)
+            aid=${PATH_ARG##*/}
+            for m in "$R"/*/assets/*.meta; do
+                [ -f "$m" ] || continue
+                IFS=: read -r id _ < "$m"
+                [ "$id" = "$aid" ] || continue
+                rm -f "${m%.meta}" "$m"
+                exit 0
+            done
+            echo "gh: no asset $aid" >&2
+            exit 1 ;;
+        DELETE:repos/"$GH_REPO"/releases/*)
+            id=${PATH_ARG##*/}
+            [ -d "$R/$id" ] || { echo "gh: no release $id" >&2; exit 1; }
+            rm -rf "${R:?}/$id" ;;
+        *) echo "gh stub: unsupported api call: $METHOD $PATH_ARG" >&2; exit 1 ;;
+    esac ;;
+release)
+    sub=${2:-}
+    shift 2
+    case $sub in
+        create)
+            tag=$1
+            shift
+            draft=0 verify=0 pre=false
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --draft) draft=1; shift ;;
+                    --verify-tag) verify=1; shift ;;
+                    --generate-notes) shift ;;
+                    --title) shift 2 ;;
+                    --prerelease) pre=true; shift ;;
+                    *) echo "gh stub: unsupported option $1" >&2; exit 1 ;;
+                esac
+            done
+            [ "$draft" = 1 ] || { echo "gh stub: releases must be created as drafts" >&2; exit 1; }
+            if [ "$verify" = 1 ]; then
+                out=$(git ls-remote "${GH_STUB_REMOTE:?}" "refs/tags/$tag")
+                [ -n "$out" ] || { echo "gh: tag $tag does not exist on the remote" >&2; exit 1; }
+            fi
+            id=$(next_id)
+            mkdir -p "$R/$id/assets"
+            echo "$tag" > "$R/$id/tag"
+            echo true > "$R/$id/draft"
+            echo "$pre" > "$R/$id/prerelease"
+            echo "https://example.invalid/sim/$tag" ;;
+        upload)
+            tag=$1
+            shift
+            id=$(one_release "$tag")
+            files=""
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --clobber) shift ;;
+                    -*) echo "gh stub: unsupported option $1" >&2; exit 1 ;;
+                    *) files="$files $1"; shift ;;
+                esac
+            done
+            n=0
+            for f in $files; do
+                n=$((n + 1))
+                name=$(basename "$f")
+                [ -f "$f" ] || { echo "gh: no file $f" >&2; exit 1; }
+                if [ -f "$R/$id/assets/$name.meta" ]; then
+                    rm -f "$R/$id/assets/$name" "$R/$id/assets/$name.meta"
+                fi
+                aid=$(next_id)
+                if fail_now "upload:$n"; then
+                    head -c "$(($(stat -c %s "$f") / 2))" "$f" > "$R/$id/assets/$name"
+                    echo "$aid:starter" > "$R/$id/assets/$name.meta"
+                    echo "gh: upload of $name interrupted" >&2
+                    exit 1
+                fi
+                cp "$f" "$R/$id/assets/$name"
+                echo "$aid:uploaded" > "$R/$id/assets/$name.meta"
+            done ;;
+        edit)
+            tag=$1
+            shift
+            id=$(one_release "$tag")
+            fail_now edit && { echo "gh: edit failed" >&2; exit 1; }
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --draft=false) echo false > "$R/$id/draft" ;;
+                    --prerelease) echo true > "$R/$id/prerelease" ;;
+                    --latest) echo "$tag" > "$GH_STUB_DIR/latest" ;;
+                    --latest=false) ;;
+                    *) echo "gh stub: unsupported option $1" >&2; exit 1 ;;
+                esac
+                shift
+            done ;;
+        *) echo "gh stub: unsupported release command $sub" >&2; exit 1 ;;
+    esac ;;
+*) echo "gh stub: unsupported command: $*" >&2; exit 1 ;;
+esac

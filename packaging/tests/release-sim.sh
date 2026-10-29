@@ -1,0 +1,989 @@
+#!/bin/sh
+# Simulates the release pipeline (the jobs of .github/workflows/release.yml) with the real scripts of
+# packaging/, a throwaway git remote, the gh stub, and throwaway signing keys: no network, no GitHub, and nothing
+# of the real home or Flatpak installation. Prints "PASS name" or "FAIL name: why" per scenario.
+#   sh packaging/tests/release-sim.sh [scenario...]     (no argument: all of them; -l lists them)
+#   SIM_BASE=dir   where the scratch tree goes (default $TMPDIR or /tmp; a disk is kinder than a tmpfs)
+#   KEEP=1         keep the scratch tree; VERBOSE=1 print the logs of a failed scenario
+# Needs flatpak, ostree, gpg, git, jq, tar, curl; exits 77 (skipped) if one is missing. Exit 1 if a scenario fails.
+# What it cannot do: run the container builds (podman) and the real appimagetool: the build outputs are
+# synthetic, structurally valid files (lib-fixture.sh); the scripts that check them are the real ones.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$HERE/.." && pwd)
+for t in flatpak ostree gpg git jq tar curl base64; do
+    command -v "$t" > /dev/null || { echo "SKIP: $t is needed"; exit 77; }
+done
+# shellcheck source=/dev/null
+. "$HERE/lib-fixture.sh"
+
+SIM=$(mktemp -d "${SIM_BASE:-${TMPDIR:-/tmp}}/rs.XXXXXX")
+cleanup() {
+    for h in "$SIM"/rt/*/gnupg.* "$SIM"/keys/*.home; do
+        [ -d "$h" ] && gpgconf --homedir "$h" --kill all > /dev/null 2>&1 || true
+    done
+    if [ "${KEEP:-}" = 1 ]; then echo "kept $SIM"; else rm -rf "$SIM"; fi
+}
+trap cleanup EXIT
+fx_env "$SIM"
+LIVE=$SIM/live
+TPL=$SIM/tpl
+KEYS=$SIM/keys
+CW=$SIM/cw.git
+BIN=$SIM/bin
+mkdir -p "$KEYS" "$BIN" "$SIM/rt" "$SIM/tools"
+chmod 700 "$KEYS"
+ln -s "$HERE/gh" "$BIN/gh"
+PATH=$BIN:$PATH
+APP_ID=io.github.the_beper.PaletoModkit
+APP_REF=app/$APP_ID/x86_64/master
+
+# Everything below talks to a local remote and the stub; the scripts check it again (RELEASE_SIM).
+unset GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+GH_TOKEN=sim-token-not-a-secret
+GH_REPO=sim/paleto
+GITHUB_REPOSITORY=sim/paleto
+REMOTE=file://$LIVE/origin.git
+GH_STUB_DIR=$LIVE/stub
+GH_STUB_REMOTE=$REMOTE
+RELEASE_SIM=1
+RELEASE_SIM_GH=$BIN/gh
+export GH_TOKEN GH_REPO GITHUB_REPOSITORY REMOTE GH_STUB_DIR GH_STUB_REMOTE RELEASE_SIM RELEASE_SIM_GH PATH
+case $REMOTE$GH_REPO in *github.com* | *the-beper*) echo "the simulation must not point at GitHub" >&2; exit 1 ;; esac
+
+kv() { sed -n "s/^$2=//p" "$1" | head -n1; }
+in_dir() { (cd "$1" && shift && "$@"); }
+# run LOG CMD...: runs, logs, sets RC; never fails
+run() { RUNLOG=$1; shift; RC=0; "$@" > "$RUNLOG" 2>&1 || RC=$?; }
+
+# ---- the world ------------------------------------------------------------------------------------------------
+
+write_conf() { # FILE
+    cat > "$1" <<CONF
+APP_ID=io.github.the_beper.PaletoModkit
+FLATPAK_BRANCH=master
+SITE_URL=file://$LIVE/site
+GITHUB_REPO=sim/paleto
+FLATPAK_KEY_FPR=$FPR_K
+FLATPAK_IMAGE=example.invalid/image:1@sha256:$(printf 'a%.0s' $(seq 64))
+SDK_COMMIT=$(printf 'b%.0s' $(seq 64))
+RUST_EXT_COMMIT=$(printf 'c%.0s' $(seq 64))
+DOTNET_EXT_COMMIT=$(printf 'd%.0s' $(seq 64))
+APPIMAGETOOL_URL=file://$SIM/tools/appimagetool
+APPIMAGETOOL_SHA256=$(sha256sum "$SIM/tools/appimagetool" | cut -d' ' -f1)
+APPIMAGE_RUNTIME_URL=file://$SIM/tools/runtime
+APPIMAGE_RUNTIME_SHA256=$(sha256sum "$SIM/tools/runtime" | cut -d' ' -f1)
+CODEWALKER_URL=file://$CW
+RELEASE_FILES=PaletoModkit-x86_64.tar.gz PaletoModkit-x86_64.AppImage PaletoModkit-x86_64.AppImage.zsync PaletoModkit-x86_64.flatpak
+CONF
+}
+
+install_hooks() {
+    cat > "$LIVE/origin.git/hooks/pre-receive" <<HOOK
+#!/bin/sh
+while read -r old new ref; do
+    if [ "\$ref" = refs/heads/gh-pages ] && [ -e "$LIVE/reject-once" ]; then
+        rm -f "$LIVE/reject-once"
+        echo "pre-receive: rejected on purpose" >&2
+        exit 1
+    fi
+done
+HOOK
+    # The "Pages deployment": the site folder follows gh-pages, unless a test says it does not.
+    cat > "$LIVE/origin.git/hooks/post-receive" <<HOOK
+#!/bin/sh
+[ ! -e "$LIVE/nodeploy" ] || exit 0
+git rev-parse -q --verify refs/heads/gh-pages > /dev/null || exit 0
+rm -rf "$LIVE/site"
+mkdir -p "$LIVE/site"
+git archive refs/heads/gh-pages | tar -x -C "$LIVE/site"
+HOOK
+    chmod +x "$LIVE/origin.git/hooks/pre-receive" "$LIVE/origin.git/hooks/post-receive"
+}
+
+checkout() { # DIR REF: a fresh clone at REF, with the submodule
+    rm -rf "$1"
+    git clone -q "$REMOTE" "$1"
+    git -C "$1" checkout -q --detach "$2"
+    git -C "$1" submodule update -q --init
+}
+
+# commit_release VERSION [MUTATOR]: a commit on main (or $ON_BRANCH) that makes the project VERSION.
+commit_release() {
+    w=$LIVE/work
+    git -C "$w" fetch -q origin
+    git -C "$w" checkout -q -B "${ON_BRANCH:-main}" "origin/${ON_BRANCH:-main}" 2> /dev/null || git -C "$w" checkout -q -B "${ON_BRANCH:-main}" origin/main
+    fx_set_version "$w" "$1"
+    echo "marker-$(fx_nonce)" > "$w/marker.txt"
+    if [ -n "${2:-}" ]; then "$2" "$w"; fi
+    git -C "$w" add -A
+    git -C "$w" commit -q -m "Release $1"
+    git -C "$w" push -q origin "HEAD:refs/heads/${ON_BRANCH:-main}"
+}
+tag_release() { # TAG [COMMIT]
+    git -C "$LIVE/work" tag -f -a "$1" -m "$1" "${2:-HEAD}" > /dev/null
+    git -C "$LIVE/work" push -q -f origin "refs/tags/$1"
+}
+
+# ---- the jobs ---------------------------------------------------------------------------------------------------
+
+RC=0 PIPE_FAIL="" PIPE_PLAN="" RUNLOG=/dev/null
+BOOTSTRAP=false
+FAKE_FAIL=
+FAKE_CWCONV=
+SECRET_FILE=
+
+job_validate() { # RUN TAG MODE [EVENT]
+    d=$LIVE/runs/$1
+    rm -rf "$d"
+    mkdir -p "$d"
+    event=${4:-push}
+    checkout "$d/src" origin/main
+    if git -C "$d/src" rev-parse -q --verify "refs/tags/$2^{commit}" > /dev/null; then git -C "$d/src" checkout -q --detach "refs/tags/$2"; fi
+    if [ "$event" = push ]; then
+        sha=$(git -C "$d/src" rev-parse HEAD)
+        ref=refs/tags/$2
+    else
+        sha=$(git -C "$d/src" rev-parse origin/main)
+        ref=refs/heads/main
+    fi
+    : > "$d/validate.out"
+    run "$d/validate.log" in_dir "$d/src" env GITHUB_OUTPUT="$d/validate.out" GITHUB_SHA="$sha" GITHUB_REF="$ref" BOOTSTRAP="$BOOTSTRAP" \
+        sh packaging/release-validate.sh --tag "$2" --mode "$3" --event "$event"
+}
+
+job_build() { # RUN
+    d=$LIVE/runs/$1
+    commit=$(kv "$d/validate.out" commit)
+    checkout "$d/build" "$commit"
+    run "$d/check-head.log" in_dir "$d/build" sh packaging/release-validate.sh --check-head "$commit"
+    [ "$RC" = 0 ] || return 0
+    RC=0
+    if [ "$(kv "$d/validate.out" build_linux)" = true ]; then
+        [ "${FAKE_FAIL:-}" != linux ] || { RC=1; echo "the Linux build failed" > "$d/build-linux.log"; return 0; }
+        fx_linux "$d/build" "$d/linux" "${FAKE_CWCONV:-}"
+    fi
+    [ "${FAKE_FAIL:-}" != flatpak ] || { RC=1; echo "the Flatpak build failed" > "$d/build-flatpak.log"; return 0; }
+    fx_flatpak "$d/build" "$d/fp"
+}
+
+job_verify() { # RUN
+    d=$LIVE/runs/$1
+    linux=""
+    [ ! -d "$d/linux" ] || linux=$d/linux
+    run "$d/verify.log" in_dir "$d/build" sh packaging/release-verify.sh builds --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" \
+        ${linux:+--linux "$linux"} --flatpak "$d/fp" --out "$d/verified"
+}
+
+# job_sign RUN: fetch Pages (stable) and sign; SECRET_FILE says which key.
+job_sign() {
+    d=$LIVE/runs/$1
+    tag=$(kv "$d/validate.out" tag)
+    commit=$(kv "$d/validate.out" commit)
+    rt=$SIM/rt/$1
+    rm -rf "$rt"
+    mkdir -p "$rt"
+    secret=$(cat "${SECRET_FILE:-$KEYS/K.sec}")
+    case $tag in
+        *-rc.*) site="--fresh" ;;
+        *)
+            boot=""
+            [ "$BOOTSTRAP" != true ] || boot=--bootstrap
+            run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages" $boot
+            [ "$RC" = 0 ] || return 0
+            site="--site $rt/pages $boot"
+            ;;
+    esac
+    # shellcheck disable=SC2086
+    run "$d/sign.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" \
+        sh packaging/flatpak-sign.sh --tag "$tag" --commit "$commit" --manifest "$d/verified/release-manifest.txt" \
+        --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --out "$d/signed"
+    rc=$RC
+    in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --cleanup > "$d/cleanup.log" 2>&1 || true
+    RC=$rc
+}
+
+job_publish() { # RUN MODE
+    d=$LIVE/runs/$1
+    mode=${2:-release}
+    rm -rf "$d/in"
+    mkdir -p "$d/in"
+    [ ! -d "$d/linux" ] || cp "$d"/linux/PaletoModkit-x86_64.* "$d/in/"
+    cp "$d/verified/release-manifest.txt" "$d/in/"
+    cp "$d"/signed/* "$d/in/"
+    boot=""
+    [ "$BOOTSTRAP" != true ] || boot=--bootstrap
+    run "$d/publish.log" in_dir "$d/build" env RUNNER_TEMP="$SIM/rt/$1" PAGES_WAIT=3 PAGES_POLL=1 GITHUB_RUN_ID="$1" GITHUB_RUN_ATTEMPT=1 \
+        sh packaging/release-publish.sh --mode "$mode" --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" --in "$d/in" $boot
+}
+
+# pipeline RUN TAG MODE [EVENT [UNTIL]]: the jobs in order, stopping at the first that fails (like "needs").
+# Sets RC and PIPE_FAIL (the job that failed, empty if none), PIPE_PLAN.
+pipeline() {
+    n=$1 tag=$2 mode=$3 event=${4:-push} until=${5:-publish}
+    PIPE_FAIL="" PIPE_PLAN=""
+    job_validate "$n" "$tag" "$mode" "$event"
+    [ "$RC" = 0 ] || { PIPE_FAIL=validate; return 0; }
+    PIPE_PLAN=$(kv "$LIVE/runs/$n/validate.out" plan)
+    [ "$PIPE_PLAN" != noop ] || return 0
+    [ "$until" != validate ] || return 0
+    job_build "$n"
+    [ "$RC" = 0 ] || { PIPE_FAIL=build; return 0; }
+    job_verify "$n"
+    [ "$RC" = 0 ] || { PIPE_FAIL=verify; return 0; }
+    [ "$(kv "$LIVE/runs/$n/validate.out" publish)" = true ] || return 0
+    [ "$until" != verify ] || return 0
+    job_sign "$n"
+    [ "$RC" = 0 ] || { PIPE_FAIL=sign; return 0; }
+    [ "$until" != sign ] || return 0
+    job_publish "$n" "$mode"
+    [ "$RC" = 0 ] || { PIPE_FAIL=publish; return 0; }
+}
+
+# ---- assertions and state ---------------------------------------------------------------------------------------
+
+fail() { echo "$*" >> "$FAILFILE"; }
+assert_eq() { [ "$2" = "$3" ] || fail "$1: expected '$2', got '$3'"; }
+assert_rc() { assert_eq "$1 exit code" "$2" "$RC"; }
+assert_file() { [ -e "$2" ] || fail "$1: $2 is missing"; }
+assert_log() { # LOGFILE PATTERN
+    grep -q -- "$2" "$1" 2> /dev/null || fail "the log $(basename "$1") does not say '$2'"
+}
+# the id of the release of a tag in the stub
+stub_rel() { for x in "$GH_STUB_DIR"/rel/*; do [ -d "$x" ] && [ "$(cat "$x/tag")" = "$1" ] && basename "$x"; done; return 0; }
+stub_field() { cat "$GH_STUB_DIR/rel/$(stub_rel "$1")/$2" 2> /dev/null || echo none; }
+stub_assets() { find "$GH_STUB_DIR/rel/$(stub_rel "$1")/assets" -type f -not -name '*.meta' 2> /dev/null | wc -l; }
+# a picture of everything a publish could change
+snapshot() {
+    git ls-remote "$REMOTE"
+    (cd "$GH_STUB_DIR" 2> /dev/null && find . -type f -not -name log | LC_ALL=C sort | xargs -r sha256sum)
+    (cd "$LIVE/site" 2> /dev/null && find . -type f -not -path './repo/*' | LC_ALL=C sort | xargs -r sha256sum)
+}
+pages_count() { git -C "$LIVE/origin.git" rev-list --count refs/heads/gh-pages; }
+record() { git -C "$LIVE/origin.git" show "$1:release.txt" 2> /dev/null; }
+leftover_gnupg() { find "$SIM/rt" -maxdepth 2 -name 'gnupg.*' 2> /dev/null | wc -l; }
+
+# ---- scenarios --------------------------------------------------------------------------------------------------
+
+sc_valid_stable() {
+    before=$(git -C "$LIVE/origin.git" rev-parse gh-pages)
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_rc "pipeline" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "the release is a draft" false "$(stub_field v1.6.0 draft)"
+    assert_eq "the release assets (4 files and SHA256SUMS)" 5 "$(stub_assets v1.6.0)"
+    assert_eq "latest release" v1.6.0 "$(cat "$GH_STUB_DIR/latest")"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "gh-pages version" 1.6.0 "$(kv "$LIVE/site/release.txt" version)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+    assert_eq "gh-pages-previous is the old gh-pages" "$before" "$(git -C "$LIVE/origin.git" rev-parse gh-pages-previous)"
+    prev_app=$(record gh-pages-previous | sed -n 's/^ostree_app_commit=//p')
+    assert_eq "app commit parent" "$prev_app" "$(ostree --repo="$LIVE/site/repo" rev-parse "$APP_REF^")"
+    assert_eq "app commit" "$(kv "$LIVE/site/release.txt" ostree_app_commit)" "$(ostree --repo="$LIVE/site/repo" rev-parse "$APP_REF")"
+    cmp -s "$TPL/site/paleto-modkit.flatpakrepo" "$LIVE/site/paleto-modkit.flatpakrepo" || fail "the .flatpakrepo changed"
+    cmp -s "$TPL/site/paleto-modkit.flatpakref" "$LIVE/site/paleto-modkit.flatpakref" || fail ".flatpakref changed"
+    # the release assets are exactly the verified files
+    assert_eq "SHA256SUMS lines" 4 "$(wc -l < "$GH_STUB_DIR/rel/$(stub_rel v1.6.0)/assets/SHA256SUMS")"
+    (cd "$GH_STUB_DIR/rel/$(stub_rel v1.6.0)/assets" && sha256sum --strict -c SHA256SUMS > /dev/null) || fail "SHA256SUMS does not check against the release assets"
+}
+
+sc_invalid_tag() {
+    for t in v1.6 v01.6.0 v1.6.0-beta.1 1.6.0 v1.6.0-rc.0 v1.6.0-rc.01; do
+        job_validate 1 "$t" release
+        assert_rc "validate $t" 2
+        assert_log "$LIVE/runs/1/validate.log" "not a release tag"
+    done
+}
+
+mut_cargo() { sed -i 's/^version = "1.6.0"/version = "1.5.1"/' "$1/Cargo.toml"; }
+mut_lock() { sed -i '/^name = "paleto-gui"/{n;s/version = "1.6.0"/version = "1.5.1"/}' "$1/Cargo.lock"; }
+mut_metainfo() { fx_metainfo "$1/packaging/$APP_ID.metainfo.xml" "$APP_ID" 1.5.1 2026-10-29; }
+mut_date() { sed -i 's|date="2026-10-29"|date="29/10/2026"|' "$1/packaging/$APP_ID.metainfo.xml"; }
+mut_submodule() { git -C "$1" config -f .gitmodules submodule.third_party/codewalker.url https://example.invalid/CodeWalker.git; }
+mut_extra_submodule() { git -C "$1" config -f .gitmodules submodule.extra.path extra; git -C "$1" config -f .gitmodules submodule.extra.url "file://$CW"; }
+mut_rc_type() { sed -i 's/ type="development"//' "$1/packaging/$APP_ID.metainfo.xml"; }
+mut_stable_dev() { sed -i 's/date="2026-10-29"/date="2026-10-29" type="development"/' "$1/packaging/$APP_ID.metainfo.xml"; }
+mut_pin() { sed -i 's/^SDK_COMMIT=.*/SDK_COMMIT=/' "$1/packaging/release.conf"; }
+mut_identity() { sed -i 's/^APP_ID=.*/APP_ID=io.github.other.App/' "$1/packaging/release.conf"; }
+mutated() { # NAME TAG MUTATOR
+    commit_release "${2#v}" "$3"
+    tag_release "$2"
+    job_validate 1 "$2" release
+    assert_rc "$1: validate" "${4:-2}"
+}
+sc_mismatch_cargo() { mutated cargo v1.6.0 mut_cargo; }
+sc_mismatch_lock() { mutated lock v1.6.0 mut_lock; }
+sc_mismatch_metainfo() { mutated metainfo v1.6.0 mut_metainfo; }
+sc_mismatch_date() { mutated date v1.6.0 mut_date; }
+sc_mismatch_submodule() { mutated submodule v1.6.0 mut_submodule; }
+sc_mismatch_extra_submodule() { mutated "extra submodule" v1.6.0 mut_extra_submodule; }
+sc_mismatch_rc_type() { mutated "rc without development type" v1.6.0-rc.1 mut_rc_type; }
+sc_mismatch_stable_dev() { mutated "stable with development type" v1.6.0 mut_stable_dev; }
+sc_empty_pin() { mutated "empty pin" v1.6.0 mut_pin; }
+sc_identity_change() { mutated "identity change" v1.6.0 mut_identity 3; }
+
+sc_prerelease() {
+    before=$(git -C "$LIVE/origin.git" rev-parse gh-pages)
+    commit_release 1.7.0-rc.1
+    tag_release v1.7.0-rc.1
+    pipeline 1 v1.7.0-rc.1 release
+    assert_rc "pipeline" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "prerelease flag" true "$(stub_field v1.7.0-rc.1 prerelease)"
+    assert_eq "draft flag" false "$(stub_field v1.7.0-rc.1 draft)"
+    assert_eq "assets" 5 "$(stub_assets v1.7.0-rc.1)"
+    assert_eq "gh-pages unchanged" "$before" "$(git -C "$LIVE/origin.git" rev-parse gh-pages)"
+    assert_eq "latest unchanged" v1.5.1 "$(cat "$GH_STUB_DIR/latest")"
+    # an rc cannot go to Pages
+    job_validate 2 v1.7.0-rc.1 publish-flatpak
+    assert_rc "publish-flatpak of an rc" 2
+}
+
+sc_main_moved() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    tagged_marker=$(git -C "$LIVE/work" show v1.6.0:marker.txt)
+    commit_release 1.6.1
+    pipeline 1 v1.6.0 release
+    assert_rc "pipeline" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    assert_eq "marker in the tarball" "$tagged_marker" "$(tar -xzOf "$d/linux/PaletoModkit-x86_64.tar.gz" paleto-modkit-1.6.0/MARKER)"
+    assert_eq "manifest version" 1.6.0 "$(kv "$d/verified/release-manifest.txt" version)"
+    assert_eq "release.txt version" 1.6.0 "$(kv "$LIVE/site/release.txt" version)"
+}
+
+sc_tag_not_on_main() {
+    ON_BRANCH=side
+    git -C "$LIVE/work" checkout -q -B side origin/main
+    git -C "$LIVE/work" push -q origin side
+    commit_release 1.6.0
+    tag_release v1.6.0
+    job_validate 1 v1.6.0 release
+    assert_rc "validate" 2
+    assert_log "$LIVE/runs/1/validate.log" "not on main"
+    # a dry run (build-only) does not need main
+    job_validate 2 v1.6.0 build-only workflow_dispatch
+    assert_rc "validate build-only" 0
+}
+
+sc_build_failure() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    snapshot > "$SIM/snap.before"
+    FAKE_FAIL=linux
+    pipeline 1 v1.6.0 release
+    FAKE_FAIL=
+    assert_eq "failed job" build "$PIPE_FAIL"
+    [ "$RC" != 0 ] || fail "the build did not fail"
+    [ ! -d "$LIVE/runs/1/verified" ] || fail "verify ran after a failed build"
+    [ ! -d "$LIVE/runs/1/signed" ] || fail "signing ran after a failed build"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+}
+
+sc_converter_failure() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    FAKE_CWCONV=nocwconv
+    pipeline 1 v1.6.0 release
+    FAKE_CWCONV=
+    assert_eq "failed job" verify "$PIPE_FAIL"
+    assert_rc "verify" 2
+    assert_log "$LIVE/runs/1/verify.log" "paleto-cwconv"
+}
+
+sc_missing_zsync() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push validate
+    job_build 1
+    rm "$LIVE/runs/1/linux/PaletoModkit-x86_64.AppImage.zsync"
+    job_verify 1
+    assert_rc "verify" 2
+    assert_log "$LIVE/runs/1/verify.log" "zsync"
+}
+
+sc_zsync_length() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push validate
+    job_build 1
+    sed -i 's/^Length: .*/Length: 1/' "$LIVE/runs/1/linux/PaletoModkit-x86_64.AppImage.zsync"
+    job_verify 1
+    assert_rc "verify" 2
+    assert_log "$LIVE/runs/1/verify.log" "Length"
+}
+
+sc_flipped_appimage() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    snapshot > "$SIM/snap.before"
+    f=$LIVE/runs/1/linux/PaletoModkit-x86_64.AppImage
+    printf 'X' | dd of="$f" bs=1 seek=100 conv=notrunc 2> /dev/null
+    job_publish 1 release
+    assert_rc "publish" 2
+    assert_log "$LIVE/runs/1/publish.log" "AppImage is not the verified build"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+}
+
+sc_tool_pin() {
+    # fetch-pinned.sh by itself
+    printf 'tool' > "$SIM/tools/x"
+    good=$(sha256sum "$SIM/tools/x" | cut -d' ' -f1)
+    bad=$(printf 'e%.0s' $(seq 64))
+    run "$SIM/fp.log" sh "$PKG/fetch-pinned.sh" "file://$SIM/tools/x" "$bad" "$SIM/dl/tool" executable
+    assert_rc "fetch with a wrong hash" 2
+    [ ! -e "$SIM/dl/tool" ] && [ ! -e "$SIM/dl/tool.part" ] || fail "an unverified file was left behind"
+    run "$SIM/fp.log" sh "$PKG/fetch-pinned.sh" "file://$SIM/tools/x" "$good" "$SIM/dl/tool" executable
+    assert_rc "fetch with the right hash" 0
+    [ -x "$SIM/dl/tool" ] || fail "the verified tool is not executable"
+    # a cached file that no longer matches is replaced, a bad one is refused
+    echo tampered > "$SIM/dl/tool"
+    run "$SIM/fp.log" sh "$PKG/fetch-pinned.sh" "file://$SIM/tools/x" "$good" "$SIM/dl/tool" executable
+    assert_rc "fetch over a tampered cache" 0
+    assert_eq "cache restored" tool "$(cat "$SIM/dl/tool")"
+    run "$SIM/fp.log" sh "$PKG/fetch-pinned.sh" "http://example.invalid/x" "$good" "$SIM/dl/tool2"
+    assert_rc "plain http" 1
+    # build-release.sh: a bad pin stops it before anything is compiled or run
+    [ "$(uname -m)" = x86_64 ] || { echo "skipped the build-release.sh part: not x86_64" >&2; return 0; }
+    w=$SIM/br
+    rm -rf "$w"
+    git clone -q "$REMOTE" "$w"
+    mkdir -p "$SIM/fakebin"
+    printf '#!/bin/sh\ntouch "%s/cargo-ran"\nexit 99\n' "$SIM" > "$SIM/fakebin/cargo"
+    printf '#!/bin/sh\nexit 0\n' > "$SIM/fakebin/zsyncmake"
+    chmod +x "$SIM/fakebin/cargo" "$SIM/fakebin/zsyncmake"
+    rm -f "$SIM/cargo-ran"
+    sed "s/^APPIMAGETOOL_SHA256=.*/APPIMAGETOOL_SHA256=$bad/" "$w/packaging/release.conf" > "$SIM/bad.conf"
+    run "$SIM/br.log" in_dir "$w" env RELEASE_CONF="$SIM/bad.conf" PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    assert_rc "build-release.sh with a wrong appimagetool hash" 2
+    [ ! -e "$SIM/cargo-ran" ] || fail "the build ran with an unverified tool"
+    [ ! -e "$w/target/tools/appimagetool-$bad" ] || fail "the unverified appimagetool is in place"
+    sed "s/^APPIMAGE_RUNTIME_SHA256=.*/APPIMAGE_RUNTIME_SHA256=/" "$w/packaging/release.conf" > "$SIM/empty.conf"
+    run "$SIM/br.log" in_dir "$w" env RELEASE_CONF="$SIM/empty.conf" PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    assert_rc "build-release.sh with an empty pin" 2
+    run "$SIM/br.log" in_dir "$w" env EXPECT_VERSION=9.9.9 PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    assert_rc "build-release.sh with another version than Cargo.toml" 2
+    # with the right pins it gets as far as the build (the fake cargo stops it)
+    run "$SIM/br.log" in_dir "$w" env PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    assert_rc "build-release.sh with the right pins reaches cargo" 99
+    [ -x "$w/target/tools/appimagetool-$(sha256sum "$SIM/tools/appimagetool" | cut -d' ' -f1)" ] || fail "the verified appimagetool is not in place"
+}
+
+sc_build_flatpak_script() {
+    # a fake container engine: the script must be unsigned-only, pinned, and must not give the container a key
+    w=$SIM/bf
+    rm -rf "$w"
+    git clone -q "$REMOTE" "$w"
+    mkdir -p "$SIM/fakeeng"
+    cat > "$SIM/fakeeng/podman" <<'ENGINE'
+#!/bin/sh
+case $1 in
+    info) echo "${FAKE_ROOTLESS:-true}"; exit 0 ;;
+    run) ;;
+    *) exit 1 ;;
+esac
+echo "$*" > "$FAKE_LOG"
+shift
+work=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        -v) case $2 in *:/work) work=${2%:/work} ;; esac; shift 2 ;;
+        *) shift ;;
+    esac
+done
+cp -a "$FAKE_REPO/repo" "$work/repo"
+printf 'sdk_commit=1\napp_commit=%s\n' "$(ostree --repo="$work/repo" rev-parse app/io.github.the_beper.PaletoModkit/x86_64/master)" > "$work/build-info.txt"
+echo bundle > "$work/PaletoModkit-x86_64.flatpak"
+ENGINE
+    chmod +x "$SIM/fakeeng/podman"
+    fx_unsigned_repo "$SIM/fakerepo" "$w/packaging/$APP_ID.metainfo.xml" "$APP_ID"
+    FAKE_LOG=$SIM/engine.log
+    FAKE_REPO=$SIM/fakerepo
+    export FAKE_LOG FAKE_REPO
+    # shellcheck disable=SC2329
+    bf() { in_dir "$w" env PATH="$SIM/fakeeng:$PATH" WORK="$SIM/bfwork" OUT="$SIM/bfout" "$@"; }
+    run "$SIM/bf.log" bf GPG_KEY_ID=ABCD sh packaging/build-flatpak.sh
+    assert_rc "with GPG_KEY_ID" 1
+    run "$SIM/bf.log" bf GNUPGHOME="$SIM/keys" sh packaging/build-flatpak.sh
+    assert_rc "with GNUPGHOME" 1
+    run "$SIM/bf.log" bf FAKE_ROOTLESS=false sh packaging/build-flatpak.sh
+    assert_rc "rootful engine" 1
+    run "$SIM/bf.log" bf EXPORT_REPO=1 BUNDLE=0 sh packaging/build-flatpak.sh
+    assert_rc "release build" 0
+    assert_file "unsigned repository tar" "$SIM/bfout/flatpak-unsigned-repo.tar"
+    assert_file "build description" "$SIM/bfout/flatpak-build.txt"
+    [ ! -e "$SIM/bfout/PaletoModkit-x86_64.flatpak" ] || fail "BUNDLE=0 made a bundle"
+    assert_eq "commit in flatpak-build.txt" "$(git -C "$w" rev-parse HEAD)" "$(kv "$SIM/bfout/flatpak-build.txt" commit)"
+    assert_log "$SIM/engine.log" "--privileged"
+    assert_log "$SIM/engine.log" "@sha256:"
+    if grep -q -i 'gnupg\|GPG' "$SIM/engine.log"; then fail "the container was given something about GPG"; fi
+    # what a release verify makes of the exported repository
+    run "$SIM/bf.log" in_dir "$w" sh packaging/release-verify.sh builds --tag v1.5.1 --commit "$(git -C "$w" rev-parse HEAD)" --flatpak "$SIM/bfout" --out "$SIM/bfverified"
+    assert_rc "verify of the exported repository" 0
+    # the default (local) build still leaves the bundle where .claude/flatpak-bg.sh expects it
+    run "$SIM/bf.log" bf sh packaging/build-flatpak.sh
+    assert_rc "local build" 0
+    assert_file "local bundle" "$SIM/bfout/PaletoModkit-x86_64.flatpak"
+    # an empty SDK pin refuses a release build
+    sed 's/^SDK_COMMIT=.*/SDK_COMMIT=/' "$w/packaging/release.conf" > "$SIM/nosdk.conf"
+    run "$SIM/bf.log" bf RELEASE_CONF="$SIM/nosdk.conf" EXPORT_REPO=1 sh packaging/build-flatpak.sh
+    assert_rc "release build with an empty pin" 2
+}
+
+sc_sim_guard() {
+    # the scripts refuse a real remote while RELEASE_SIM is set
+    commit_release 1.6.0
+    tag_release v1.6.0
+    job_validate 1 v1.6.0 release
+    assert_rc "baseline validate" 0
+    d=$LIVE/runs/1
+    run "$SIM/g.log" in_dir "$d/src" env REMOTE=https://github.com/the-beper/PaletoModkit.git GITHUB_OUTPUT=/dev/null sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push
+    assert_rc "github remote" 1
+    run "$SIM/g.log" in_dir "$d/src" env GH_REPO=the-beper/PaletoModkit GITHUB_OUTPUT=/dev/null sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push
+    assert_rc "real repository name" 1
+    run "$SIM/g.log" in_dir "$d/src" env PATH=/usr/bin:/bin GITHUB_OUTPUT=/dev/null sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push
+    assert_rc "no gh stub" 1
+    printf '#!/bin/sh\nexit 0\n' > "$SIM/gh"
+    chmod +x "$SIM/gh"
+    run "$SIM/g.log" in_dir "$d/src" env GH_REPO=sim/x sh -c "PATH=$SIM:\$PATH; export PATH; sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push"
+    assert_rc "a gh that is not the stub" 1
+    # and the stub itself refuses a real repository
+    run "$SIM/g.log" env GH_REPO=the-beper/PaletoModkit gh api repos/the-beper/PaletoModkit/releases
+    assert_rc "stub with the real repository" 1
+}
+
+sc_gpg_missing() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    snapshot > "$SIM/snap.before"
+    : > "$SIM/empty.sec"
+    SECRET_FILE=$SIM/empty.sec
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_rc "sign (empty secret)" 4
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+}
+sc_gpg_wrong_key() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    SECRET_FILE=$KEYS/A.sec
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_rc "sign (other key)" 4
+    assert_log "$LIVE/runs/1/sign.log" "not $FPR_K"
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+    assert_eq "the real key is not in the log" 0 "$(grep -c 'BEGIN PGP' "$LIVE/runs/1/sign.log" || true)"
+}
+sc_gpg_corrupt() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    head -c 200 "$KEYS/K.sec" > "$SIM/corrupt.sec"
+    SECRET_FILE=$SIM/corrupt.sec
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_rc "sign (corrupted secret)" 4
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+    assert_eq "work folders left" 0 "$(find "$SIM/rt" -maxdepth 2 -name 'flatpak-sign.*' 2> /dev/null | wc -l)"
+}
+
+sc_tampered_signed() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    t=$SIM/tamper
+    rm -rf "$t"
+    mkdir -p "$t"
+    tar -C "$t" -xf "$d/signed/flatpak-signed-repo.tar"
+    # an object of the app commit: the file with the build id
+    sum=$(ostree --repo="$t/repo" ls -C "$APP_REF" /files/share/build-id | awk '{ print $5 }')
+    f=$t/repo/objects/$(printf '%s' "$sum" | cut -c1-2)/$(printf '%s' "$sum" | cut -c3-).filez
+    [ -n "$f" ] || { fail "no file object to tamper with"; return 0; }
+    [ -f "$f" ] || { fail "the object $f does not exist"; return 0; }
+    chmod u+w "$f"
+    printf Z | dd of="$f" bs=1 seek=$(($(stat -c %s "$f") - 3)) conv=notrunc 2> /dev/null
+    # a client without the static deltas reads the objects: make it so (the deltas carry the content otherwise)
+    rm -rf "$t/repo/deltas" "$t/repo/delta-indexes"
+    tar -C "$t" -cf "$d/signed/flatpak-signed-repo.tar" repo
+    snapshot > "$SIM/snap.before"
+    job_publish 1 release
+    assert_rc "publish with a changed signed tar" 2
+    assert_log "$d/publish.log" "recorded hash"
+    # an attacker who also fixes the recorded hash is stopped by the pull
+    sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$d/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$d/signed/flatpak-signed.txt"
+    job_publish 1 release
+    assert_rc "publish with the hash fixed" 2
+    assert_log "$d/publish.log" "does not verify"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+}
+
+sc_interrupted_upload() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    before=$(git -C "$LIVE/origin.git" rev-parse gh-pages)
+    echo upload:2 > "$GH_STUB_DIR/fail"
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" publish "$PIPE_FAIL"
+    [ "$RC" != 0 ] || fail "the interrupted upload did not fail"
+    assert_eq "still a draft" true "$(stub_field v1.6.0 draft)"
+    assert_eq "gh-pages untouched" "$before" "$(git -C "$LIVE/origin.git" rev-parse gh-pages)"
+    job_publish 1 release
+    assert_rc "rerun of publish" 0
+    assert_eq "assets" 5 "$(stub_assets v1.6.0)"
+    assert_eq "draft" false "$(stub_field v1.6.0 draft)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+    assert_eq "one release" 1 "$(grep -lx v1.6.0 "$GH_STUB_DIR"/rel/*/tag | wc -l)"
+}
+sc_interrupted_edit() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    echo edit > "$GH_STUB_DIR/fail"
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" publish "$PIPE_FAIL"
+    [ "$RC" != 0 ] || fail "the failed edit did not fail"
+    assert_eq "gh-pages already at the tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "still a draft" true "$(stub_field v1.6.0 draft)"
+    job_publish 1 release
+    assert_rc "rerun of publish" 0
+    assert_eq "draft" false "$(stub_field v1.6.0 draft)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+}
+sc_interrupted_push() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    touch "$LIVE/reject-once"
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" publish "$PIPE_FAIL"
+    assert_rc "publish (push rejected)" 5
+    assert_eq "gh-pages still at the old tag" v1.5.1 "$(kv "$LIVE/site/release.txt" tag)"
+    job_publish 1 release
+    assert_rc "rerun of publish" 0
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+    assert_eq "draft" false "$(stub_field v1.6.0 draft)"
+}
+sc_pages_wait() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    touch "$LIVE/nodeploy"
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" publish "$PIPE_FAIL"
+    assert_rc "publish (Pages never deploys)" 5
+    assert_eq "still a draft" true "$(stub_field v1.6.0 draft)"
+    rm "$LIVE/nodeploy"
+    git -C "$LIVE/origin.git" update-ref refs/heads/gh-pages "$(git -C "$LIVE/origin.git" rev-parse gh-pages)"
+    rm -rf "$LIVE/site"
+    mkdir -p "$LIVE/site"
+    git -C "$LIVE/origin.git" archive refs/heads/gh-pages | tar -x -C "$LIVE/site"
+    job_publish 1 release
+    assert_rc "rerun of publish" 0
+    assert_eq "draft" false "$(stub_field v1.6.0 draft)"
+}
+
+sc_rerun_same_tag() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_rc "first run" 0
+    snapshot > "$SIM/snap.before"
+    pipeline 2 v1.6.0 release
+    assert_rc "second run" 0
+    assert_eq "plan" noop "$PIPE_PLAN"
+    [ ! -d "$LIVE/runs/2/build" ] || fail "the second run built something"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "refs or assets changed"
+    # manual run of the same tag
+    pipeline 3 v1.6.0 release workflow_dispatch
+    assert_eq "plan (dispatch)" noop "$PIPE_PLAN"
+}
+
+sc_same_tag_new_content() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "run 1 failed job" "" "$PIPE_FAIL"
+    pipeline 2 v1.6.0 release
+    assert_rc "run 2" 0
+    snapshot > "$SIM/snap.before"
+    job_publish 1 release
+    assert_rc "publish of the first run, after the second published" 3
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+    # and a tag that points to a new commit with the same version
+    git -C "$LIVE/work" commit -q --allow-empty -m "same version, other commit"
+    git -C "$LIVE/work" push -q origin HEAD:main
+    tag_release v1.6.0
+    job_validate 3 v1.6.0 release
+    assert_rc "validate of the moved tag" 3
+}
+
+sc_downgrade() {
+    commit_release 1.5.2
+    tag_release v1.5.2
+    pipeline 1 v1.5.2 release push sign
+    assert_eq "v1.5.2 before 1.6.0" "" "$PIPE_FAIL"
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 2 v1.6.0 release
+    assert_rc "1.6.0" 0
+    job_validate 3 v1.5.2 release
+    assert_rc "validate v1.5.2 after 1.6.0" 3
+    snapshot > "$SIM/snap.before"
+    job_publish 1 release
+    assert_rc "publish v1.5.2 after 1.6.0" 3
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+    job_validate 4 v1.5.1 release workflow_dispatch
+    assert_rc "dispatch of v1.5.1" 3
+}
+
+sc_concurrent() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    commit_release 1.6.1
+    tag_release v1.6.1
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "run 1" "" "$PIPE_FAIL"
+    pipeline 2 v1.6.1 release push sign
+    assert_eq "run 2" "" "$PIPE_FAIL"
+    job_publish 1 release
+    assert_rc "publish 1.6.0" 0
+    snapshot > "$SIM/snap.before"
+    job_publish 2 release
+    assert_rc "publish 1.6.1 on the old base" 5
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+    pipeline 3 v1.6.1 release
+    assert_rc "rerun of 1.6.1" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "pages tag" v1.6.1 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "app parent is 1.6.0" "$(record gh-pages-previous | sed -n 's/^ostree_app_commit=//p')" "$(ostree --repo="$LIVE/site/repo" rev-parse "$APP_REF^")"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+    pipeline 4 v1.6.0 release
+    assert_rc "rerun of 1.6.0 after 1.6.1" 3
+}
+
+sc_gh_pages_missing() {
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_eq "failed job" validate "$PIPE_FAIL"
+    assert_rc "validate without gh-pages" 5
+    BOOTSTRAP=true
+    pipeline 2 v1.6.0 release
+    BOOTSTRAP=false
+    assert_rc "bootstrap run" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+    # bootstrap with a gh-pages that exists is refused
+    commit_release 1.6.1
+    tag_release v1.6.1
+    BOOTSTRAP=true
+    pipeline 3 v1.6.1 release
+    BOOTSTRAP=false
+    assert_rc "bootstrap on an existing gh-pages" 5
+}
+
+sc_another_writer() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "run 1" "" "$PIPE_FAIL"
+    g=$SIM/other
+    rm -rf "$g"
+    git clone -q --branch gh-pages "$REMOTE" "$g"
+    echo hello > "$g/other.txt"
+    git -C "$g" add other.txt
+    git -C "$g" commit -q -m "someone else"
+    git -C "$g" push -q origin gh-pages
+    snapshot > "$SIM/snap.before"
+    job_publish 1 release
+    assert_rc "publish after another writer" 5
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "something was written"
+}
+
+sc_tag_moved() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "run 1" "" "$PIPE_FAIL"
+    git -C "$LIVE/work" commit -q --allow-empty -m "another commit"
+    git -C "$LIVE/work" push -q origin HEAD:main
+    tag_release v1.6.0
+    snapshot > "$SIM/snap.before"
+    job_publish 1 release
+    assert_rc "publish after the tag moved" 5
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "something was written"
+}
+
+sc_legacy_record() {
+    g=$SIM/legacy
+    rm -rf "$g"
+    git clone -q --branch gh-pages "$REMOTE" "$g"
+    git -C "$g" rm -q release.txt
+    git -C "$g" commit -q --amend -m "Flatpak repository for v1.5.1"
+    git -C "$g" push -q -f origin gh-pages
+    git -C "$LIVE/origin.git" show gh-pages:release.txt > /dev/null 2>&1 && fail "the legacy gh-pages still has release.txt"
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_rc "pipeline over a legacy gh-pages" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
+    # the legacy state is also where the same tag is refused: v1.5.1 has no known source commit
+    git -C "$g" fetch -q origin
+    job_validate 2 v1.5.1 release workflow_dispatch
+    assert_rc "dispatch of v1.5.1" 3
+}
+
+sc_publish_flatpak() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_rc "release" 0
+    # not the highest: refused
+    job_validate 2 v1.5.1 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak of v1.5.1" 3
+    # the highest, Pages already there: nothing to do
+    job_validate 3 v1.6.0 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak of v1.6.0 (up to date)" 0
+    assert_eq "plan" noop "$(kv "$LIVE/runs/3/validate.out" plan)"
+    # recovery: Pages back at 1.5.1, then publish-flatpak puts 1.6.0 on it again, the release untouched
+    git -C "$LIVE/origin.git" update-ref refs/heads/gh-pages "$(git -C "$LIVE/origin.git" rev-parse gh-pages-previous)"
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    rm -rf "$LIVE/site"
+    mkdir -p "$LIVE/site"
+    git -C "$LIVE/origin.git" archive refs/heads/gh-pages | tar -x -C "$LIVE/site"
+    sums=$(sha256sum "$GH_STUB_DIR/rel/$(stub_rel v1.6.0)/assets/SHA256SUMS" | cut -d' ' -f1)
+    snapshot_stub=$(cd "$GH_STUB_DIR" && find . -type f -not -name log | LC_ALL=C sort | xargs sha256sum)
+    pipeline 4 v1.6.0 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak run" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "recorded sums are the release's" "$sums" "$(kv "$LIVE/site/release.txt" sums_sha256)"
+    assert_eq "the release was not touched" "$snapshot_stub" "$(cd "$GH_STUB_DIR" && find . -type f -not -name log | LC_ALL=C sort | xargs sha256sum)"
+}
+
+sc_sign_fresh_and_verify() {
+    # the signing script on its own: a fresh repository, then the bundle
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    d=$LIVE/runs/1
+    for f in flatpak-signed-repo.tar PaletoModkit-x86_64.flatpak flatpak-pubkey.gpg flatpak-signed.txt; do assert_file "signed output" "$d/signed/$f"; done
+    assert_eq "key fingerprint" "$FPR_K" "$(kv "$d/signed/flatpak-signed.txt" key_fpr)"
+    # the same tag and commit again, signed on the published state: skip, nothing signed
+    pipeline 2 v1.6.0 release
+    assert_rc "publish" 0
+    job_validate 3 v1.6.0 release
+    assert_eq "plan" noop "$(kv "$LIVE/runs/3/validate.out" plan)"
+    # a skipped signing: run 4 was validated before the release, signs after it
+    d=$LIVE/runs/1
+    rm -rf "$d/signed"
+    job_sign 1
+    assert_rc "sign again on the published state" 0
+    assert_eq "skip" 1 "$(kv "$d/signed/flatpak-signed.txt" skip)"
+    [ ! -e "$d/signed/flatpak-signed-repo.tar" ] || fail "something was signed on skip"
+}
+
+# ---- the world, once ----------------------------------------------------------------------------------------------
+
+make_template() {
+    FPR_K=$(fx_key "$KEYS" K)
+    fx_key "$KEYS" A > /dev/null
+    # keep the test keys out of the real keyring: nothing is imported anywhere but the sign script's own folder
+    printf 'fake appimagetool\n' > "$SIM/tools/appimagetool"
+    printf 'fake runtime\n' > "$SIM/tools/runtime"
+    # a CodeWalker stand-in
+    git init -q "$SIM/cw-work"
+    echo "codewalker" > "$SIM/cw-work/README"
+    git -C "$SIM/cw-work" add README
+    git -C "$SIM/cw-work" commit -q -m "CodeWalker"
+    git clone -q --bare "$SIM/cw-work" "$CW"
+    rm -rf "$LIVE"
+    mkdir -p "$LIVE/stub"
+    git init -q --bare "$LIVE/origin.git"
+    git -C "$LIVE/origin.git" config uploadpack.allowFilter true
+    git -C "$LIVE/origin.git" config uploadpack.allowAnySHA1InWant true
+    install_hooks
+    w=$LIVE/work
+    mkdir -p "$w"
+    fx_project "$w" 1.5.1 "file://$CW" "$PKG"
+    write_conf "$w/packaging/release.conf"
+    git -C "$w" init -q
+    git -C "$w" submodule add -q "file://$CW" third_party/codewalker
+    git -C "$w" add -A
+    git -C "$w" commit -q -m "Release 1.5.1"
+    git -C "$w" remote add origin "$REMOTE"
+    git -C "$w" push -q origin main
+    git -C "$w" tag -a v1.5.1 -m v1.5.1
+    git -C "$w" push -q origin v1.5.1
+    git -C "$w" fetch -q origin
+    BOOTSTRAP=true
+    pipeline 0 v1.5.1 release
+    if [ "$RC" != 0 ] || [ -n "$PIPE_FAIL" ]; then
+        echo "the baseline release failed in $PIPE_FAIL (exit $RC):" >&2
+        tail -n 20 "$RUNLOG" >&2
+        KEEP=1
+        exit 1
+    fi
+    BOOTSTRAP=false
+    rm -rf "$LIVE/runs"
+    cp -a "$LIVE" "$TPL"
+}
+
+restore() {
+    rm -rf "$LIVE" "$SIM/rt"
+    mkdir -p "$SIM/rt"
+    cp -a "$TPL" "$LIVE"
+}
+
+SCENARIOS="valid_stable invalid_tag mismatch_cargo mismatch_lock mismatch_metainfo mismatch_date mismatch_submodule mismatch_extra_submodule mismatch_rc_type mismatch_stable_dev
+empty_pin identity_change prerelease main_moved tag_not_on_main build_failure converter_failure missing_zsync zsync_length flipped_appimage tool_pin build_flatpak_script sim_guard
+gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
+gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify"
+if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
+
+FAILFILE=$SIM/fails
+make_template
+LIST=${*:-$SCENARIOS}
+FAILED=0
+PASSED=0
+for s in $LIST; do
+    s=$(printf '%s' "$s" | tr '-' '_')
+    restore
+    : > "$FAILFILE"
+    rc=0
+    ( set -eu; "sc_$s" ) > "$SIM/scenario.log" 2>&1 || rc=$?
+    if [ "$rc" != 0 ] || [ -s "$FAILFILE" ]; then
+        echo "FAIL $s: $( [ "$rc" = 0 ] || echo "aborted with $rc;") $(tr '\n' ';' < "$FAILFILE")"
+        if [ "${VERBOSE:-}" = 1 ]; then
+            tail -n 15 "$SIM/scenario.log" | sed 's/^/    | /'
+            for l in "$LIVE"/runs/*/*.log; do [ -s "$l" ] && { echo "    == $l"; tail -n 6 "$l" | sed 's/^/    | /'; }; done
+        fi
+        FAILED=$((FAILED + 1))
+    else
+        echo "PASS $s"
+        PASSED=$((PASSED + 1))
+    fi
+done
+echo "$PASSED passed, $FAILED failed"
+[ "$FAILED" = 0 ]

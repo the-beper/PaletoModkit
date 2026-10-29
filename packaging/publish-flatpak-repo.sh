@@ -1,20 +1,21 @@
 #!/bin/sh
-# Writes the files users add the Flatpak repository with, next to the signed OSTree repository built by
-# build-flatpak.sh (GPG_KEY_ID set), for hosting on GitHub Pages.
-# Usage: GPG_KEY_ID=<key> packaging/publish-flatpak-repo.sh <site-dir> <base-url>
+# Writes the files users add the Flatpak repository with, next to the signed OSTree repository made by
+# packaging/flatpak-sign.sh, for hosting on GitHub Pages.
+# Usage: packaging/publish-flatpak-repo.sh <site-dir> <base-url> <pubkey-file>
 #   <site-dir>/repo      the OSTree repository
 #   <base-url>           where <site-dir> is served, e.g. https://the-beper.github.io/PaletoModkit
-# Needs gpg and the signing key in the keyring ($GNUPGHOME).
+#   <pubkey-file>        the public key (binary) the repository is signed with, that goes in the files; it takes
+#                        no keyring and no secret
 set -eu
 site=$(readlink -f "$1")
 url=${2%/}
+pubkey=${3:?usage: publish-flatpak-repo.sh <site-dir> <base-url> <pubkey-file>}
 id=io.github.the_beper.PaletoModkit
-: "${GPG_KEY_ID:?set GPG_KEY_ID to the signing key}"
 
 # OSTree needs these directories and they are empty, so git does not keep them.
 mkdir -p "$site/repo/refs/heads" "$site/repo/refs/mirrors" "$site/repo/refs/remotes"
-key=$(gpg --export "$GPG_KEY_ID" | base64 -w0)
-[ -n "$key" ] || { echo "no public key for $GPG_KEY_ID in the keyring" >&2; exit 1; }
+[ -s "$pubkey" ] || { echo "no public key in $pubkey" >&2; exit 1; }
+key=$(base64 -w0 "$pubkey")
 
 cat > "$site/paleto-modkit.flatpakrepo" <<REPO
 [Flatpak Repo]
