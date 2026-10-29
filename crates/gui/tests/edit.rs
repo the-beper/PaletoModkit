@@ -385,3 +385,90 @@ fn previewing_the_edited_file_again_keeps_the_edits() {
     assert_eq!(harness.state().preview_text(), Some("<edited/>"));
     assert!(unsaved(&mut harness));
 }
+
+#[test]
+fn deleting_in_a_game_folder_is_refused_while_the_game_is_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+    std::fs::write(root.join("scripts/a.asi"), b"a").unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("b.txt"), b"b").unwrap();
+    let mut harness = Harness::builder().build_eframe(|cc| App::new(cc));
+    settle(&mut harness);
+    let ctx = harness.ctx.clone();
+    let game = paleto_core::Game::open(&root).unwrap();
+    let roots = game.roots().unwrap();
+    let held = paleto_core::txn::guard(&roots, "a test holds the lock").unwrap();
+    harness.state_mut().go(paleto_modkit::Location::Folder(root.join("scripts")));
+    settle(&mut harness);
+    harness.state_mut().delete_now(&["a.asi"], &ctx);
+    settle(&mut harness);
+    assert!(root.join("scripts/a.asi").exists());
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("in progress")), "{:?}", harness.state().status_error());
+    // A folder outside every game is not held up by it.
+    harness.state_mut().go(paleto_modkit::Location::Folder(elsewhere.clone()));
+    settle(&mut harness);
+    harness.state_mut().delete_now(&["b.txt"], &ctx);
+    settle(&mut harness);
+    assert!(!elsewhere.join("b.txt").exists());
+    drop(held);
+    harness.state_mut().go(paleto_modkit::Location::Folder(root.join("scripts")));
+    settle(&mut harness);
+    harness.state_mut().delete_now(&["a.asi"], &ctx);
+    settle(&mut harness);
+    assert!(!root.join("scripts/a.asi").exists());
+}
+
+#[test]
+fn renaming_and_creating_a_folder_in_a_game_folder_are_refused_while_the_game_is_busy() {
+    use egui_kittest::kittest::Queryable;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("game");
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+    std::fs::write(root.join("scripts/a.asi"), b"a").unwrap();
+    let mut harness = Harness::builder().with_size([1100.0, 700.0]).build_eframe(|cc| App::new(cc));
+    settle(&mut harness);
+    let game = paleto_core::Game::open(&root).unwrap();
+    let roots = game.roots().unwrap();
+    let held = paleto_core::txn::guard(&roots, "a test holds the lock").unwrap();
+    harness.state_mut().go(paleto_modkit::Location::Folder(root.join("scripts")));
+    settle(&mut harness);
+    let rename = |harness: &mut Harness<'_, App>, to: &str| {
+        harness.get_by_label("a.asi").click();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::F2);
+        harness.run_steps(2);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.run_steps(1);
+        harness.event(egui::Event::Text(to.into()));
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        settle(harness);
+    };
+    let new_folder = |harness: &mut Harness<'_, App>, name: &str| {
+        harness.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
+        harness.run_steps(2);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        harness.run_steps(1);
+        harness.event(egui::Event::Text(name.into()));
+        harness.run_steps(1);
+        harness.key_press(egui::Key::Enter);
+        settle(harness);
+    };
+    rename(&mut harness, "b.asi");
+    assert!(root.join("scripts/a.asi").exists() && !root.join("scripts/b.asi").exists());
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("in progress")), "{:?}", harness.state().status_error());
+    new_folder(&mut harness, "extra");
+    assert!(!root.join("scripts/extra").exists());
+    assert!(harness.state().status_error().is_some_and(|e| e.contains("in progress")), "{:?}", harness.state().status_error());
+    drop(held);
+    rename(&mut harness, "b.asi");
+    assert!(!root.join("scripts/a.asi").exists() && root.join("scripts/b.asi").exists());
+    new_folder(&mut harness, "extra");
+    assert!(root.join("scripts/extra").is_dir());
+}

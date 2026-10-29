@@ -601,3 +601,108 @@ fn a_clean_rollback_puts_everything_back_and_says_nothing_was_installed() {
     assert!(err.to_string().contains("nothing was installed"), "{err}");
     assert_unchanged(&before, &snapshot(&game.root));
 }
+
+// ---- follow-ups of the security review ----
+
+#[test]
+fn restoring_with_a_linked_mods_folder_is_refused_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let real = dir.path().join("other_drive/mods_real");
+    std::fs::create_dir_all(real.join("x64")).unwrap();
+    std::fs::write(real.join("x64/m.rpf"), b"mod").unwrap();
+    symlink(&real, game.root.join("mods")).unwrap();
+    let snap = crate::snapshots::create(&game, "s").unwrap();
+    std::fs::write(real.join("x64/m.rpf"), b"changed").unwrap();
+    let (before, before_real) = (snapshot(&game.root), snapshot(&real));
+    let err = crate::snapshots::restore(&game, &snap.id).unwrap_err().to_string();
+    assert!(err.contains("link") && err.contains("mods_real"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
+    assert_unchanged(&before_real, &snapshot(&real));
+    assert!(std::fs::symlink_metadata(game.root.join("mods")).unwrap().is_symlink());
+    assert!(crate::txn::pending(&game).is_empty() && crate::txn::leftovers(&game).is_empty());
+}
+
+#[test]
+fn a_flush_that_fails_after_the_swap_keeps_the_old_folder_and_is_not_reported_as_done() {
+    use crate::fsroot::faults::{self, Mode, Point};
+    let old_folder = |game: &Game| std::fs::read_dir(&game.root).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().ends_with("-mods.old"));
+    let (mut unconfirmed, mut fired_any) = (false, false);
+    for k in 1..=12 {
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_folder(dir.path(), Edition::Enhanced);
+        std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
+        std::fs::write(game.root.join("mods/x64/m.rpf"), b"snapshotted").unwrap();
+        let snap = crate::snapshots::create(&game, "s").unwrap();
+        std::fs::write(game.root.join("mods/x64/m.rpf"), b"current").unwrap();
+        faults::arm_at(Point::Sync, k, Mode::Fail(std::io::ErrorKind::Other));
+        let result = crate::snapshots::restore(&game, &snap.id);
+        let fired = faults::disarm();
+        let now = std::fs::read(game.root.join("mods/x64/m.rpf")).unwrap();
+        fired_any |= fired;
+        match result {
+            Ok(()) => assert_eq!(now, b"snapshotted", "k={k}"),
+            Err(e) if e.to_string().contains("not yet confirmed") => {
+                // The swap is in place but was not confirmed on disk: the old folder and the journal stay.
+                unconfirmed = true;
+                assert_eq!(now, b"snapshotted", "k={k}");
+                assert!(old_folder(&game).is_some(), "k={k}: the old mods folder must be kept ({e})");
+                assert!(crate::txn::pending(&game).iter().any(|p| p.state == crate::txn::PendingState::Committed), "k={k}");
+                // A recovery whose own flush fails removes nothing either, and says so.
+                faults::arm_at(Point::Sync, 1, Mode::Fail(std::io::ErrorKind::Other));
+                let again = crate::txn::recover(&game).unwrap();
+                faults::disarm();
+                assert!(again.failures.iter().any(|f| f.contains("flushed")) && old_folder(&game).is_some(), "k={k}: {again:?}");
+            }
+            Err(e) => assert_eq!(now, b"current", "k={k}: an error, so the mods folder is as it was ({e})"),
+        }
+        crate::txn::recover(&game).unwrap();
+        assert!(crate::txn::pending(&game).is_empty() && crate::txn::leftovers(&game).is_empty() && old_folder(&game).is_none(), "k={k}: {:?}", crate::txn::leftovers(&game));
+        assert_eq!(std::fs::read(game.root.join("mods/x64/m.rpf")).unwrap(), now, "k={k}: the recovery does not change which folder is in place");
+        if !fired {
+            break;
+        }
+    }
+    assert!(fired_any && unconfirmed, "a flush that fails after the swap must be reported as not confirmed, not as a finished restore");
+}
+
+#[test]
+fn an_archive_on_the_drive_a_mods_link_leads_to_is_edited_under_the_game_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let real = dir.path().join("other_drive/mods_real");
+    rpf(&real.join("x64/a.rpf"), "a.rpf", &[("a.txt", b"a")]);
+    symlink(&real, game.root.join("mods")).unwrap();
+    let archive = crate::ArchivePath::new(real.join("x64/a.rpf"));
+    let roots = game.roots().unwrap();
+    let held = crate::txn::guard(&roots, "a test holds the lock").unwrap();
+    let busy = archive.edit(None, |_, _| Ok(()));
+    assert!(matches!(busy, Err(Error::Busy(_))), "{busy:?}");
+    drop(held);
+    archive.edit(None, |_, _| Ok(())).unwrap();
+}
+
+#[test]
+fn a_path_reached_through_a_link_into_a_game_never_opened_takes_that_games_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("games/gta");
+    std::fs::create_dir_all(root.join("scripts/deep")).unwrap();
+    std::fs::write(root.join(Edition::Enhanced.exe_name()), b"").unwrap();
+    // Built by hand, never passed to `Game::open`, so this program has not remembered the game.
+    let game = Game { root: root.clone(), edition: Edition::Enhanced };
+    let link = dir.path().join("elsewhere/shortcut");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    symlink(root.join("scripts/deep"), &link).unwrap();
+    let roots = game.roots().unwrap();
+    let held = crate::txn::guard(&roots, "a test holds the lock").unwrap();
+    let busy = crate::vfs::locked_in_game(&link, "renaming a file", || Ok(()));
+    assert!(matches!(busy, Err(Error::Busy(_))), "{busy:?}");
+    drop(held);
+    crate::vfs::locked_in_game(&link, "renaming a file", || Ok(())).unwrap();
+    // A folder that leads into no game is not held up.
+    let free = dir.path().join("elsewhere/free");
+    std::fs::create_dir_all(&free).unwrap();
+    let held = crate::txn::guard(&roots, "a test holds the lock").unwrap();
+    crate::vfs::locked_in_game(&free, "renaming a file", || Ok(())).unwrap();
+    drop(held);
+}

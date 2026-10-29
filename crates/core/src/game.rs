@@ -35,15 +35,32 @@ pub struct Game {
     pub edition: Edition,
 }
 
+static KNOWN: std::sync::Mutex<Vec<Game>> = std::sync::Mutex::new(Vec::new());
+
+fn remember(game: &Game) {
+    let mut known = KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !known.iter().any(|g| g.root == game.root) {
+        known.push(game.clone());
+    }
+}
+
 impl Game {
     /// Recognises a game folder from its executable.
     pub fn open(root: &Path) -> Result<Self, Error> {
         for edition in [Edition::Enhanced, Edition::Legacy] {
             if root.join(edition.exe_name()).is_file() {
-                return Ok(Game { root: root.to_path_buf(), edition });
+                let game = Game { root: root.to_path_buf(), edition };
+                remember(&game);
+                return Ok(game);
             }
         }
         Err(Error::NotAGameFolder(root.to_path_buf()))
+    }
+
+    /// The game folders this program has opened so far: a path on the drive a link of one
+    /// of them (`mods`, say) leads to belongs to that game too, though it is not below it.
+    pub fn known() -> Vec<Game> {
+        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     pub fn mods_dir(&self) -> PathBuf {
@@ -76,10 +93,11 @@ impl Game {
         self.roots()?.mods_copy(&RelPath::parse(rel)?)
     }
 
-    /// Replaces the mods copy of a game data file (see [`Game::mods_copy`]) with `data`: one
-    /// journaled file replacement under the game lock, so the file is the old one or the new one,
-    /// and [`Error::Busy`] while another change to this game runs.
-    pub fn replace_mods_file(&self, rel: &str, data: &[u8]) -> Result<(), Error> {
+    /// Replaces a file of the game folder or its mods folder (a mods copy made by [`Game::mods_copy`], or
+    /// a loose file) with `data`: one journaled replacement under the game lock, so the file is the old
+    /// one or the new one, and [`Error::Busy`] while another change to this game runs. Programs, the
+    /// game's own `.dll` and `.txt` files and its data are refused; a link at the name is replaced, never written through.
+    pub fn replace_game_file(&self, rel: &str, data: &[u8]) -> Result<(), Error> {
         use std::io::Write;
         crate::txn::replace_one(&self.roots()?, &RelPath::parse(rel)?, "saving a file in the mods folder", |f| f.write_all(data))
     }

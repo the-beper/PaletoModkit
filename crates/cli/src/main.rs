@@ -1185,29 +1185,31 @@ fn editable(path: &str, game: Option<&Path>) -> Result<ArchivePath> {
 struct Loose {
     /// The file to read and show.
     file: PathBuf,
-    /// For a mods copy: the game and the game-relative path it is a copy of. It is
-    /// saved by a journaled replacement under the game lock, not written in place.
+    /// For a file in a game folder: the game and the game-relative path. It is saved by a
+    /// confined, journaled replacement under the game lock, not written in place.
     copy_of: Option<(Game, String)>,
 }
 
 impl Loose {
     fn write(&self, data: &[u8]) -> Result<()> {
         match &self.copy_of {
-            Some((game, rel)) => Ok(game.replace_mods_file(rel, data)?),
+            Some((game, rel)) => Ok(game.replace_game_file(rel, data)?),
             None => Ok(std::fs::write(&self.file, data)?),
         }
     }
 }
 
 fn editable_file(path: &str, game: Option<&Path>) -> Result<Loose> {
-    if let Some((game, rel)) = owner(Path::new(path), game)?
-        && !rel.starts_with("mods")
-        && game.routes_to_mods(&rel.to_string_lossy())
-    {
+    if let Some((game, rel)) = owner(Path::new(path), game)? {
         let rel = rel.to_string_lossy().into_owned();
-        let copy = game.mods_copy(&rel)?.with_context(|| format!("{path} not found"))?;
-        println!("editing mods copy {}", copy.display());
-        return Ok(Loose { file: copy, copy_of: Some((game, rel)) });
+        if !rel.starts_with("mods") && game.routes_to_mods(&rel) {
+            let copy = game.mods_copy(&rel)?.with_context(|| format!("{path} not found"))?;
+            println!("editing mods copy {}", copy.display());
+            return Ok(Loose { file: copy, copy_of: Some((game, rel)) });
+        }
+        // Any other file of a game folder (or its mods folder) is written through the game's own
+        // confined, locked write: never in place, never through a link, and not programs or the game's files.
+        return Ok(Loose { file: PathBuf::from(path), copy_of: Some((game, rel)) });
     }
     Ok(Loose { file: PathBuf::from(path), copy_of: None })
 }
@@ -1323,5 +1325,35 @@ mod tests {
         write_any(&b.join("plugin.ini").display().to_string(), None, b"new".to_vec()).unwrap();
         assert_eq!(std::fs::read(b.join("plugin.ini")).unwrap(), b"new");
         assert!(!a.join("mods").exists());
+    }
+
+    /// A file in a game folder is never written in place or through a link, and the game's own files are refused.
+    #[test]
+    fn game_folder_files_are_written_confined() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join("game");
+        std::fs::create_dir_all(g.join("x64")).unwrap();
+        std::fs::create_dir_all(g.join("mods/x64")).unwrap();
+        for (f, data) in [("GTA5.exe", "exe"), ("bink2w64.dll", "dll"), ("x64/t.ytd", "original")] {
+            std::fs::write(g.join(f), data).unwrap();
+        }
+        // The mods copy is a link to the original.
+        std::os::unix::fs::symlink(g.join("x64/t.ytd"), g.join("mods/x64/t.ytd")).unwrap();
+        write_any(&g.join("mods/x64/t.ytd").display().to_string(), None, b"new".to_vec()).unwrap();
+        assert_eq!(std::fs::read(g.join("x64/t.ytd")).unwrap(), b"original");
+        assert_eq!(std::fs::read(g.join("mods/x64/t.ytd")).unwrap(), b"new");
+        assert!(!std::fs::symlink_metadata(g.join("mods/x64/t.ytd")).unwrap().is_symlink());
+        for f in ["GTA5.exe", "bink2w64.dll"] {
+            assert!(write_any(&g.join(f).display().to_string(), None, b"x".to_vec()).is_err(), "{f}");
+        }
+        assert_eq!(std::fs::read(g.join("GTA5.exe")).unwrap(), b"exe");
+        assert_eq!(std::fs::read(g.join("bink2w64.dll")).unwrap(), b"dll");
+        // While another change to the game runs, the write waits no longer: it is refused.
+        let game = Game::open(&g).unwrap();
+        let roots = game.roots().unwrap();
+        let _held = paleto_core::txn::guard(&roots, "held").unwrap();
+        std::fs::write(g.join("plugin.ini"), b"old").unwrap();
+        assert!(write_any(&g.join("plugin.ini").display().to_string(), None, b"new".to_vec()).is_err());
+        assert_eq!(std::fs::read(g.join("plugin.ini")).unwrap(), b"old");
     }
 }

@@ -94,12 +94,6 @@ impl ArchivePath {
         Ok(ArchivePath { disk, inner: self.inner.clone() })
     }
 
-    /// The game folder this archive is in (the nearest folder above it with a game executable), if any.
-    fn owning_game(&self) -> Option<Game> {
-        let disk = std::path::absolute(&self.disk).ok()?;
-        disk.ancestors().skip(1).find_map(|dir| Game::open(dir).ok())
-    }
-
     /// The copy of this archive in the mods folder, if there is one.
     pub fn in_mods(&self, game: &Game) -> Option<Self> {
         let rel = in_game(&self.disk, game)?;
@@ -120,13 +114,13 @@ impl ArchivePath {
         f: impl FnOnce(&mut ArchiveEditor, &str) -> Result<T, Error>,
     ) -> Result<T, Error> {
         // An archive inside a game folder is changed under that game's lock: one change at a time.
-        let roots = self.owning_game().map(|g| g.roots()).transpose()?;
-        let _lock = roots.as_ref().map(|r| crate::txn::guard(r, "editing an archive")).transpose()?;
-        let mut root = ArchiveEditor::open(&self.disk, keys)?;
-        let (editor, folder) = nested(&mut root, &self.inner, keys)?;
-        let out = f(editor, &folder)?;
-        root.save(&self.disk)?;
-        Ok(out)
+        locked_in_game(&self.disk, "editing an archive", || {
+            let mut root = ArchiveEditor::open(&self.disk, keys)?;
+            let (editor, folder) = nested(&mut root, &self.inner, keys)?;
+            let out = f(editor, &folder)?;
+            root.save(&self.disk)?;
+            Ok(out)
+        })
     }
 }
 
@@ -242,6 +236,23 @@ pub fn local_files(path: &Path) -> Result<Vec<(PathBuf, String)>, Error> {
     }
     out.sort();
     Ok(out)
+}
+
+/// The game `path` (a file or a folder) belongs to: the nearest folder holding it (or itself) with a game
+/// executable, as written or with the links in it resolved (a link deep into a game this program never opened),
+/// else a game this program has opened whose links (`mods` on another drive, say) lead to it.
+pub fn owner_of(path: &Path) -> Option<Game> {
+    let above = |p: &Path| p.ancestors().find_map(|dir| Game::open(dir).ok());
+    let abs = std::path::absolute(path).ok()?;
+    above(&abs).or_else(|| std::fs::canonicalize(path).ok().and_then(|real| above(&real))).or_else(|| Game::known().into_iter().find(|g| in_game(path, g).is_some()))
+}
+
+/// Runs `f` under the lock of the game that `path` belongs to (see [`owner_of`]), if it belongs to one:
+/// one change at a time per game, whatever the way the folder was reached. [`Error::Busy`] if the game is busy.
+pub fn locked_in_game<T>(path: &Path, label: &str, f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    let roots = owner_of(path).map(|g| g.roots()).transpose()?;
+    let _lock = roots.as_ref().map(|r| crate::txn::guard(r, label)).transpose()?;
+    f()
 }
 
 /// Where `path` is inside the game folder, if it is. Links count as part of

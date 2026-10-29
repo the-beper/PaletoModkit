@@ -155,6 +155,14 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
     let _lock = txn::guard(&roots, "restoring a snapshot")?;
     let snapshot = list(game).into_iter().find(|s| s.id == id).ok_or_else(|| Error::Package(format!("no snapshot {id}")))?;
     put_back(&roots)?;
+    // A restore swaps the folder by a rename, which would replace the link with a real folder and leave the
+    // folder it led to (often on another drive) behind: refused, rather than guessed at.
+    if roots.game.dir.kind("mods")? == Some(Kind::Link) {
+        let target = roots.game.dir.read_link("mods").map(|t| t.to_string_lossy().into_owned()).unwrap_or_default();
+        return Err(Error::Package(format!(
+            "the mods folder is a link to {target}: restoring would replace the link with a real folder. Remove the link first (the folder it points to is kept), or copy the snapshot's `mods` folder into {target} by hand"
+        )));
+    }
     let jdir = roots.tool_folder(&["journal"], true)?.expect("made above");
     let rid = format!("{:016x}", random());
     let (incoming, outgoing) = (incoming_name(&rid), outgoing_name(&rid));
@@ -167,6 +175,13 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
     }
     match swap(&roots, &snapshot, &mut journal, &incoming, &outgoing) {
         Ok(()) => {
+            // The two renames must be on disk before the old folder goes: a removal that outran them could, after a crash, leave neither
+            // folder. If they cannot be flushed, nothing is removed and the next change finishes the restore (its recovery flushes again first).
+            if let Err(e) = roots.game.dir.sync() {
+                return Err(Error::Package(format!(
+                    "the snapshot is in place, but not yet confirmed: the game folder could not be flushed to disk ({e}). The old mods folder (`{outgoing}` in the game folder, if there was one) and the restore journal are kept, and the next change to this game finishes the restore"
+                )));
+            }
             // The restore is done. The old folder is only garbage now: if it cannot be removed, the journal stays and the next change does it.
             match remove_old(&roots.game.dir, &outgoing) {
                 Ok(()) => {
@@ -229,7 +244,6 @@ fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &s
         game.rename("mods", outgoing, false)?;
     }
     game.rename(incoming, "mods", false)?;
-    game.sync()?;
     // What the files say decides at recovery; a record that cannot be written changes nothing.
     let _ = note(journal, "swapped\n");
     Ok(())
@@ -357,7 +371,9 @@ fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep:
         }
     };
     let (done, result): (&str, Result<(), String>) = if mods_is_new {
-        ("finished the restore that was interrupted after the swap (the old mods folder removed)", remove(&r.outgoing))
+        // The renames must be on disk before the old folder is removed (a crash after a removal that outran them could lose both): if they cannot be flushed, it stays.
+        let flushed = game.sync().map_err(|e| format!("the restored mods folder is in place, but the game folder could not be flushed to disk ({e}), so the old mods folder is not removed yet"));
+        ("finished the restore that was interrupted after the swap (the old mods folder removed)", flushed.and_then(|()| remove(&r.outgoing)))
     } else if !mods_here && out_here {
         // Between the two renames: the old folder is only under its aside name.
         let put = game.rename(r.outgoing.as_deref().expect("here"), "mods", false).map_err(|e| format!("the old mods folder cannot be put back from {}: {e}", shown(r.outgoing.as_deref().expect("here"))));

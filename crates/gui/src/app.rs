@@ -2000,11 +2000,16 @@ impl App {
                 if let Some(dir) = self.disk_folder() {
                     self.select_after = Some(to.clone());
                     self.task = Some(Task::spawn("Renaming", ctx, move || {
-                        let target = dir.join(&to);
-                        // Names differing only in case are the same item for the game.
-                        let clash = !from.eq_ignore_ascii_case(&to) && std::fs::symlink_metadata(&target).is_ok();
-                        match if clash { Err(std::io::ErrorKind::AlreadyExists.into()) } else { std::fs::rename(dir.join(&from), &target) } {
-                            Ok(()) => Outcome::Done { message: format!("renamed {from} to {to}"), reload: None },
+                        // In a game folder, one change at a time: busy while another runs.
+                        let locked = vfs::locked_in_game(&dir, "renaming a file", || {
+                            let target = dir.join(&to);
+                            // Names differing only in case are the same item for the game.
+                            let clash = !from.eq_ignore_ascii_case(&to) && std::fs::symlink_metadata(&target).is_ok();
+                            Ok(if clash { Err(std::io::ErrorKind::AlreadyExists.into()) } else { std::fs::rename(dir.join(&from), &target) })
+                        });
+                        match locked {
+                            Ok(Ok(())) => Outcome::Done { message: format!("renamed {from} to {to}"), reload: None },
+                            Ok(Err(e)) => Outcome::Failed(format!("renaming {from}: {e}")),
                             Err(e) => Outcome::Failed(format!("renaming {from}: {e}")),
                         }
                     }));
@@ -2021,8 +2026,9 @@ impl App {
             Action::CreateFolder(name) => {
                 if let Some(dir) = self.disk_folder() {
                     self.select_after = Some(name.clone());
-                    self.task = Some(Task::spawn("Creating folder", ctx, move || match std::fs::create_dir(dir.join(&name)) {
-                        Ok(()) => Outcome::Done { message: format!("created folder {name}"), reload: None },
+                    self.task = Some(Task::spawn("Creating folder", ctx, move || match vfs::locked_in_game(&dir, "creating a folder", || Ok(std::fs::create_dir(dir.join(&name)))) {
+                        Ok(Ok(())) => Outcome::Done { message: format!("created folder {name}"), reload: None },
+                        Ok(Err(e)) => Outcome::Failed(format!("creating {name}: {e}")),
                         Err(e) => Outcome::Failed(format!("creating {name}: {e}")),
                     }));
                     return;
@@ -2044,14 +2050,23 @@ impl App {
                 }
                 if let Some(dir) = self.disk_folder() {
                     self.task = Some(Task::spawn("Deleting", ctx, move || {
-                        for name in &names {
-                            let path = dir.join(name);
-                            let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
-                            if let Err(e) = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) } {
-                                return Outcome::Failed(format!("deleting {name}: {e}"));
+                        // In a game folder, one change at a time. A link is removed itself, never followed
+                        // (`symlink_metadata` does not follow, and `remove_dir_all` leaves links inside alone).
+                        let deleted = vfs::locked_in_game(&dir, "deleting files", || {
+                            for name in &names {
+                                let path = dir.join(name);
+                                let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+                                if let Err(e) = if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) } {
+                                    return Ok(Err(format!("deleting {name}: {e}")));
+                                }
                             }
+                            Ok(Ok(()))
+                        });
+                        match deleted {
+                            Ok(Ok(())) => Outcome::Done { message: format!("{} deleted", names.len()), reload: None },
+                            Ok(Err(e)) => Outcome::Failed(e),
+                            Err(e) => Outcome::Failed(format!("deleting: {e}")),
                         }
-                        Outcome::Done { message: format!("{} deleted", names.len()), reload: None }
                     }));
                     return;
                 }
