@@ -184,6 +184,27 @@ pub(crate) fn assert_same(what: &str, want: &BTreeMap<String, Entry>, got: &BTre
     assert!(diffs.is_empty(), "{what}: {diffs:?}");
 }
 
+/// A name of the tool's own (the top folders it keeps, `.mods.*`, a `.paleto-*` temporary): never forgiven as a leftover.
+fn tool_name(rel: &str) -> bool {
+    let top = rel.split('/').next().unwrap_or(rel);
+    [".paleto", "mods_snapshots", "mods_disabled", "mods_legacy"].contains(&top) || top.starts_with(".mods.") || rel.split('/').any(|c| c.starts_with(".paleto-"))
+}
+
+/// `now` without the empty folders that are in neither `want` nor `old` and have no tool-owned name, nested ones
+/// included: what a crash between journaling that a folder is made and journaling that it was leaves, since recovery
+/// cannot prove such a folder is its own and keeps it. Everything else (a file, a link, a folder with something in it) stays.
+pub(crate) fn without_leaked_dirs(mut now: BTreeMap<String, Entry>, want: &BTreeMap<String, Entry>, old: &BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
+    loop {
+        let leaked: Vec<String> = now.iter().filter(|(k, e)| **e == Entry::Dir && !want.contains_key(*k) && !old.contains_key(*k) && !tool_name(k) && !now.keys().any(|o| o.starts_with(&format!("{k}/")))).map(|(k, _)| k.clone()).collect();
+        if leaked.is_empty() {
+            return now;
+        }
+        for k in leaked {
+            now.remove(&k);
+        }
+    }
+}
+
 /// An error that claims nothing false: the plain cause (nothing had been changed), or a failure that says the undo was complete.
 pub(crate) fn honest(e: &Error) -> bool {
     let text = e.to_string();
@@ -231,7 +252,8 @@ pub(crate) fn exhaust<C>(mode: Fault, setup: impl Fn(&Path) -> (Game, C), op: im
             let now = state(&game);
             // The journal may be gone too, if the crash was at the last call of the operation: then everything was in place.
             done = committed || now == new;
-            assert_same(&format!("{what}: committed={committed}"), if done { &new } else { &old }, &now);
+            let want = if done { &new } else { &old };
+            assert_same(&format!("{what}: committed={committed}"), want, &without_leaked_dirs(now, want, &old));
             saw_committed |= done;
             saw_error |= !done;
         } else {

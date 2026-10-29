@@ -1257,3 +1257,46 @@ fn recovery_accepts_the_two_owned_folders_and_refuses_every_other_name_of_the_to
         assert!(matches!(Txn::begin(&game.roots().unwrap(), "x"), Err(Error::RecoveryNeeded(_))), "{what}");
     }
 }
+
+/// Makes a file in two new folders; `plant` also puts a file of somebody else's in the new folder, before the commit.
+fn new_folders(game: &Game, plant: bool) -> Result<Vec<String>, Error> {
+    let roots = game.roots()?;
+    let mut t = Txn::begin(&roots, "folders")?;
+    t.stage(&mut roots.dest(&rel("plugins/deep/x.ini"))?, |f| f.write_all(b"x"))?;
+    if plant {
+        let _ = std::fs::write(game.root.join("plugins/deep/planted.txt"), b"theirs");
+    }
+    t.commit(Vec::new())
+}
+
+#[test]
+fn the_fault_loop_accepts_a_folder_a_crash_left_empty_and_still_reports_a_file_in_it() {
+    // A crash between the record that a folder is made and the one that it was leaves it, empty: recovery cannot prove it made it.
+    let mut leaked = false;
+    for k in 1..40 {
+        let dir = tempfile::tempdir().unwrap();
+        let game = fixture(dir.path(), true);
+        faults::arm_at(Point::Journal, k, Fault::Crash);
+        let _ = new_folders(&game, false);
+        if !faults::disarm() {
+            break;
+        }
+        assert!(recover(&game).unwrap().failures.is_empty());
+        leaked |= game.root.join("plugins").is_dir() && !game.root.join("plugins/deep/x.ini").exists();
+    }
+    assert!(leaked, "no crash point left an empty folder");
+    let n = crate::fixtures::exhaust(Fault::Crash, |dir| (fixture(dir, true), ()), |game, ()| new_folders(game, false), |_, (), _, _| {});
+    assert!(n > 10, "only {n} fault points");
+    // Not a tool-owned name, not a folder with something in it, not one that was there before.
+    let entry = |s: &str| (s.to_string(), Entry::Dir);
+    let old: BTreeMap<String, Entry> = [entry("a")].into();
+    let now: BTreeMap<String, Entry> = [entry("a"), entry("b"), entry("b/c"), entry("d"), ("d/f".into(), Entry::File(b"x".to_vec())), entry("mods_legacy"), entry(".mods.x")].into();
+    let kept: Vec<String> = crate::fixtures::without_leaked_dirs(now, &old, &old).into_keys().collect();
+    assert_eq!(kept, [".mods.x", "a", "d", "d/f", "mods_legacy"]);
+}
+
+#[test]
+#[should_panic(expected = "extra plugins")]
+fn the_fault_loop_reports_a_file_planted_in_a_new_folder() {
+    crate::fixtures::exhaust(Fault::Crash, |dir| (fixture(dir, true), ()), |game, ()| new_folders(game, true), |_, (), _, _| {});
+}
