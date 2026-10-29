@@ -12,13 +12,17 @@
 //! the changed one kept in `mods_disabled/inside/`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use paleto_rpf::{Archive, ArchiveEditor, Keys, StoredFile};
 
 use crate::export::{Kind, locate, read_in};
+use crate::fsroot::{self, Dir, GameRoots, Kind as Entry};
 use crate::game::{Game, resolve_ci};
 use crate::loader::{asi_plugins, setup};
+use crate::relpath::RelPath;
+use crate::txn;
 use crate::Error;
 
 /// Where the files turned off inside an archive are kept.
@@ -121,7 +125,17 @@ pub fn load(game: &Game) -> Option<Hunt> {
     Some(hunt)
 }
 
-fn save(game: &Game, hunt: &Hunt) -> Result<(), Error> {
+/// The folder `mods_disabled` of the game, made if need be, never entered through a link.
+fn disabled_folder(roots: &GameRoots, names: &[&str], create: bool) -> Result<Option<Dir>, Error> {
+    roots.owned_folder("mods_disabled", names, create)
+}
+
+/// Writes a file of `mods_disabled` whole, by a rename of a new file of a unique name over it.
+fn write_kept(dir: &Dir, name: &str, data: &[u8]) -> Result<(), Error> {
+    Ok(fsroot::replace_file(dir, name, |f| f.write_all(data))?)
+}
+
+fn save(roots: &GameRoots, hunt: &Hunt) -> Result<(), Error> {
     let mut text = format!("steps {}\n", hunt.steps);
     if let Some(top) = &hunt.inside {
         text += &format!("inside {top}\n");
@@ -135,9 +149,15 @@ fn save(game: &Game, hunt: &Hunt) -> Result<(), Error> {
     for p in &hunt.disabled {
         text += &format!("disabled {p}\n");
     }
-    std::fs::create_dir_all(disabled_dir(game))?;
-    std::fs::write(disabled_dir(game).join(STATE), text)?;
-    Ok(())
+    let dir = disabled_folder(roots, &[], true)?.expect("made above");
+    write_kept(&dir, STATE, text.as_bytes())
+}
+
+/// Forgets the hunt (the file that says one is going on).
+fn remove_state(roots: &GameRoots) {
+    if let Ok(Some(dir)) = disabled_folder(roots, &[], false) {
+        let _ = dir.unlink(STATE);
+    }
 }
 
 /// The parts that change the game: copies in the mods folder identical to
@@ -161,6 +181,8 @@ fn same_as_original(game: &Game, part: &str) -> bool {
 
 /// Starts a hunt among the parts that change the game: turns off the first half.
 pub fn start(game: &Game) -> Result<Outcome, Error> {
+    let roots = game.roots()?;
+    let _lock = txn::guard(&roots, "starting a crash hunt")?;
     if load(game).is_some() {
         return Err(Error::Package("a hunt is already going on: answer it or stop it".into()));
     }
@@ -168,7 +190,7 @@ pub fn start(game: &Game) -> Result<Outcome, Error> {
     if suspects.is_empty() {
         return Err(Error::Package("there are no plugins, add-on packs or modified archives to turn off".into()));
     }
-    next(game, None, Hunt { suspects, disabled: Vec::new(), steps: 0, inside: None, kinds: HashMap::new() })
+    next(game, &roots, None, Hunt { suspects, disabled: Vec::new(), steps: 0, inside: None, kinds: HashMap::new() })
 }
 
 /// Starts a hunt among the changed files of an archive of the mods folder
@@ -176,12 +198,14 @@ pub fn start(game: &Game) -> Result<Outcome, Error> {
 /// The changes are read with the cache kept in `cache` (see
 /// `export::changed_files_cached_at`).
 pub fn start_inside(game: &Game, keys: Option<&Keys>, part: &str, cache: &Path) -> Result<Outcome, Error> {
+    let roots = game.roots()?;
+    let _lock = txn::guard(&roots, "starting a crash hunt inside an archive")?;
     if load(game).is_some() {
         return Err(Error::Package("a hunt is already going on: answer it or stop it".into()));
     }
     let top = part.strip_prefix("mods/").ok_or_else(|| Error::Package(format!("{part} is not in the mods folder")))?.to_string();
     // The culprit found by the first hunt is turned off: back on, to look inside.
-    enable(game, part)?;
+    enable(&roots, part)?;
     let changes = crate::export::changed_files_cached_at(game, keys, cache, &|| false)?;
     let prefix = format!("{}/", top.to_ascii_lowercase());
     let inner: Vec<&crate::export::Changed> =
@@ -191,11 +215,13 @@ pub fn start_inside(game: &Game, keys: Option<&Keys>, part: &str, cache: &Path) 
     }
     let suspects = inner.iter().map(|c| c.path.clone()).collect();
     let kinds = inner.iter().map(|c| (c.path.clone(), c.kind)).collect();
-    next(game, keys, Hunt { suspects, disabled: Vec::new(), steps: 0, inside: Some(top), kinds })
+    next(game, &roots, keys, Hunt { suspects, disabled: Vec::new(), steps: 0, inside: Some(top), kinds })
 }
 
 /// Takes the answer to the current test: whether the game still crashed.
 pub fn answer(game: &Game, keys: Option<&Keys>, crashed: bool) -> Result<Outcome, Error> {
+    let roots = game.roots()?;
+    let _lock = txn::guard(&roots, "answering a crash hunt")?;
     let mut hunt = load(game).ok_or_else(|| Error::Package("no hunt is going on".into()))?;
     let off = &hunt.disabled;
     // Still crashing: the culprit is among the parts that were on. Not
@@ -203,12 +229,12 @@ pub fn answer(game: &Game, keys: Option<&Keys>, crashed: bool) -> Result<Outcome
     hunt.suspects.retain(|p| off.contains(p) != crashed);
     hunt.steps += 1;
     if hunt.suspects.is_empty() {
-        stop(game, keys)?;
+        stop_in(game, &roots, keys)?;
         return Err(Error::Package(
             "the answers do not fit a single culprit among the parts (several mods together, or something else crashes the game): everything is back on".into(),
         ));
     }
-    next(game, keys, hunt)
+    next(game, &roots, keys, hunt)
 }
 
 fn is_pack(part: &str) -> bool {
@@ -217,22 +243,22 @@ fn is_pack(part: &str) -> bool {
 
 /// Turns everything back on and, with one suspect left, reports it (turned
 /// off); otherwise turns off half of the suspects for the next test.
-fn next(game: &Game, keys: Option<&Keys>, mut hunt: Hunt) -> Result<Outcome, Error> {
+fn next(game: &Game, roots: &GameRoots, keys: Option<&Keys>, mut hunt: Hunt) -> Result<Outcome, Error> {
     let back_on = std::mem::take(&mut hunt.disabled);
     if let Some(top) = &hunt.inside {
-        switch_inside(game, keys, top, &back_on, &hunt.kinds, false)?;
+        switch_inside(game, roots, keys, top, &back_on, &hunt.kinds, false)?;
     } else {
         for p in back_on {
-            enable(game, &p)?;
+            enable(roots, &p)?;
         }
     }
     if let [culprit] = hunt.suspects.as_slice() {
         let culprit = culprit.clone();
         match &hunt.inside {
-            Some(top) => switch_inside(game, keys, top, std::slice::from_ref(&culprit), &hunt.kinds, true)?,
-            None => disable(game, &culprit)?,
+            Some(top) => switch_inside(game, roots, keys, top, std::slice::from_ref(&culprit), &hunt.kinds, true)?,
+            None => disable(roots, &culprit)?,
         }
-        let _ = std::fs::remove_file(disabled_dir(game).join(STATE));
+        remove_state(roots);
         return Ok(Outcome::Found(culprit));
     }
     // update.rpf goes last, so it is never in the half turned off: with it
@@ -241,25 +267,31 @@ fn next(game: &Game, keys: Option<&Keys>, mut hunt: Hunt) -> Result<Outcome, Err
     hunt.suspects.sort_by_key(|p| (p == UPDATE, is_pack(p), p.clone()));
     let half: Vec<Part> = hunt.suspects[..hunt.suspects.len() / 2].to_vec();
     match &hunt.inside {
-        Some(top) => switch_inside(game, keys, top, &half, &hunt.kinds, true)?,
+        Some(top) => switch_inside(game, roots, keys, top, &half, &hunt.kinds, true)?,
         None => {
             for p in &half {
-                disable(game, p)?;
+                disable(roots, p)?;
             }
         }
     }
     hunt.disabled = half;
-    save(game, &hunt)?;
+    save(roots, &hunt)?;
     Ok(Outcome::Test(hunt))
 }
 
 /// Ends the hunt: turns every part it turned off back on (the culprit too).
 pub fn stop(game: &Game, keys: Option<&Keys>) -> Result<(), Error> {
+    let roots = game.roots()?;
+    let _lock = txn::guard(&roots, "stopping a crash hunt")?;
+    stop_in(game, &roots, keys)
+}
+
+fn stop_in(game: &Game, roots: &GameRoots, keys: Option<&Keys>) -> Result<(), Error> {
     let dir = disabled_dir(game);
     if !dir.is_dir() {
         return Ok(());
     }
-    restore_inside(game, keys)?;
+    restore_inside(game, roots, keys)?;
     for (path, _) in crate::vfs::local_files(&dir).unwrap_or_default() {
         let rel = path.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/");
         if rel == STATE || rel.starts_with(&format!("{INSIDE}/")) {
@@ -268,10 +300,10 @@ pub fn stop(game: &Game, keys: Option<&Keys>) -> Result<(), Error> {
         // Packs are folders: put back the folder holding the file.
         let part = if is_pack(&rel) { rel.splitn(6, '/').take(5).collect::<Vec<_>>().join("/") } else { rel };
         if dir.join(&part).exists() {
-            enable(game, &part)?;
+            enable(roots, &part)?;
         }
     }
-    let _ = std::fs::remove_file(dir.join(STATE));
+    remove_state(roots);
     Ok(())
 }
 
@@ -301,22 +333,25 @@ pub fn turned_off(game: &Game) -> Vec<Part> {
 
 /// Turns files inside an archive of the mods folder off (`off`: the game's
 /// own put back, the changed one kept aside) or back on. One save of the archive.
-fn switch_inside(game: &Game, keys: Option<&Keys>, top: &str, items: &[Part], kinds: &HashMap<Part, Kind>, off: bool) -> Result<(), Error> {
+fn switch_inside(game: &Game, roots: &GameRoots, keys: Option<&Keys>, top: &str, items: &[Part], kinds: &HashMap<Part, Kind>, off: bool) -> Result<(), Error> {
     if items.is_empty() {
         return Ok(());
     }
-    let disk = game.mods_dir().join(top);
+    let disk = game.mods_dir().join(RelPath::parse(top)?.parts().join("/"));
     let original = game.original(top);
-    let kept = disabled_dir(game).join(INSIDE);
     let mut editor = ArchiveEditor::open(&disk, keys)?;
+    // What is kept aside that this switch puts back is removed once the archive is saved, not before.
+    let mut done: Vec<(Dir, String)> = Vec::new();
     for item in items {
         let (_, nested, file) = locate(item).ok_or_else(|| Error::Package(format!("{item} is not inside an archive")))?;
         let kind = kinds.get(item).copied().unwrap_or(Kind::Modified);
-        let aside = kept.join(item);
-        let marker = kept.join(format!("{item}{DELETED}"));
+        let rel = RelPath::parse(item)?;
+        let (name, folders) = rel.parts().split_last().expect("a path has a name");
+        let folders: Vec<&str> = std::iter::once(INSIDE).chain(folders.iter().map(String::as_str)).collect();
+        let marker = format!("{name}{DELETED}");
         let ed = crate::convert::inner(&mut editor, &nested, keys)?;
         if off {
-            std::fs::create_dir_all(aside.parent().unwrap())?;
+            let dir = disabled_folder(roots, &folders, true)?.expect("made above");
             // Files move as stored (still compressed and encrypted), never
             // decoded: scripts and NG-encrypted files cannot be encrypted again.
             // What is kept aside is written once the archive took the change,
@@ -324,32 +359,38 @@ fn switch_inside(game: &Game, keys: Option<&Keys>, top: &str, items: &[Part], ki
             match kind {
                 Kind::Deleted => {
                     put_back(ed, &original, keys, &nested, &file)?;
-                    std::fs::write(&marker, b"")?;
+                    write_kept(&dir, &marker, b"")?;
                 }
                 Kind::Added => {
-                    std::fs::write(&aside, ed.stored(&file)?.to_bytes())?;
+                    write_kept(&dir, name, &ed.stored(&file)?.to_bytes())?;
                     ed.delete(&file)?;
                 }
                 _ => {
                     let changed = ed.stored(&file)?;
                     put_back(ed, &original, keys, &nested, &file)?;
-                    std::fs::write(&aside, changed.to_bytes())?;
+                    write_kept(&dir, name, &changed.to_bytes())?;
                 }
             }
-        } else if marker.is_file() {
-            ed.delete(&file)?;
-            std::fs::remove_file(&marker)?;
-        } else if aside.is_file() {
-            let kept = std::fs::read(&aside)?;
-            match StoredFile::from_bytes(&kept)? {
-                Some(stored) => ed.add_stored(&file, stored)?,
-                // Kept aside as the standalone file by an older version.
-                None => ed.add_file(&file, kept)?,
+        } else if let Some(dir) = disabled_folder(roots, &folders, false)? {
+            if dir.kind(&marker)? == Some(Entry::File) {
+                ed.delete(&file)?;
+                done.push((dir, marker));
+            } else if dir.kind(name)? == Some(Entry::File) {
+                let mut kept = Vec::new();
+                dir.open_read(name)?.read_to_end(&mut kept)?;
+                match StoredFile::from_bytes(&kept)? {
+                    Some(stored) => ed.add_stored(&file, stored)?,
+                    // Kept aside as the standalone file by an older version.
+                    None => ed.add_file(&file, kept)?,
+                }
+                done.push((dir, name.clone()));
             }
-            std::fs::remove_file(&aside)?;
         }
     }
     editor.save(&disk)?;
+    for (dir, name) in done {
+        dir.unlink(&name)?;
+    }
     Ok(())
 }
 
@@ -375,7 +416,7 @@ fn stored_in(disk: &Path, keys: Option<&Keys>, nested: &[String], file: &str) ->
 }
 
 /// Puts back every file a hunt inside an archive turned off.
-fn restore_inside(game: &Game, keys: Option<&Keys>) -> Result<(), Error> {
+fn restore_inside(game: &Game, roots: &GameRoots, keys: Option<&Keys>) -> Result<(), Error> {
     let kept = disabled_dir(game).join(INSIDE);
     if !kept.is_dir() {
         return Ok(());
@@ -389,15 +430,33 @@ fn restore_inside(game: &Game, keys: Option<&Keys>) -> Result<(), Error> {
         }
     }
     for (top, items) in by_archive {
-        switch_inside(game, keys, &top, &items, &HashMap::new(), false)?;
+        switch_inside(game, roots, keys, &top, &items, &HashMap::new(), false)?;
     }
-    let _ = std::fs::remove_dir_all(&kept);
+    // Only the folders left empty go: whatever else is in there is not this hunt's to delete.
+    if let Some(dir) = disabled_folder(roots, &[], false)? {
+        let _ = prune_empty(&dir, INSIDE, 0);
+    }
     Ok(())
+}
+
+/// Removes the folder `name` of `dir` and the folders in it that are empty (`Err` if it is not empty then).
+fn prune_empty(dir: &Dir, name: &str, depth: usize) -> std::io::Result<()> {
+    let inner = dir.open_dir(name)?;
+    if depth < 64 {
+        for child in inner.names()? {
+            if inner.kind(&child)? == Some(Entry::Dir) {
+                let _ = prune_empty(&inner, &child, depth + 1);
+            }
+        }
+    }
+    dir.rmdir(name)
 }
 
 /// Turns a part (see [`parts`]) off or back on, outside a hunt: it is moved to
 /// `mods_disabled/` and back. Refused while a hunt is going on, which owns that folder.
 pub fn set_enabled(game: &Game, part: &str, enabled: bool) -> Result<(), Error> {
+    let roots = game.roots()?;
+    let _lock = txn::guard(&roots, if enabled { "turning a mod on" } else { "turning a mod off" })?;
     if load(game).is_some() {
         return Err(Error::Package("a hunt is going on: answer it or stop it first".into()));
     }
@@ -405,27 +464,45 @@ pub fn set_enabled(game: &Game, part: &str, enabled: bool) -> Result<(), Error> 
     if !known.iter().any(|p| p == part) {
         return Err(Error::Package(format!("{part} is not a mod that can be turned {}", if enabled { "on" } else { "off" })));
     }
-    if enabled { enable(game, part) } else { disable(game, part) }
+    if enabled { enable(&roots, part) } else { disable(&roots, part) }
 }
 
-fn disable(game: &Game, part: &str) -> Result<(), Error> {
-    move_part(&game.root.join(part), &disabled_dir(game).join(part))
+/// Where a part is kept when it is off: the folder in `mods_disabled/` and the name in it.
+fn disabled_place(roots: &GameRoots, rel: &RelPath, create: bool) -> Result<Option<(Dir, String)>, Error> {
+    let (name, folders) = rel.parts().split_last().expect("a path has a name");
+    let folders: Vec<&str> = folders.iter().map(String::as_str).collect();
+    Ok(disabled_folder(roots, &folders, create)?.map(|dir| (dir, name.clone())))
 }
 
-fn enable(game: &Game, part: &str) -> Result<(), Error> {
-    move_part(&disabled_dir(game).join(part), &game.root.join(part))
-}
-
-fn move_part(from: &Path, to: &Path) -> Result<(), Error> {
-    if !from.exists() {
+fn disable(roots: &GameRoots, part: &str) -> Result<(), Error> {
+    let rel = RelPath::parse(part)?;
+    let from = roots.dest(&rel)?;
+    if from.existing.is_none() {
         return Ok(());
     }
-    if to.exists() {
-        return Err(Error::Package(format!("{} is in the way", to.display())));
+    let (to_dir, to_name) = disabled_place(roots, &rel, true)?.expect("made above");
+    let shown = roots.game.shown.join("mods_disabled").join(part);
+    move_part(&from.parent, &from.name, &to_dir, &to_name, &shown)
+}
+
+fn enable(roots: &GameRoots, part: &str) -> Result<(), Error> {
+    let rel = RelPath::parse(part)?;
+    let Some((from_dir, from_name)) = disabled_place(roots, &rel, false)? else { return Ok(()) };
+    if from_dir.kind(&from_name)?.is_none() {
+        return Ok(());
     }
-    std::fs::create_dir_all(to.parent().unwrap())?;
-    std::fs::rename(from, to)?;
-    Ok(())
+    let mut to = roots.dest(&rel)?;
+    roots.ensure_parent(&mut to)?;
+    move_part(&from_dir, &from_name, &to.parent, &to.name, &to.path())
+}
+
+/// Moves a part from one folder to another of the same game, refusing to replace anything.
+fn move_part(from_dir: &Dir, from: &str, to_dir: &Dir, to: &str, shown: &Path) -> Result<(), Error> {
+    match from_dir.rename_into(from, to_dir, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists || e.raw_os_error() == Some(libc::ENOTEMPTY) => Err(Error::Package(format!("{} is in the way", shown.display()))),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -589,7 +666,7 @@ mod tests {
             assert!(turned_off(&game).is_empty());
         }
         // Looking inside the archive the first hunt left off puts it back first.
-        disable(&game, "mods/update/update.rpf").unwrap();
+        disable(&game.roots().unwrap(), "mods/update/update.rpf").unwrap();
         let Outcome::Test(_) = start_inside(&game, None, "mods/update/update.rpf", &cache).unwrap() else { panic!() };
         stop(&game, None).unwrap();
         assert_eq!(contents(&root.join("mods/update/update.rpf")), modded);

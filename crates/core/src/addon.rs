@@ -81,6 +81,8 @@ pub fn install_pack(game: &Game, keys: Option<&Keys>, dlc: &Path, name: &str, to
         return Err(Error::Package(format!("\"{name}\" is not a pack name: use letters, digits, '_' and '-'")));
     }
     let roots = game.roots()?;
+    // One change at a time per game, for the whole install (the pack and the DLC list).
+    let _lock = crate::txn::guard(&roots, "installing an add-on pack")?;
     let mut dest = roots.mods_dest(&RelPath::parse(&format!("update/x64/dlcpacks/{name}/dlc.rpf"))?)?;
     let mut log = Vec::new();
     let data = match tool.filter(|_| game.edition == Edition::Enhanced) {

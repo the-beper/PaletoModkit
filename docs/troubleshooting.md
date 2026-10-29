@@ -88,7 +88,15 @@ How the page is read (the HTML of dev-c.com) can break if the site changes; the 
 - **Restore…** replaces the mods folder with a snapshot. By default the current mods folder is saved as a snapshot first, so a restore can be undone too.
 - **Delete** removes a snapshot; the mods folder stays as it is.
 
-Snapshots are kept in the game folder's `mods_snapshots/`. On btrfs, XFS and bcachefs a snapshot is instant and takes no space until files change (60 GB in a third of a second); on other filesystems it is a full copy, as big as the mods folder. The window says which applies.
+A restore copies the snapshot beside `mods`, swaps the two folders, then removes the old one; if it stops half way, the next change puts the old mods folder back. Snapshots are kept in the game folder's `mods_snapshots/`. On btrfs, XFS and bcachefs a snapshot is instant and takes no space until files change (60 GB in a third of a second); on other filesystems it is a full copy, as big as the mods folder. The window says which applies.
+
+## One change at a time, and interrupted changes
+
+Anything that changes a game's files (installing a package or an add-on pack, snapshots, turning mods off, converting, cleaning up, installing Script Hook V, editing an archive) runs under a lock on that game. If another change to the same game is running, in this program or another one, you get a "busy" message that says which; wait for it to finish and try again. Other games, and everything that only reads, are not held up.
+
+If a change is interrupted (a crash, a power cut, the program killed), the next change to that game first undoes it, or finishes the clean-up if all its files were already in place, and says so. If it cannot be undone (a backup was deleted by hand, a folder became read-only), the message names the files and their backups and nothing else is changed until that is sorted out. Files called `.paleto-…` next to the game's files are this program's temporaries and backups; they are never deleted unless this program made them in the run that is finishing.
+
+The `.paleto` folder in the game folder holds the lock (`lock`) and the records of changes in progress (`journal/`). Leave it alone; it is safe to keep.
 
 ## Common problems
 

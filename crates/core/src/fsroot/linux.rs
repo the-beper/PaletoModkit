@@ -110,6 +110,15 @@ pub(crate) fn random() -> u64 {
     (nanos ^ (u64::from(std::process::id()) << 40)).wrapping_add(COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed))
 }
 
+/// `.paleto-<random><suffix>`: a name of this tool's that nobody else can have chosen.
+fn unique_name(suffix: &str) -> String {
+    format!(".paleto-{:016x}{suffix}", random())
+}
+
+fn no_free_name() -> io::Error {
+    io::Error::new(io::ErrorKind::AlreadyExists, "no free temporary name")
+}
+
 /// 0 = not known yet, 1 = renameat2 works, 2 = the kernel or the filesystem lacks it.
 static NOREPLACE: AtomicU8 = AtomicU8::new(0);
 /// The same for openat2.
@@ -200,13 +209,50 @@ impl Dir {
     /// Makes a new file under a name nobody can predict, and returns it with the name.
     pub fn create_unique(&self) -> io::Result<(File, String)> {
         for _ in 0..32 {
-            let name = format!(".paleto-{:016x}.new", random());
+            let name = unique_name(".new");
             match self.create_excl(&name) {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 result => return result.map(|file| (file, name)),
             }
         }
-        Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free temporary name"))
+        Err(no_free_name())
+    }
+
+    /// Makes a new folder under a name nobody can predict (`.paleto-<random><suffix>`), and returns it with the name.
+    pub fn mkdir_unique(&self, suffix: &str) -> io::Result<(Dir, String)> {
+        for _ in 0..32 {
+            let name = unique_name(suffix);
+            match self.mkdir(&name) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                result => return result.map(|dir| (dir, name)),
+            }
+        }
+        Err(no_free_name())
+    }
+
+    /// Gives `from` a second name that nobody can predict, as a hard link, and returns it:
+    /// the way to keep what a file held while its name is replaced. Fails if the filesystem has no hard links.
+    pub fn link_unique(&self, from: &str, suffix: &str) -> io::Result<String> {
+        for _ in 0..32 {
+            let to = unique_name(suffix);
+            match self.link(from, &to) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                result => return result.map(|()| to),
+            }
+        }
+        Err(no_free_name())
+    }
+
+    /// Renames `from` to a name that nobody can predict, and returns it. Never replaces anything.
+    pub fn rename_unique(&self, from: &str, suffix: &str) -> io::Result<String> {
+        for _ in 0..32 {
+            let to = unique_name(suffix);
+            match self.rename(from, &to, false) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                result => return result.map(|()| to),
+            }
+        }
+        Err(no_free_name())
     }
 
     /// A folder the tool keeps its own files in: made if there is none, never
@@ -301,6 +347,25 @@ impl Dir {
         }
     }
 
+    /// Moves `from` of this folder to `to` of `to_dir` (on the same filesystem), failing if `to`
+    /// exists: with renameat2, else (an old kernel) by a check and a rename.
+    pub fn rename_into(&self, from: &str, to_dir: &Dir, to: &str) -> io::Result<()> {
+        fault!(Rename);
+        let (f, t) = (cstr(from)?, cstr(to)?);
+        if self.caps().noreplace {
+            let r = retry(|| cvt(unsafe { libc::syscall(libc::SYS_renameat2, self.fd(), f.as_ptr(), to_dir.fd(), t.as_ptr(), libc::RENAME_NOREPLACE) } as libc::c_int));
+            match r {
+                Ok(_) => return Ok(()),
+                Err(e) if syscall_missing(&e) || e.raw_os_error() == Some(libc::ENOTSUP) => NOREPLACE.store(2, Ordering::Relaxed),
+                Err(e) => return Err(e),
+            }
+        }
+        if to_dir.stat_raw(to, false)?.is_some() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        retry(|| cvt(unsafe { libc::renameat(self.fd(), f.as_ptr(), to_dir.fd(), t.as_ptr()) })).map(drop)
+    }
+
     pub fn unlink(&self, name: &str) -> io::Result<()> {
         fault!(Unlink);
         let c = cstr(name)?;
@@ -364,6 +429,11 @@ impl Dir {
             Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// The permission bits (`0o777`) of the regular file `name`; `None` if it is not one (a link is not followed).
+    pub fn mode_of(&self, name: &str) -> io::Result<Option<u32>> {
+        Ok(self.stat_raw(name, false)?.filter(|st| kind_of(st.st_mode) == Kind::File).map(|st| st.st_mode & 0o777))
     }
 
     /// What `name` is, with the fingerprint of a file and the target of a link.

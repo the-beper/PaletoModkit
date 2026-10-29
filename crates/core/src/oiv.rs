@@ -4,18 +4,19 @@
 //! Installation always targets the mods folder for game data; the original
 //! game files are never modified.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use paleto_rpf::{ArchiveEditor, Keys};
 use zip::ZipArchive;
 
 use crate::convert;
-use crate::fsroot::{GameRoots, Resolved, RootKind};
+use crate::fsroot::{Dir, Existing, Fingerprint, GameRoots, Resolved, RootKind};
 use crate::game::Game;
 use crate::relpath::RelPath;
+use crate::txn::{self, TxnFailure};
 use crate::text::{self, Condition, TextOp};
 use crate::xml::{self, Append, XmlOp};
 use crate::Error;
@@ -203,13 +204,17 @@ impl Package {
     pub(crate) fn install_with(&mut self, game: &Game, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
         self.check(&self.content.clone())?;
         let roots = game.roots()?;
-        let mut inst = Installer { roots, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
+        // One change at a time per game, for the whole install.
+        let _lock = txn::guard(&roots, "installing a package")?;
+        let mut inst = Installer { roots: &roots, keys, zip: &mut self.zip, converted: &self.converted, archives: BTreeMap::new(), log: Vec::new(), undo: Undo::default() };
         if let Err(e) = self.content.clone().iter().try_for_each(|cmd| inst.run_root(cmd)) {
             // Archives are only saved at the end: putting the loose files back undoes it all.
-            inst.undo.roll_back();
-            return Err(Error::Package(format!("{e} (nothing was installed)")));
+            let (failures, notes) = inst.undo.roll_back();
+            inst.log.extend(notes.into_iter().map(|n| format!("warning: {n}")));
+            return Err(Error::Txn(Box::new(TxnFailure { cause: e, log: inst.log, undone: failures.is_empty(), failures, journaled: false })));
         }
-        inst.undo.finish();
+        let left = inst.undo.finish();
+        inst.log.extend(left.into_iter().map(|l| format!("warning: {l}")));
         for (path, editor) in std::mem::take(&mut inst.archives) {
             editor.save(&path)?;
             inst.log.push(format!("saved {}", path.display()));
@@ -234,7 +239,7 @@ impl Package {
 
 struct Installer<'a> {
     /// Where files may be written: every destination is resolved through it.
-    roots: GameRoots,
+    roots: &'a GameRoots,
     keys: Option<&'a Keys>,
     zip: &'a mut ZipArchive<File>,
     converted: &'a HashMap<String, Vec<u8>>,
@@ -244,57 +249,234 @@ struct Installer<'a> {
     undo: Undo,
 }
 
-/// What an install changed on disk so far, to put back if it fails halfway.
-/// Files are only ever replaced by a rename (never rewritten in place), so a
-/// hard link keeps the old content. A failure while the archives are saved, at
-/// the very end, is not undone.
+/// What an install changed on disk so far, to put back if it fails halfway: an interim
+/// until the install runs as a transaction (see [`crate::txn`]), and without a journal.
+/// Files are only ever replaced by a rename (never rewritten in place), so a hard link
+/// keeps the old content (the file itself is renamed aside on a filesystem without hard
+/// links). Backups are made under names nobody else can have, in the folder of the file,
+/// and only what the install made or kept is touched when undoing: a name that is not
+/// the one it wrote is left alone, and whatever cannot be put back is reported with the
+/// name of its backup, never hidden. A failure while the archives are saved, at the very
+/// end, is not undone.
 #[derive(Default)]
 struct Undo {
-    seen: std::collections::HashSet<PathBuf>,
-    /// Files that did not exist.
-    made: Vec<PathBuf>,
-    /// Files replaced or deleted, and the link that keeps their old content.
-    kept: Vec<(PathBuf, PathBuf)>,
+    seen: HashSet<PathBuf>,
+    steps: Vec<Step>,
+    /// Folders made for the install that could not be noted, so cannot be removed again.
+    lost: Vec<String>,
+}
+
+enum Step {
+    /// A file that did not exist: removed again if it is still the one the install wrote.
+    Made { dir: Dir, name: String, path: PathBuf, wrote: Option<Fingerprint> },
+    /// A folder made for a file: removed again if it is empty.
+    Folder { parent: Dir, name: String, path: PathBuf },
+    /// A file replaced or deleted: its old content is under `backup` (a hard link to it, or the file itself renamed aside).
+    Kept { dir: Dir, name: String, backup: String, path: PathBuf, wrote: Option<Fingerprint> },
+}
+
+/// A filesystem that cannot make hard links (exFAT, some network mounts).
+fn links_unsupported(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::EPERM | libc::EOPNOTSUPP | libc::EXDEV | libc::EMLINK)) || e.kind() == io::ErrorKind::Unsupported
+}
+
+/// Where a destination was before its folders existed (they are made later, by somebody else).
+struct Planned {
+    anchor: RootKind,
+    logical: Vec<String>,
+    missing: Vec<String>,
+    name: String,
+    path: PathBuf,
+}
+
+impl Planned {
+    fn of(dest: &Resolved) -> Self {
+        Planned { anchor: dest.anchor(), logical: dest.logical.clone(), missing: dest.missing.clone(), name: dest.name.clone(), path: dest.path() }
+    }
 }
 
 impl Undo {
-    /// Remembers a file before its first change.
-    fn keep(&mut self, path: &Path) -> Result<(), Error> {
-        if !self.seen.insert(path.to_path_buf()) {
-            return Ok(());
+    /// Remembers a file before its first change: a hard link to it under a name of its own, or
+    /// (`aside`, where links cannot be made) the file itself renamed to one; or, if there is
+    /// no file, that the install made it. `Ok(true)` if the file was moved aside (it is not at
+    /// its name any more). Without `aside`, a filesystem that cannot link is left alone and
+    /// nothing is remembered: the caller asks again right before it writes. The folders must exist.
+    fn keep(&mut self, dest: &Resolved, aside: bool) -> Result<bool, Error> {
+        let path = dest.path();
+        if self.seen.contains(&path) {
+            return Ok(false);
         }
-        match std::fs::symlink_metadata(path) {
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let saved = path.with_file_name(format!(".{name}.paleto-undo"));
-                let _ = std::fs::remove_file(&saved);
-                // Some filesystems (exFAT) have no hard links: a copy then.
-                if std::fs::hard_link(path, &saved).is_err() {
-                    std::fs::copy(path, &saved)?;
-                }
-                self.kept.push((path.to_path_buf(), saved));
+        let dir = &dest.parent;
+        match dir.stat(&dest.name)? {
+            // The write that follows refuses a folder.
+            Some(Existing::Dir) => return Ok(false),
+            Some(_) => {
+                let (backup, moved) = match dir.link_unique(&dest.name, ".old") {
+                    Ok(backup) => (backup, false),
+                    Err(e) if links_unsupported(&e) => {
+                        if !aside {
+                            return Ok(false);
+                        }
+                        (dir.rename_unique(&dest.name, ".old")?, true)
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                self.steps.push(Step::Kept { dir: dir.try_clone()?, name: dest.name.clone(), backup, path: path.clone(), wrote: None });
+                self.seen.insert(path);
+                return Ok(moved);
             }
-            Err(_) => self.made.push(path.to_path_buf()),
+            None => self.steps.push(Step::Made { dir: dir.try_clone()?, name: dest.name.clone(), path: path.clone(), wrote: None }),
         }
+        self.seen.insert(path);
+        Ok(false)
+    }
+
+    /// The install has written `dest` (which now says what is there): that is what undoing may remove or replace.
+    fn wrote(&mut self, dest: &Resolved) {
+        let Some(Existing::File(fp)) = &dest.existing else { return };
+        let path = dest.path();
+        for step in &mut self.steps {
+            if let Step::Made { path: p, wrote, .. } | Step::Kept { path: p, wrote, .. } = step
+                && *p == path
+            {
+                *wrote = Some(*fp);
+            }
+        }
+    }
+
+    /// A folder the install made.
+    fn folder(&mut self, parent: &Dir, name: &str, path: PathBuf) {
+        match parent.try_clone() {
+            Ok(parent) => self.steps.push(Step::Folder { parent, name: name.to_string(), path }),
+            Err(e) => self.lost.push(format!("{}: a folder made by the install cannot be removed again: {e}", path.display())),
+        }
+    }
+
+    /// A file that did not exist at `plan` was made by somebody else for the install (a copy of a
+    /// game file): remembers it, and the folders made for it. Nothing if there is no such file.
+    fn made_by_copy(&mut self, roots: &GameRoots, plan: &Planned) -> Result<(), Error> {
+        let logical = [plan.logical.as_slice(), plan.missing.as_slice()].concat();
+        let mut folders = Vec::new();
+        let mut path = plan.path.clone();
+        path.pop();
+        for name in plan.missing.iter().rev() {
+            folders.push((name.clone(), path.clone()));
+            path.pop();
+        }
+        let dir = match roots.open_anchor(plan.anchor, &logical) {
+            Ok(dir) => dir,
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let Some(Existing::File(fp)) = dir.stat(&plan.name)? else { return Ok(()) };
+        // Outermost folder first, so that undoing (newest first) removes the innermost first.
+        let mut parent_logical = plan.logical.clone();
+        for (name, path) in folders.into_iter().rev() {
+            let parent = roots.open_anchor(plan.anchor, &parent_logical)?;
+            self.folder(&parent, &name, path);
+            parent_logical.push(name);
+        }
+        self.steps.push(Step::Made { dir, name: plan.name.clone(), path: plan.path.clone(), wrote: Some(fp) });
+        self.seen.insert(plan.path.clone());
         Ok(())
     }
 
-    fn roll_back(&mut self) {
-        for path in self.made.drain(..) {
-            let _ = std::fs::remove_file(path);
+    /// Puts everything back, newest change first. Returns what could not be put back (each with the
+    /// name of its backup: empty means nothing is left of the install) and what was left in place on purpose.
+    fn roll_back(&mut self) -> (Vec<String>, Vec<String>) {
+        #[cfg(test)]
+        if let Some(hook) = ON_ROLLBACK.with(|h| h.borrow_mut().take()) {
+            hook();
         }
-        for (path, saved) in self.kept.drain(..) {
-            let _ = std::fs::rename(saved, path);
+        let mut failures = std::mem::take(&mut self.lost);
+        let mut notes = Vec::new();
+        for step in self.steps.drain(..).rev() {
+            match step {
+                Step::Made { dir, name, path, wrote } => match dir.stat(&name) {
+                    Ok(None) => {}
+                    Ok(Some(Existing::File(fp))) if wrote.is_some_and(|w| fp.same_file(&w)) => match dir.unlink(&name) {
+                        Ok(()) => {
+                            let _ = dir.sync();
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => failures.push(format!("{}: made by the install and cannot be removed: {e}", path.display())),
+                    },
+                    Ok(Some(_)) => failures.push(format!("{}: made by the install, but what is there now is not the file it wrote; left as it is", path.display())),
+                    Err(e) => failures.push(format!("{}: cannot be looked at: {e}", path.display())),
+                },
+                Step::Folder { parent, name, path } => match parent.rmdir(&name) {
+                    Ok(()) => {
+                        let _ = parent.sync();
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) => notes.push(format!("{}: a folder made by the install is not empty, left in place", path.display())),
+                    Err(e) => failures.push(format!("{}: a folder made by the install cannot be removed: {e}", path.display())),
+                },
+                Step::Kept { dir, name, backup, path, wrote } => {
+                    let shown = format!("{} (backup: {})", path.display(), path.with_file_name(&backup).display());
+                    let (target, saved) = match (dir.stat(&name), dir.stat(&backup)) {
+                        (Ok(t), Ok(Some(s))) => (t, s),
+                        (Ok(_), Ok(None)) => {
+                            failures.push(format!("{shown}: the backup is gone, so the original cannot be put back"));
+                            continue;
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            failures.push(format!("{shown}: cannot be looked at: {e}"));
+                            continue;
+                        }
+                    };
+                    let untouched = match (&target, &saved) {
+                        (Some(Existing::File(a)), Existing::File(b)) => a.same_file(b),
+                        (Some(Existing::Link(a)), Existing::Link(b)) => a == b,
+                        _ => false,
+                    };
+                    let ours = matches!((&target, &wrote), (Some(Existing::File(fp)), Some(w)) if fp.same_file(w));
+                    let result = if untouched {
+                        // The name was not changed: the backup is a second name of the same file.
+                        dir.unlink(&backup)
+                    } else if target.is_none() {
+                        dir.rename(&backup, &name, false)
+                    } else if ours {
+                        dir.rename(&backup, &name, true)
+                    } else {
+                        failures.push(format!("{shown}: what is there now is not what the install left (it was changed, or is a folder now); the original was not put back"));
+                        continue;
+                    };
+                    match result {
+                        Ok(()) => {
+                            let _ = dir.sync();
+                        }
+                        Err(e) => failures.push(format!("{shown}: the original cannot be put back: {e}")),
+                    }
+                }
+            }
         }
+        self.seen.clear();
+        (failures, notes)
     }
 
-    fn finish(&mut self) {
-        self.made.clear();
-        for (_, saved) in self.kept.drain(..) {
-            let _ = std::fs::remove_file(saved);
+    /// The install is done: the backups go. Returns the ones that could not be removed.
+    fn finish(&mut self) -> Vec<String> {
+        let mut left = Vec::new();
+        for step in self.steps.drain(..) {
+            if let Step::Kept { dir, backup, path, .. } = step {
+                match dir.unlink(&backup) {
+                    Ok(()) => {
+                        let _ = dir.sync();
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => left.push(format!("the backup {} of {} could not be removed: {e}", path.with_file_name(&backup).display(), path.display())),
+                }
+            }
         }
+        left
     }
+}
+
+// Runs once when an install is rolled back (tests damage the folder to make it fail).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ON_ROLLBACK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Installer<'_> {
@@ -317,12 +499,13 @@ impl Installer<'_> {
                     return Ok(());
                 }
                 let data = self.source(source)?;
-                self.roots.ensure_parent(&mut dest)?;
+                self.ensure_dirs(&mut dest)?;
                 let path = dest.path();
                 self.archives.remove(&path);
-                self.undo.keep(&path)?;
+                self.undo.keep(&dest, true)?;
                 // A copy in the mods folder may be a link to an original: replace it, never write through it.
                 self.roots.replace(&mut dest, |f| f.write_all(&data))?;
+                self.undo.wrote(&dest);
                 self.log.push(format!("add {}", path.display()));
             }
             Command::Delete(target) => {
@@ -332,8 +515,10 @@ impl Installer<'_> {
                 if let Some(why) = self.refused(&dest) {
                     self.log.push(format!("warning: refusing to delete {}{why}", path.display()));
                 } else if self.roots.read_dest(&dest)?.is_some() {
-                    self.undo.keep(&path)?;
-                    self.roots.remove(&dest)?;
+                    // Without hard links the file itself was renamed aside as its backup: it is gone from its name already.
+                    if !self.undo.keep(&dest, true)? {
+                        self.roots.remove(&dest)?;
+                    }
                     self.log.push(format!("delete {}", path.display()));
                 }
             }
@@ -442,14 +627,17 @@ impl Installer<'_> {
         self.roots.check_write(&dest)?;
         // A copy made from the original goes again if the install fails. An
         // archive already there is only saved at the end: nothing to keep.
-        if std::fs::symlink_metadata(&disk).is_err() {
-            self.undo.keep(&disk)?;
-        }
+        let (was_new, plan) = (dest.existing.is_none(), Planned::of(&dest));
         let disk = match self.roots.mods_copy(&rel.without_mods())? {
-            Some(p) => p,
+            Some(p) => {
+                if was_new {
+                    self.undo.made_by_copy(self.roots, &plan)?;
+                }
+                p
+            }
             // Saved by a rename: a dangling link there is replaced, never written through.
             None if create => {
-                self.roots.ensure_parent(&mut dest)?;
+                self.ensure_dirs(&mut dest)?;
                 self.roots.check_write(&dest)?;
                 disk
             }
@@ -484,12 +672,37 @@ impl Installer<'_> {
             self.log.push(format!("warning: refusing to replace {}{}", dest.path().display(), self.refused(&dest).unwrap_or_default()));
             return Ok(None);
         }
-        self.undo.keep(&dest.path())?;
         if dest.root == RootKind::Mods && !rel.in_mods_folder() {
+            // Game data is edited in a copy in the mods folder, made first: a copy that did not
+            // exist goes again if the install fails, one that did (a link, say) is kept.
+            let plan = Planned::of(&dest);
+            if dest.existing.is_some() {
+                self.undo.keep(&dest, false)?;
+            }
             self.roots.mods_copy(&rel)?;
+            if dest.existing.is_none() {
+                self.undo.made_by_copy(self.roots, &plan)?;
+            }
             return Ok(Some(self.roots.dest(&rel)?));
         }
         Ok(Some(dest))
+    }
+
+    /// Makes the folders `dest` needs, noting each so that a failed install removes it again.
+    fn ensure_dirs(&mut self, dest: &mut Resolved) -> Result<(), Error> {
+        let mut paths = Vec::new();
+        let mut path = dest.path();
+        path.pop();
+        for _ in &dest.missing {
+            paths.push(path.clone());
+            path.pop();
+        }
+        paths.reverse();
+        let (roots, undo, mut made) = (self.roots, &mut self.undo, 0);
+        roots.ensure_parent_noting(dest, &mut |parent, name| {
+            undo.folder(parent, name, paths[made].clone());
+            made += 1;
+        })
     }
 
     /// What a loose file holds now; `None` if there is no file.
@@ -501,9 +714,10 @@ impl Installer<'_> {
     /// Writes a loose file by replacing it: never through a link, and the
     /// old content stays for [`Undo`].
     fn write_loose(&mut self, dest: &mut Resolved, data: Vec<u8>) -> Result<(), Error> {
-        self.roots.ensure_parent(dest)?;
-        self.undo.keep(&dest.path())?;
+        self.ensure_dirs(dest)?;
+        self.undo.keep(dest, true)?;
         self.roots.replace(dest, |f| f.write_all(&data))?;
+        self.undo.wrote(dest);
         Ok(())
     }
 

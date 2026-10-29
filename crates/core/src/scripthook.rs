@@ -210,8 +210,8 @@ pub fn install_from_zip(game: &Game, zip: &[u8]) -> Result<String, Error> {
     }
     let version = dll_version(&dll).ok_or_else(|| bad("no version in ScriptHookV.dll"))?;
     let roots = game.roots()?;
-    let mut target = roots.dest(&RelPath::parse(DLL_NAME)?)?;
-    roots.replace(&mut target, |f| f.write_all(&dll))?;
+    // One journaled file under the game lock: the DLL is the old one or the new one, whatever happens.
+    crate::txn::replace_one(&roots, &RelPath::parse(DLL_NAME)?, "installing Script Hook V", |f| f.write_all(&dll))?;
     Ok(version)
 }
 
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(install_from_zip(&game, &bytes).unwrap(), "3889.0/1158.13");
         assert_eq!(installed(&game).as_deref(), Some("3889.0/1158.13"));
         assert_eq!(std::fs::read(dir.path().join("dinput8.dll")).unwrap(), b"old dinput");
-        let mut names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let mut names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != ".paleto").collect();
         names.sort();
         assert_eq!(names, ["GTA5_Enhanced.exe", "dinput8.dll", "scripthookv.dll"]);
         assert!(install_from_zip(&game, b"not a zip").is_err());

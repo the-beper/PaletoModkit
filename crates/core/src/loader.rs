@@ -252,6 +252,10 @@ pub fn modded_files(game: &Game, session: Option<&Session>) -> Vec<ModdedFile> {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
+            // This tool's temporary names are not mods.
+            if entry.file_name().to_string_lossy().starts_with(".paleto-") {
+                continue;
+            }
             if path.is_dir() {
                 stack.push(path);
             } else if let Ok(rel) = path.strip_prefix(&mods) {

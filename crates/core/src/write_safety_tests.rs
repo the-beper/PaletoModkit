@@ -186,7 +186,6 @@ fn oiv02_hard_linked_mods_copy_leaves_the_original_alone() {
 // ---- FS-04: predictable temporary names ----
 
 #[test]
-#[ignore = "repro FS-04: an unrelated .a.asi.paleto-tmp is deleted"]
 fn fs04_unrelated_paleto_tmp_survives_an_install() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Legacy);
@@ -198,7 +197,6 @@ fn fs04_unrelated_paleto_tmp_survives_an_install() {
 }
 
 #[test]
-#[ignore = "repro FS-04: an unrelated .a.asi.paleto-undo is deleted"]
 fn fs04_unrelated_paleto_undo_survives_a_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Legacy);
@@ -226,7 +224,6 @@ fn fs04_planted_links_at_temporary_names_do_not_reach_outside() {
 }
 
 #[test]
-#[ignore = "repro FS-04: an unrelated .mods.restoring folder is deleted"]
 fn fs04_unrelated_restoring_folder_survives_a_snapshot_restore() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Enhanced);
@@ -241,7 +238,6 @@ fn fs04_unrelated_restoring_folder_survives_a_snapshot_restore() {
 }
 
 #[test]
-#[ignore = "repro FS-04: an unrelated .ScriptHookV.dll.new is deleted"]
 fn fs04_unrelated_scripthook_new_file_survives_an_install() {
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
@@ -256,7 +252,6 @@ fn fs04_unrelated_scripthook_new_file_survives_an_install() {
 }
 
 #[test]
-#[ignore = "repro FS-04: two installs at once interleave (shared.asi from one package, the archive edit from the other); intermittent, seen within 20 rounds"]
 fn fs04_two_installs_at_once_leave_exactly_one_result() {
     for round in 0..20 {
         let dir = tempfile::tempdir().unwrap();
@@ -351,7 +346,6 @@ fn oiv01_failing_archive_save_leaves_nothing_installed() {
 /// A file deleted, then its name made a folder by a later `<add>`: the roll-back
 /// cannot put the file back, and the error says nothing was installed.
 #[test]
-#[ignore = "repro OIV-06: a failed roll-back still reports \"nothing was installed\""]
 fn oiv06_failed_rollback_is_not_reported_as_clean() {
     let dir = tempfile::tempdir().unwrap();
     let game = game_folder(dir.path(), Edition::Legacy);
@@ -423,4 +417,187 @@ fn dlc05_registered_pack_installs_again_without_touching_the_list() {
     assert_eq!(list_of(&copy).matches("piccolo").count(), 1);
     assert_unchanged(&original, &snapshot(&game.root.join("update")));
     assert!(leftovers(&game.root).is_empty());
+}
+
+// ---- A2b: unique exclusive names, the game lock, interrupted restores, rollback reports ----
+
+fn script_hook_zip() -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("bin/ScriptHookV.dll", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.write_all(b"MZ\0\0junkv3889.0/1158.13\0").unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+/// Plants a file (or, with `links`, a link to something outside) at every name an older version
+/// used for its temporaries, and returns the names (relative to the game folder).
+fn plant_old_names(root: &Path, outside: &Path, links: bool) -> Vec<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut names: Vec<String> = ["scripts/.a.asi.paleto-tmp", "scripts/.a.asi.paleto-undo", "scripts/.new.asi.paleto-tmp", ".ScriptHookV.dll.new", ".mods.restoring", ".mods.replaced"].map(String::from).into();
+    names.extend((now.saturating_sub(5)..now + 10).map(|s| format!("mods_snapshots/.{s}.partial")));
+    std::fs::create_dir_all(root.join("mods_snapshots")).unwrap();
+    for name in &names {
+        let path = root.join(name);
+        let folder = name.starts_with(".mods.") || name.ends_with(".partial");
+        if links {
+            symlink(if folder { outside.to_path_buf() } else { outside.join("file.txt") }, &path).unwrap();
+        } else if folder {
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("user.txt"), b"not ours").unwrap();
+        } else {
+            std::fs::write(&path, b"not ours").unwrap();
+        }
+    }
+    names
+}
+
+#[test]
+fn old_predictable_names_survive_installs_snapshots_and_script_hook_installs() {
+    for links in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_folder(dir.path(), Edition::Enhanced);
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("file.txt"), b"outside").unwrap();
+        std::fs::write(outside.join("user.txt"), b"outside").unwrap();
+        std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
+        std::fs::write(game.root.join("mods/x64/m.rpf"), b"mod").unwrap();
+        std::fs::write(game.root.join("scripts/a.asi"), b"old").unwrap();
+        let names = plant_old_names(&game.root, &outside, links);
+        let planted = |root: &Path| -> std::collections::BTreeMap<String, Entry> { snapshot(root).into_iter().filter(|(k, _)| names.iter().any(|n| k == n || k.starts_with(&format!("{n}/")))).collect() };
+        let (before, before_out) = (planted(&game.root), snapshot(&outside));
+        assert!(before.len() >= names.len());
+
+        let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\a.asi</add><add source="x">scripts\new.asi</add><archive path="x64\a.rpf"><add source="x">b.txt</add></archive>"#, &[("content/x", b"new")], false);
+        install(&game, &package).unwrap();
+        let snap = crate::snapshots::create(&game, "s").unwrap();
+        std::fs::write(game.root.join("mods/x64/m.rpf"), b"changed").unwrap();
+        crate::snapshots::restore(&game, &snap.id).unwrap();
+        assert_eq!(std::fs::read(game.root.join("mods/x64/m.rpf")).unwrap(), b"mod");
+        crate::snapshots::delete(&game, &snap.id).unwrap();
+        crate::scripthook::install_from_zip(&game, &script_hook_zip()).unwrap();
+
+        assert_eq!(std::fs::read(game.root.join("scripts/a.asi")).unwrap(), b"new", "links: {links}");
+        assert_unchanged(&before, &planted(&game.root));
+        assert_unchanged(&before_out, &snapshot(&outside));
+        let ours: Vec<String> = leftovers(&game.root).into_iter().filter(|l| !names.iter().any(|n| l == n || l.starts_with(&format!("{n}/")))).collect();
+        assert!(ours.is_empty(), "{ours:?}");
+    }
+}
+
+#[test]
+fn a_second_writer_gets_busy_while_other_games_and_reads_go_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = game_folder(other_dir.path(), Edition::Enhanced);
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\a.asi</add>"#, &[("content/x", b"new")], false);
+    let other_package = oiv(other_dir.path(), "x.oiv", r#"<add source="x">scripts\a.asi</add>"#, &[("content/x", b"new")], false);
+    let roots = game.roots().unwrap();
+    let held = crate::txn::guard(&roots, "a test holds the lock").unwrap();
+    std::fs::create_dir_all(game.root.join("mods")).unwrap();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let busy = |what: &str, r: Result<(), Error>| assert!(matches!(r, Err(Error::Busy(_))), "{what}: {r:?}");
+            busy("install", install(&game, &package).map(drop));
+            busy("snapshot", crate::snapshots::create(&game, "x").map(drop));
+            busy("script hook", crate::scripthook::install_from_zip(&game, &script_hook_zip()).map(drop));
+            busy("mods copy", game.mods_copy("x64/a.rpf").map(drop));
+            busy("cleanup", crate::cleanup::delete(&game, &[]).map(drop));
+            busy("hunt", crate::crash_hunt::start(&game).map(drop));
+            busy("pack", crate::addon::install_pack(&game, None, &dir.path().join("none.rpf"), "piccolo", None).map(drop));
+            // Reading, and another game, are not held up.
+            assert!(crate::snapshots::list(&game).is_empty());
+            install(&other, &other_package).unwrap();
+        });
+    });
+    drop(held);
+    install(&game, &package).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/a.asi")).unwrap(), b"new");
+}
+
+#[test]
+fn a_restore_interrupted_between_its_renames_is_put_right_at_the_next_change() {
+    use crate::fsroot::faults::{self, Mode, Point};
+    for k in 1..=3 {
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_folder(dir.path(), Edition::Enhanced);
+        std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
+        std::fs::write(game.root.join("mods/x64/m.rpf"), b"snapshotted").unwrap();
+        let snap = crate::snapshots::create(&game, "s").unwrap();
+        std::fs::write(game.root.join("mods/x64/m.rpf"), b"current").unwrap();
+        faults::arm_at(Point::Rename, k, Mode::Crash);
+        let result = crate::snapshots::restore(&game, &snap.id);
+        if !faults::disarm() {
+            result.unwrap();
+            assert_eq!(std::fs::read(game.root.join("mods/x64/m.rpf")).unwrap(), b"snapshotted");
+            break;
+        }
+        assert!(result.is_err(), "k={k}");
+        assert_eq!(crate::txn::pending(&game).len(), 1, "k={k}: the interrupted restore is reported");
+        // The next change (here a snapshot) undoes it first: the mods folder is whole again.
+        let saved = crate::snapshots::create(&game, "after").unwrap();
+        assert_eq!(std::fs::read(saved.dir.join("mods/x64/m.rpf")).unwrap(), b"current", "k={k}");
+        assert_eq!(std::fs::read(game.root.join("mods/x64/m.rpf")).unwrap(), b"current", "k={k}");
+        assert!(crate::txn::pending(&game).is_empty() && crate::txn::leftovers(&game).is_empty(), "k={k}: {:?}", crate::txn::leftovers(&game));
+        crate::snapshots::restore(&game, &snap.id).unwrap();
+        assert_eq!(std::fs::read(game.root.join("mods/x64/m.rpf")).unwrap(), b"snapshotted");
+    }
+}
+
+#[test]
+fn the_leftovers_scan_lists_temporary_names_and_never_touches_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
+    std::fs::create_dir_all(game.root.join("mods_snapshots")).unwrap();
+    for rel in ["mods/x64/.paleto-0123456789abcdef-0.old", "mods_snapshots/.paleto-fedcba9876543210.partial", ".paleto-aaaaaaaaaaaaaaaa.new"] {
+        std::fs::write(game.root.join(rel), b"orphan").unwrap();
+    }
+    let before = snapshot(&game.root);
+    let found: Vec<String> = crate::txn::leftovers(&game).iter().map(|p| p.strip_prefix(&game.root).unwrap().to_string_lossy().into_owned()).collect();
+    assert_eq!(found, [".paleto-aaaaaaaaaaaaaaaa.new", "mods/x64/.paleto-0123456789abcdef-0.old", "mods_snapshots/.paleto-fedcba9876543210.partial"]);
+    assert_unchanged(&before, &snapshot(&game.root));
+    // They are not mods: the listings of the mods folder skip them.
+    assert!(crate::loader::modded_files(&game, None).is_empty());
+    assert!(crate::vfs::local_files(&game.root.join("mods")).unwrap().is_empty());
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\a.asi</add>"#, &[("content/x", b"new")], false);
+    install(&game, &package).unwrap();
+    assert_eq!(crate::txn::leftovers(&game).len(), 3);
+}
+
+#[test]
+fn a_rollback_that_cannot_finish_says_so_and_names_the_backup() {
+    if is_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Legacy);
+    std::fs::write(game.root.join("scripts/x"), b"precious").unwrap();
+    let package = oiv(dir.path(), "x.oiv", r#"<delete>scripts\x</delete><add source="x">scripts\x\y.asi</add><xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")], false);
+    // Something else puts a file in the folder the install made, so the folder stays and the original cannot go back.
+    let user_file = game.root.join("scripts/x/user.txt");
+    let planted = user_file.clone();
+    crate::oiv::ON_ROLLBACK.with(|h| *h.borrow_mut() = Some(Box::new(move || std::fs::write(&planted, b"user").unwrap())));
+    let err = install(&game, &package).unwrap_err();
+    let text = err.to_string();
+    assert!(!text.contains("nothing was installed") && text.contains(".paleto-") && text.contains("scripts/x"), "{text}");
+    let Error::Txn(failure) = &err else { panic!("{err:?}") };
+    assert!(!failure.undone && !failure.failures.is_empty());
+    assert_eq!(std::fs::read(&user_file).unwrap(), b"user");
+    let backups: Vec<_> = std::fs::read_dir(game.root.join("scripts")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".paleto-")).collect();
+    assert_eq!(backups.len(), 1, "the backup is kept");
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), b"precious");
+}
+
+#[test]
+fn a_clean_rollback_puts_everything_back_and_says_nothing_was_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Legacy);
+    std::fs::write(game.root.join("scripts/x"), b"precious").unwrap();
+    let package = oiv(dir.path(), "x.oiv", r#"<delete>scripts\x</delete><add source="x">scripts\x\y.asi</add><xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")], false);
+    let before = snapshot(&game.root);
+    let err = install(&game, &package).unwrap_err();
+    assert!(err.to_string().contains("nothing was installed"), "{err}");
+    assert_unchanged(&before, &snapshot(&game.root));
 }

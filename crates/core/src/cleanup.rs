@@ -39,6 +39,7 @@ pub fn identical_copies(game: &Game) -> Vec<Copy> {
 /// compared), then the folders left empty.
 pub fn delete(game: &Game, copies: &[Copy]) -> Result<usize, Error> {
     let roots = game.roots()?;
+    let _lock = crate::txn::guard(&roots, "deleting identical copies from the mods folder")?;
     let mut deleted = 0;
     for c in copies {
         let dest = roots.mods_dest(&RelPath::parse(&c.path)?)?;

@@ -94,6 +94,12 @@ impl ArchivePath {
         Ok(ArchivePath { disk, inner: self.inner.clone() })
     }
 
+    /// The game folder this archive is in (the nearest folder above it with a game executable), if any.
+    fn owning_game(&self) -> Option<Game> {
+        let disk = std::path::absolute(&self.disk).ok()?;
+        disk.ancestors().skip(1).find_map(|dir| Game::open(dir).ok())
+    }
+
     /// The copy of this archive in the mods folder, if there is one.
     pub fn in_mods(&self, game: &Game) -> Option<Self> {
         let rel = in_game(&self.disk, game)?;
@@ -113,6 +119,9 @@ impl ArchivePath {
         keys: Option<&Keys>,
         f: impl FnOnce(&mut ArchiveEditor, &str) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        // An archive inside a game folder is changed under that game's lock: one change at a time.
+        let roots = self.owning_game().map(|g| g.roots()).transpose()?;
+        let _lock = roots.as_ref().map(|r| crate::txn::guard(r, "editing an archive")).transpose()?;
         let mut root = ArchiveEditor::open(&self.disk, keys)?;
         let (editor, folder) = nested(&mut root, &self.inner, keys)?;
         let out = f(editor, &folder)?;
@@ -211,7 +220,9 @@ pub fn join_inner(folder: &str, rel: &str) -> String {
 }
 
 /// Lists local files below `path` (or `path` itself) with their path relative
-/// to `path`'s parent, for adding to an archive.
+/// to `path`'s parent, for adding to an archive. The temporary names of this
+/// tool (`.paleto-*`: staged files, backups, folders made aside) are not files of
+/// the folder and are left out.
 pub fn local_files(path: &Path) -> Result<Vec<(PathBuf, String)>, Error> {
     let base = path.parent().unwrap_or(Path::new(""));
     let mut out = Vec::new();
@@ -219,7 +230,10 @@ pub fn local_files(path: &Path) -> Result<Vec<(PathBuf, String)>, Error> {
     while let Some(p) = stack.pop() {
         if p.is_dir() {
             for entry in std::fs::read_dir(&p)? {
-                stack.push(entry?.path());
+                let entry = entry?;
+                if !entry.file_name().to_string_lossy().starts_with(".paleto-") {
+                    stack.push(entry.path());
+                }
             }
         } else {
             let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();

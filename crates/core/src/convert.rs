@@ -200,6 +200,8 @@ pub fn undo(game: &Game, keys: Option<&Keys>, time: &str) -> Result<Vec<Converte
     if time.parse::<u64>().is_err() || !dir.is_dir() {
         return Err(Error::Convert(format!("no conversion {time} to undo in {}", game.root.join("mods_legacy").display())));
     }
+    let roots = game.roots()?;
+    let _lock = crate::txn::guard(&roots, "undoing a conversion")?;
     let mut by_archive: BTreeMap<String, Vec<(Placed, PathBuf)>> = BTreeMap::new();
     let mut report = Vec::new();
     for (local, _) in crate::vfs::local_files(&dir)? {
@@ -242,6 +244,8 @@ pub struct Converted {
 /// gives them. The Legacy originals are kept under `backup` (same relative
 /// paths) when given. Each archive is saved once, after all its files.
 pub fn convert_in_mods(game: &Game, keys: Option<&Keys>, tool: &Path, paths: &[String], backup: Option<&Path>) -> Result<Vec<Converted>, Error> {
+    let roots = game.roots()?;
+    let _lock = crate::txn::guard(&roots, "converting files in the mods folder")?;
     // Top-level archive -> [(nested archives, file inside the innermost), full path].
     let mut by_archive: BTreeMap<String, Vec<Placed>> = BTreeMap::new();
     let mut report = Vec::new();
@@ -282,7 +286,12 @@ fn convert_archive(
                 if let Some(dir) = backup {
                     let dest = dir.join(path);
                     std::fs::create_dir_all(dest.parent().unwrap())?;
-                    std::fs::write(dest, original)?;
+                    // Exclusively: the Legacy original that is kept there is never overwritten (nor written through a link).
+                    match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+                        Ok(mut file) => std::io::Write::write_all(&mut file, original)?,
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
                 inner(&mut editor, nested, keys)?.add_file(file, new)?;
                 changed = true;

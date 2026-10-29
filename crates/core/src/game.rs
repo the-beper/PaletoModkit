@@ -76,6 +76,14 @@ impl Game {
         self.roots()?.mods_copy(&RelPath::parse(rel)?)
     }
 
+    /// Replaces the mods copy of a game data file (see [`Game::mods_copy`]) with `data`: one
+    /// journaled file replacement under the game lock, so the file is the old one or the new one,
+    /// and [`Error::Busy`] while another change to this game runs.
+    pub fn replace_mods_file(&self, rel: &str, data: &[u8]) -> Result<(), Error> {
+        use std::io::Write;
+        crate::txn::replace_one(&self.roots()?, &RelPath::parse(rel)?, "saving a file in the mods folder", |f| f.write_all(data))
+    }
+
     /// Keys for this game, extracted on first use and then cached.
     pub fn keys(&self) -> Result<Keys, Error> {
         let dir = data_dir();

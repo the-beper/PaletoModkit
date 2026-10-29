@@ -498,9 +498,9 @@ fn main() -> Result<()> {
             edits.extend(adds.iter().map(|(name, file)| Edit::Add { name, file, format }));
 
             if Path::new(&path).is_file() {
-                let file = editable_file(&path, cli.game.as_deref())?;
-                std::fs::write(&file, edit_textures(&std::fs::read(&file)?, &edits)?)?;
-                println!("saved {}", file.display());
+                let target = editable_file(&path, cli.game.as_deref())?;
+                target.write(&edit_textures(&std::fs::read(&target.file)?, &edits)?)?;
+                println!("saved {}", target.file.display());
             } else {
                 let target = editable(&path, cli.game.as_deref())?;
                 let keys = load_keys(cli.game.as_deref(), &target.disk)?;
@@ -1071,9 +1071,9 @@ fn read_any(path: &str, game: Option<&Path>) -> Result<Vec<u8>> {
 /// Saves a file on disk, or into the mods folder copy of its archive.
 fn write_any(path: &str, game: Option<&Path>, data: Vec<u8>) -> Result<()> {
     if Path::new(path).is_file() {
-        let file = editable_file(path, game)?;
-        std::fs::write(&file, data)?;
-        println!("saved {}", file.display());
+        let target = editable_file(path, game)?;
+        target.write(&data)?;
+        println!("saved {}", target.file.display());
         return Ok(());
     }
     let target = editable(path, game)?;
@@ -1182,16 +1182,34 @@ fn editable(path: &str, game: Option<&Path>) -> Result<ArchivePath> {
 
 /// A loose file to write: an original game data file is copied to the mods
 /// folder first, and the copy is written.
-fn editable_file(path: &str, game: Option<&Path>) -> Result<PathBuf> {
+struct Loose {
+    /// The file to read and show.
+    file: PathBuf,
+    /// For a mods copy: the game and the game-relative path it is a copy of. It is
+    /// saved by a journaled replacement under the game lock, not written in place.
+    copy_of: Option<(Game, String)>,
+}
+
+impl Loose {
+    fn write(&self, data: &[u8]) -> Result<()> {
+        match &self.copy_of {
+            Some((game, rel)) => Ok(game.replace_mods_file(rel, data)?),
+            None => Ok(std::fs::write(&self.file, data)?),
+        }
+    }
+}
+
+fn editable_file(path: &str, game: Option<&Path>) -> Result<Loose> {
     if let Some((game, rel)) = owner(Path::new(path), game)?
         && !rel.starts_with("mods")
         && game.routes_to_mods(&rel.to_string_lossy())
     {
-        let copy = game.mods_copy(&rel.to_string_lossy())?.with_context(|| format!("{path} not found"))?;
+        let rel = rel.to_string_lossy().into_owned();
+        let copy = game.mods_copy(&rel)?.with_context(|| format!("{path} not found"))?;
         println!("editing mods copy {}", copy.display());
-        return Ok(copy);
+        return Ok(Loose { file: copy, copy_of: Some((game, rel)) });
     }
-    Ok(PathBuf::from(path))
+    Ok(Loose { file: PathBuf::from(path), copy_of: None })
 }
 
 /// The game folder `path` is in, with the path inside it: the chosen one, one

@@ -74,13 +74,17 @@ pub(crate) enum Entry {
     Link(PathBuf),
 }
 
-/// Every name under `dir` (relative, '/' separated), links not followed.
+/// Every name under `dir` (relative, '/' separated), links not followed, except the tool's own
+/// `.paleto` folder at its top (the lock and the journals: not part of what a test compares).
 pub(crate) fn snapshot(dir: &Path) -> BTreeMap<String, Entry> {
     fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, Entry>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for e in entries.flatten() {
             let path = e.path();
             let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+            if rel == ".paleto" {
+                continue;
+            }
             let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
             if kind.is_symlink() {
                 out.insert(rel, Entry::Link(std::fs::read_link(&path).unwrap()));
@@ -110,13 +114,13 @@ pub(crate) fn assert_unchanged(before: &BTreeMap<String, Entry>, after: &BTreeMa
     assert!(diffs.is_empty(), "the folder changed: {diffs:?}");
 }
 
-/// Temporary names (`.paleto-tmp`, `.paleto-undo`, `.new`, `.partial`) under `dir`.
+/// Temporary names (`.paleto-*`, and the old `.paleto-tmp`, `.paleto-undo`, `.new`, `.partial`) under `dir`.
 pub(crate) fn leftovers(dir: &Path) -> Vec<String> {
     snapshot(dir)
         .into_keys()
         .filter(|rel| {
             let name = rel.rsplit('/').next().unwrap_or(rel);
-            name.contains(".paleto-tmp") || name.contains(".paleto-undo") || name.ends_with(".new") || name.ends_with(".partial")
+            name.starts_with(".paleto-") || name.contains(".paleto-tmp") || name.contains(".paleto-undo") || name.ends_with(".new") || name.ends_with(".partial")
         })
         .collect()
 }

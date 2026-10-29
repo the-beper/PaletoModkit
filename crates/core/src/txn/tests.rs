@@ -543,12 +543,12 @@ fn leftovers_lists_temporary_names_that_no_journal_accounts_for() {
 
 #[test]
 fn the_failure_message_says_nothing_was_installed_only_when_that_is_true() {
-    let clean = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: Vec::new() };
+    let clean = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: Vec::new(), journaled: true };
     assert_eq!(clean.to_string(), "package: boom (nothing was installed)");
-    let left = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: false, failures: vec!["/g/a.asi: gone (backup: /g/.paleto-1-0.old)".into()] };
+    let left = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: false, failures: vec!["/g/a.asi: gone (backup: /g/.paleto-1-0.old)".into()], journaled: true };
     let text = left.to_string();
     assert!(!text.contains("nothing was installed") && text.contains("/g/.paleto-1-0.old") && text.contains("journal"), "{text}");
-    let odd = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: vec!["x".into()] };
+    let odd = TxnFailure { cause: Error::Package("boom".into()), log: Vec::new(), undone: true, failures: vec!["x".into()], journaled: true };
     assert!(!odd.to_string().contains("nothing was installed"));
 }
 
@@ -685,4 +685,23 @@ fn many_files_in_one_folder_share_a_handle_and_can_be_released() {
     assert_eq!(std::fs::read(game.root.join("scripts/many/f299.asi")).unwrap(), b"file 299");
     assert_eq!(std::fs::read_dir(game.root.join("scripts/many")).unwrap().count(), 300);
     assert_clean(&game, "many");
+}
+
+#[test]
+fn a_replaced_file_keeps_its_permission_bits_and_a_new_file_gets_0644() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let game = fixture(dir.path(), true);
+    let mode = |p: &str| std::fs::metadata(game.root.join(p)).unwrap().permissions().mode() & 0o777;
+    std::fs::set_permissions(game.root.join("scripts/orig.asi"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(game.root.join("mods/x64/a.rpf"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let roots = game.roots().unwrap();
+    for (path, was) in [("scripts/orig.asi", 0o755), ("x64/a.rpf", 0o600)] {
+        replace_one(&roots, &rel(path), "test", |f| f.write_all(b"new")).unwrap();
+        let real = if path.starts_with("x64") { "mods/x64/a.rpf" } else { path };
+        assert_eq!((std::fs::read(game.root.join(real)).unwrap(), mode(real)), (b"new".to_vec(), was), "{path}");
+    }
+    replace_one(&roots, &rel("scripts/brand_new.asi"), "test", |f| f.write_all(b"x")).unwrap();
+    assert_eq!(mode("scripts/brand_new.asi"), 0o644);
+    assert_clean(&game, "modes");
 }

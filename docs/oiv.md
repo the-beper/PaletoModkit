@@ -26,6 +26,10 @@ Paleto Modkit follows OpenIV's package format 2.x (`<package version="2.x" targe
 
 A `<remove>` whose XPath matches nothing is not an error: the node was already gone. Other edits that find nothing to change are logged as warnings, and the installation goes on.
 
+## One install at a time
+
+An install holds the lock of the game for its whole run: a second change to the same game (another install, a snapshot, and so on) gets a "busy" message instead of mixing with it. Before a file is replaced or deleted, its old content is kept under a `.paleto-…` name beside it, and put back if the install fails. If a file cannot be put back, the error says so, names the file and its backup, and never says "nothing was installed". If the program is interrupted, those backups stay listed as leftovers; see [Troubleshooting](troubleshooting.md#one-change-at-a-time-and-interrupted-changes) for the `.paleto` folder and what happens at the next change.
+
 ## The installation log
 
 The installer ends with a log of every change (`add …`, `edit …`, `saved …`) and its warnings. Keep it in mind when a mod does not work: a warning usually means the package was made for another version of the game files.

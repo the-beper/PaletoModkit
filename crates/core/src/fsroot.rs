@@ -42,7 +42,7 @@ use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread::ThreadId;
@@ -136,6 +136,8 @@ struct LockSlot {
 pub struct LockGuard<'r> {
     roots: &'r GameRoots,
     txn: bool,
+    /// The first taking of the lock, not a re-entry of the thread that holds it.
+    outer: bool,
 }
 
 /// A destination found by [`GameRoots::dest`], not yet written.
@@ -625,12 +627,18 @@ impl GameRoots {
     }
 
     /// `.paleto/<names>` in the game folder, where the tool keeps its lock and
-    /// journals: made if `create`, `None` if it is not there. A link or a file
-    /// on the way is refused, so nothing is ever written through one.
+    /// journals (see [`GameRoots::owned_folder`]).
     pub(crate) fn tool_folder(&self, names: &[&str], create: bool) -> Result<Option<Dir>, Error> {
+        self.owned_folder(".paleto", names, create)
+    }
+
+    /// `<top>/<names>` in the game folder, a folder this tool keeps its own files in
+    /// (`.paleto`, `mods_disabled`): made if `create`, `None` if it is not there. A link
+    /// or a file on the way is refused, so nothing is ever written through one.
+    pub(crate) fn owned_folder(&self, top: &str, names: &[&str], create: bool) -> Result<Option<Dir>, Error> {
         let mut dir = self.game.dir.try_clone()?;
         let mut shown = self.game.shown.clone();
-        for name in std::iter::once(".paleto").chain(names.iter().copied()) {
+        for name in std::iter::once(top).chain(names.iter().copied()) {
             shown.push(name);
             let next = if create {
                 dir.open_or_make_dir(name)
@@ -660,13 +668,13 @@ impl GameRoots {
         if slot.depth > 0 {
             if slot.owner == Some(me) {
                 slot.depth += 1;
-                return Ok(LockGuard { roots: self, txn: false });
+                return Ok(LockGuard { roots: self, txn: false, outer: false });
             }
             return Err(Error::Busy(format!("{} (in this program)", slot.label)));
         }
         slot.file = Some(self.acquire(label)?);
         (slot.depth, slot.owner, slot.label, slot.txn) = (1, Some(me), label.to_string(), false);
-        Ok(LockGuard { roots: self, txn: false })
+        Ok(LockGuard { roots: self, txn: false, outer: true })
     }
 
     /// Opens and locks `.paleto/lock`; the file is never deleted.
@@ -712,13 +720,22 @@ impl GameRoots {
     /// last one that exists. A folder somebody else made meanwhile is used if
     /// it is a real folder.
     pub fn ensure_parent(&self, r: &mut Resolved) -> Result<(), Error> {
+        self.ensure_parent_noting(r, &mut |_, _| {})
+    }
+
+    /// [`GameRoots::ensure_parent`], telling `note` (the folder it is in and its name) of each
+    /// folder it made, as soon as it exists, so that the caller can remove them again.
+    pub fn ensure_parent_noting(&self, r: &mut Resolved, note: &mut dyn FnMut(&Dir, &str)) -> Result<(), Error> {
         if r.missing.is_empty() {
             return Ok(());
         }
         self.verify(r)?;
         while let Some(name) = r.missing.first().cloned() {
             let made = match r.parent.mkdir(&name) {
-                Ok(dir) => dir,
+                Ok(dir) => {
+                    note(&r.parent, &name);
+                    dir
+                }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match r.parent.kind(&name)? {
                     Some(Kind::Dir) => r.parent.open_dir(&name)?,
                     Some(Kind::Link) => return Err(unsafe_path(&r.path(), format!("\"{name}\" appeared as a link while it was being made"))),
@@ -827,8 +844,12 @@ impl GameRoots {
     /// The copy of a game data file in the mods folder, made from the original
     /// when missing (its path, or `None` if neither exists). A copy that is a
     /// link, or shares its data with another name (a hard link, the original),
-    /// becomes a file of its own, as edits rewrite it.
+    /// becomes a file of its own, as edits rewrite it. The copy is made under the game
+    /// lock (so [`Error::Busy`] while another change runs) as a journaled one-file
+    /// transaction. Not for use inside an open [`crate::txn::Txn`] of the same handle.
     pub fn mods_copy(&self, rel: &RelPath) -> Result<Option<PathBuf>, Error> {
+        const LABEL: &str = "copying a game file to the mods folder";
+        let _lock = crate::txn::guard(self, LABEL)?;
         let mut dest = self.mods_dest(rel)?;
         let mut src = self.original(rel)?;
         let from = match &dest.existing {
@@ -847,7 +868,7 @@ impl GameRoots {
         };
         let Some(mut from) = from.or(src.take()) else { return Ok(None) };
         // On btrfs/XFS this is a reflink: instant and takes no extra space.
-        self.replace(&mut dest, |out| {
+        crate::txn::replace_resolved(self, &mut dest, LABEL, |out| {
             io::copy(&mut from, out)?;
             out.set_permissions(from.metadata()?.permissions())
         })?;
@@ -868,6 +889,11 @@ fn holder_of(file: &File) -> String {
 }
 
 impl LockGuard<'_> {
+    /// Whether this is the first taking of the lock (nothing else of this program is in the middle of a change).
+    pub(crate) fn is_outer(&self) -> bool {
+        self.outer
+    }
+
     /// Marks the lock as taken for a transaction: only one at a time per `GameRoots`.
     pub(crate) fn claim_txn(mut self) -> Result<Self, Error> {
         let mut slot = self.roots.lock.lock().unwrap_or_else(PoisonError::into_inner);
@@ -899,10 +925,18 @@ impl Drop for LockGuard<'_> {
 
 /// Writes `name` of `dir` whole through a new file of an unpredictable name,
 /// renamed over it. The temporary is removed on failure; it is the only name
-/// this ever removes, and it made it itself.
+/// this ever removes, and it made it itself. A file that is replaced keeps its permission bits.
 pub fn replace_file(dir: &Dir, name: &str, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    let mode = dir.mode_of(name)?;
     let (mut file, tmp) = dir.create_unique()?;
-    let result = write(&mut file).and_then(|()| file.sync_all()).and_then(|()| dir.rename(&tmp, name, true));
+    let result = (|| {
+        if let Some(mode) = mode {
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        write(&mut file)
+    })()
+    .and_then(|()| file.sync_all())
+    .and_then(|()| dir.rename(&tmp, name, true));
     if result.is_err() {
         let _ = dir.unlink(&tmp);
     } else {

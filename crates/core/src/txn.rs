@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -54,6 +54,9 @@ pub struct TxnFailure {
     pub undone: bool,
     /// Each file that could not be restored, with where its backup is.
     pub failures: Vec<String>,
+    /// A journal of the operation was kept, so the next run can finish the recovery (the
+    /// operations that do not yet run as a transaction have none: what is left stays as it is).
+    pub journaled: bool,
 }
 
 impl fmt::Display for TxnFailure {
@@ -61,6 +64,8 @@ impl fmt::Display for TxnFailure {
         write!(f, "{}", self.cause)?;
         if self.undone && self.failures.is_empty() {
             write!(f, " (nothing was installed)")
+        } else if !self.journaled {
+            write!(f, ": the changes could not be fully undone ({}); the files named, with the backups next to them, were left as they are", self.failures.join("; "))
         } else {
             write!(f, ": the changes could not be fully undone ({}); the backups and the journal in .paleto/journal were kept, and the next run offers to finish the recovery", self.failures.join("; "))
         }
@@ -393,7 +398,7 @@ fn finish_rollback(jdir: &Dir, jname: &str, rolled: &Rolled) {
 }
 
 fn txn_error(cause: Error, log: Vec<String>, rolled: &Rolled) -> Error {
-    Error::Txn(Box::new(TxnFailure { cause, log, undone: rolled.failures.is_empty(), failures: rolled.failures.clone() }))
+    Error::Txn(Box::new(TxnFailure { cause, log, undone: rolled.failures.is_empty(), failures: rolled.failures.clone(), journaled: true }))
 }
 
 // ---- recovery ----
@@ -459,6 +464,8 @@ fn journal_root(kind: RootKind) -> &'static str {
 /// rollback could not finish earlier (otherwise they are only reported).
 fn recover_all(roots: &GameRoots, jdir: &Dir, retry_stuck: bool) -> Result<Report, Error> {
     let mut rep = Report::default();
+    // An interrupted snapshot restore may have left the mods folder aside: put it back before anything looks at it.
+    crate::snapshots::recover_restores(roots, jdir, &mut rep);
     for (name, parsed) in scan(jdir)? {
         if dead() {
             rep.failures.push("interrupted again while recovering".into());
@@ -548,7 +555,7 @@ pub fn pending(g: &Game) -> Vec<Pending> {
     }
     let Ok(Some(jdir)) = roots.tool_folder(&["journal"], false) else { return Vec::new() };
     let Ok(found) = scan(&jdir) else { return Vec::new() };
-    let mut out = Vec::new();
+    let mut out = crate::snapshots::pending_restores(&roots, &jdir);
     for (name, parsed) in found {
         match parsed {
             Ok(j) if j.state() == State::Done => {}
@@ -588,6 +595,7 @@ pub fn leftovers(g: &Game) -> Vec<PathBuf> {
         && let Ok(found) = scan(&jdir)
     {
         ids.extend(found.into_iter().filter_map(|(_, j)| j.ok().map(|j| format!(".paleto-{}-", j.txn))));
+        ids.extend(crate::snapshots::restore_ids(&jdir).into_iter().map(|id| format!(".paleto-{id}-")));
     }
     let mut out = Vec::new();
     let mut stack = vec![(roots.game.shown.clone(), 0usize)];
@@ -608,7 +616,9 @@ pub fn leftovers(g: &Game) -> Vec<PathBuf> {
             let top = dir == roots.game.shown;
             let skip = top && (name == ".paleto" || name.eq_ignore_ascii_case("x64") || name.eq_ignore_ascii_case("update"));
             if kind.is_dir() && !skip && depth < 64 {
-                stack.push((entry.path(), depth + 1));
+                // Snapshots are whole copies of the mods folder: only the names in `mods_snapshots` are looked at.
+                let depth = if top && name == "mods_snapshots" { 64 } else { depth + 1 };
+                stack.push((entry.path(), depth));
             }
         }
     }
@@ -622,6 +632,37 @@ pub fn replace_one(roots: &GameRoots, path: &RelPath, label: &str, write: impl F
     let mut dest = roots.dest(path)?;
     txn.stage(&mut dest, write)?;
     txn.commit(Vec::new()).map(drop)
+}
+
+/// [`replace_one`] for a destination already resolved (to a place [`GameRoots::dest`] would not
+/// choose, such as the mods copy of a game file). Begins the transaction first and, as a failure
+/// leaves nothing changed, `dest` may be looked at again after an error.
+pub fn replace_resolved(roots: &GameRoots, dest: &mut Resolved, label: &str, write: impl FnOnce(&mut File) -> io::Result<()>) -> Result<(), Error> {
+    let mut txn = Txn::begin(roots, label)?;
+    txn.stage(dest, write)?;
+    txn.commit(Vec::new()).map(drop)
+}
+
+/// Takes the lock of the game for a change that is not a transaction (a snapshot, a folder
+/// moved aside, a file made by hand), as [`Txn::begin`] does for one, and first deals with
+/// what an interrupted change left: undone or finished, so the new change starts from a
+/// whole state. [`Error::Busy`] if another change is running; [`Error::RecoveryNeeded`] if
+/// an earlier one could not be undone. Taken again by the thread that holds it, it only
+/// counts (and recovers nothing: a change of this program may be half way).
+pub fn guard<'r>(roots: &'r GameRoots, label: &str) -> Result<LockGuard<'r>, Error> {
+    let lock = roots.lock(label)?;
+    if lock.is_outer()
+        && let Some(jdir) = roots.tool_folder(&["journal"], false)?
+    {
+        let report = recover_all(roots, &jdir, false)?;
+        for line in report.log.iter().chain(&report.failures) {
+            eprintln!("paleto: {line}");
+        }
+        if !report.failures.is_empty() {
+            return Err(recovery_needed(&report.failures));
+        }
+    }
+    Ok(lock)
 }
 
 // ---- the transaction ----
@@ -824,6 +865,13 @@ impl<'r> Txn<'r> {
         let i = self.add_op(op, &dest.parent)?;
         let (tmp, bak) = (staged_name(&self.id, i), backup_name(&self.id, i));
         let mut file = dest.parent.create_excl(&tmp)?;
+        // A replacement keeps the permission bits of the file it replaces (an executable stays one);
+        // a new file, or one that replaces a link, gets the usual 0644.
+        let perms = match &dest.existing {
+            Some(Existing::File(_)) => dest.parent.mode_of(&dest.name)?.unwrap_or(0o644),
+            _ => 0o644,
+        };
+        file.set_permissions(std::fs::Permissions::from_mode(perms))?;
         if mode == Mode::Link
             && let Err(e) = dest.parent.link(&dest.name, &bak)
         {
