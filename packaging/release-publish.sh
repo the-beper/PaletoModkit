@@ -58,8 +58,10 @@ now=$(remote_tag "$TAG")
 [ "$now" = "$COMMIT" ] || die 5 "the tag $TAG is ${now:-gone} on the remote, this run built $COMMIT"
 release_state "$TMP/state"
 
-# The signing job found $TAG already on gh-pages for this commit and signed nothing.
+# The signing job found $TAG already on gh-pages for this commit and signed nothing. The record of a skip is made by jobs that
+# read untrusted data: gh-pages, read from the remote now, must say it.
 if [ "$(kv_get "$S" skip)" = 1 ]; then
+    [ "$PG_TAG" = "$TAG" ] && [ "$PG_COMMIT" = "$COMMIT" ] || die 5 "the signing job skipped $TAG, but gh-pages has ${PG_TAG:-no version} at ${PG_COMMIT:-an unknown commit}, not $TAG at $COMMIT: nothing was published"
     [ "$MODE" = release ] || { echo "$TAG is already on gh-pages: nothing to do"; exit 0; }
     pub_id=$(awk -F '\t' -v t="$TAG" '$2 == t && $3 == "false" { print $1 }' "$TMP/state/releases.tsv")
     [ -n "$pub_id" ] || die 5 "$TAG is on gh-pages but the release is not published: Pages is ahead of the release (docs/release.md)"

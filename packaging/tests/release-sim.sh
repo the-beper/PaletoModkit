@@ -216,6 +216,8 @@ job_sign() {
     run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --work "$rt/prepwork" --out "$d/prepared"
     rc=$RC
+    # PREPARED_HOOK DIR: a function that edits the output of --prepare, as a compromised prepare job would
+    if [ "$rc" = 0 ] && [ -n "${PREPARED_HOOK:-}" ]; then "$PREPARED_HOOK" "$d/prepared"; fi
     if [ "$rc" = 0 ]; then
         # shellcheck disable=SC2086
         run "$d/sign-check.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --check-prepared $sign_args --manifest "$m" --in "$d/prepared" --work "$rt/signwork" $csite --check-remote
@@ -937,6 +939,46 @@ sc_publish_flatpak() {
     assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
     assert_eq "recorded sums are the release's" "$sums" "$(kv "$LIVE/site/release.txt" sums_sha256)"
     assert_eq "the release was not touched" "$snapshot_stub" "$(cd "$GH_STUB_DIR" && find . -type f -not -name log | LC_ALL=C sort | xargs sha256sum)"
+}
+
+# rollback_pages: gh-pages is its previous state again (the version before the last release), the site follows
+rollback_pages() {
+    git -C "$LIVE/origin.git" update-ref refs/heads/gh-pages "$(git -C "$LIVE/origin.git" rev-parse gh-pages-previous)"
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    rm -rf "$LIVE/site"
+    mkdir -p "$LIVE/site"
+    git -C "$LIVE/origin.git" archive refs/heads/gh-pages | tar -x -C "$LIVE/site"
+}
+
+# The record of a skip is made by jobs that read untrusted data. With gh-pages not at the tag, publish-flatpak would say "nothing
+# to do" and end green: both the signing job (--check-prepared) and the publish job check the record against gh-pages.
+forge_skip() { sed -i 's/^skip=.*/skip=1/' "$1/flatpak-prepared.txt"; }
+sc_forged_skip() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_rc "release" 0
+    rollback_pages
+    pipeline 2 v1.6.0 publish-flatpak workflow_dispatch sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/2
+    assert_eq "skip of the honest run" 0 "$(kv "$d/signed/flatpak-signed.txt" skip)"
+    # the publish job: a record of a skip that fits its pin
+    sed -i 's/^skip=.*/skip=1/' "$d/signed/flatpak-signed.txt"
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
+    snapshot > "$SIM/snap.before"
+    job_publish 2 publish-flatpak
+    assert_rc "publish of a forged skip" 5
+    assert_log "$d/publish.log" "nothing was published"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "something was written"
+    assert_eq "gh-pages tag" v1.5.1 "$(kv "$LIVE/site/release.txt" tag)"
+    # the signing job: the description of the preparation says skip, gh-pages does not
+    PREPARED_HOOK=forge_skip
+    job_sign 2
+    PREPARED_HOOK=
+    assert_rc "check of a forged skip" 5
+    assert_log "$d/sign.log" "gh-pages has"
 }
 
 sc_sign_fresh_and_verify() {
@@ -1742,7 +1784,7 @@ empty_pin identity_change prerelease main_moved tag_not_on_main build_failure co
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
 pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
-pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins"
+pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins forged_skip"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 
 FAILFILE=$SIM/fails

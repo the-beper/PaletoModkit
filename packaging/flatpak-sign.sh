@@ -330,6 +330,9 @@ check_prepared() {
     mkdir -p "$WORK"
     cp "$IN/flatpak-prepared.txt" "$WORK/prepared.txt"
     if [ "$SKIP" = 1 ]; then
+        # The preparation says the tag is published: gh-pages, as this job fetched it, must say it too.
+        site_state
+        [ "$MODE" = site ] && [ "$PG_TAG" = "$TAG" ] && [ "$PG_COMMIT" = "$COMMIT" ] || die 5 "the preparation says $TAG is on gh-pages for this commit, but gh-pages has ${PG_TAG:-no version} at ${PG_COMMIT:-an unknown commit}"
         echo "nothing to sign"
         return 0
     fi
