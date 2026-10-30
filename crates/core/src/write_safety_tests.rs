@@ -1823,3 +1823,56 @@ fn the_folders_of_a_copy_are_private_while_it_is_filled() {
     crate::snapshots::DURING_COPY.with(|h| h.take());
     assert_eq!(seen.get(), Some((0o700, 0o700)), "a folder was open to the group and others while it was filled");
 }
+
+// ---- round 3 of the review of the snapshot copy ----
+
+/// Whether the game's own `x64` is still somewhere: where it was, or at the name of the folder being filled, or in it.
+fn x64_survives(game: &Game, originals: &Tree) -> bool {
+    let news: Vec<PathBuf> = std::fs::read_dir(&game.root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-mods.new")).map(|e| e.path()).collect();
+    snapshot(&game.root.join("x64")) == *originals || news.iter().any(|n| snapshot(n) == *originals || snapshot(&n.join("x64")) == *originals)
+}
+
+/// A restore that finds the game's `x64` in the place of what it made (`inside`: in it, as its `x64`), and is made to crash
+/// at the `k`-th call of `point`, for every `k`: whatever the recovery does, the `x64` survives and the old mods folder is
+/// as it was. A folder moved into the one being filled is only known by the `kept` record, so there the `x64` must survive
+/// only where the crash left that record. Gives whether a journal with it was ever left behind.
+fn kept_folder_survives_crashes(point: Point, inside: bool) -> bool {
+    let mut left_kept = false;
+    for k in 1..400 {
+        let dir = tempfile::tempdir().unwrap();
+        let (game, snap) = restore_setup(dir.path());
+        let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+        let root = game.root.clone();
+        when_copy_reaches_x64(move |_| {
+            let at = if inside { incoming(&root).join("x64") } else { incoming(&root) };
+            std::fs::rename(&at, at.with_extension("aside")).unwrap();
+            std::fs::rename(root.join("x64"), &at).unwrap();
+        });
+        faults::arm_at(point, k, Fault::Crash);
+        let _ = crate::snapshots::restore(&game, &snap.id);
+        let fired = faults::disarm();
+        crate::snapshots::DURING_COPY.with(|h| h.take());
+        let has_kept = journals(&game).iter().any(|n| std::fs::read_to_string(game.root.join(".paleto/journal").join(n)).unwrap_or_default().lines().any(|l| l == "kept"));
+        left_kept |= has_kept;
+        // Before the `made` record the identity of the folder is not known: that case stays as agreed (a follow-up).
+        let has_made = journals(&game).iter().any(|n| std::fs::read_to_string(game.root.join(".paleto/journal").join(n)).unwrap_or_default().lines().any(|l| l.starts_with("made ")));
+        let report = crate::txn::recover(&game).unwrap();
+        assert!(report.failures.is_empty(), "{point:?} {k}: {report:?}");
+        assert!(!(has_kept || (has_made && !inside)) || x64_survives(&game, &originals), "{point:?} {k}: the game's x64 was deleted by a recovery");
+        assert_unchanged(&mods, &mods_tree(&game));
+        assert!(crate::txn::pending(&game).is_empty(), "{point:?} {k}");
+        if !fired {
+            return left_kept;
+        }
+    }
+    panic!("more than 400 fault points")
+}
+
+#[test]
+fn a_crash_around_the_kept_record_never_lets_recovery_remove_the_foreign_folder() {
+    // The folder at the incoming name is not the one that was made: its identity says so, whether or not `kept` was written.
+    kept_folder_survives_crashes(Point::Journal, false);
+    kept_folder_survives_crashes(Point::SyncFile, false);
+    // Something moved into the incoming folder: only the `kept` record tells, so a crash just after it must leave the folder alone.
+    assert!(kept_folder_survives_crashes(Point::SyncFile, true), "no crash left the kept record behind");
+}

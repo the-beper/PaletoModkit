@@ -15,7 +15,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -215,8 +215,8 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
             // (A name that cannot be looked at counts as there: nothing is removed on a guess.)
             let kept = (is_replaced(&e) || !ours) && !matches!(game.kind(&incoming), Ok(None));
             let place = roots.game.shown.join(&incoming).display().to_string();
-            if kept && let Err(why) = forget_incoming(&jdir, &jname) {
-                // The journal would still send a later recovery to that name: nothing is recovered now either.
+            // The journal says so first, so that no recovery, now or at a later change, removes what is there (see `Restore::kept`).
+            if kept && let Err(why) = note(&mut journal, "kept\n") {
                 return Err(Error::Package(format!("{e}; {place} was left in place, but the restore journal could not be updated ({why}), so nothing was recovered: look at that folder, then run `paleto recover`")));
             }
             let mut rep = Report::default();
@@ -233,19 +233,6 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
     }
 }
 
-/// Takes the `incoming` and `made` records out of a restore journal (its whole lines only), so that no recovery,
-/// now or at a later change, removes what is at the incoming name, which is not only what the restore made.
-fn forget_incoming(jdir: &Dir, jname: &str) -> io::Result<()> {
-    let mut text = String::new();
-    jdir.open_read(jname)?.take(1 << 16).read_to_string(&mut text)?;
-    let whole = text.rfind('\n').map_or("", |end| &text[..=end]);
-    let rest: String = whole.lines().filter(|l| !l.starts_with("incoming ") && !l.starts_with("made ")).map(|l| format!("{l}\n")).collect();
-    let file = jdir.open_rw(jname)?;
-    FileExt::write_all_at(&file, rest.as_bytes(), 0)?;
-    file.set_len(rest.len() as u64)?;
-    file.sync_data()
-}
-
 fn incoming_name(rid: &str) -> String {
     format!(".paleto-{rid}-mods.new")
 }
@@ -260,7 +247,9 @@ fn unix_now() -> u64 {
 
 /// Appends a record to the restore journal and flushes it: it is written before the effect it announces.
 fn note(journal: &mut File, line: &str) -> io::Result<()> {
+    fault!(Journal);
     journal.write_all(line.as_bytes())?;
+    fault!(SyncFile);
     journal.sync_data()
 }
 
@@ -341,6 +330,10 @@ struct Restore {
     made: Option<(u64, u64)>,
     outgoing: Option<String>,
     swapped: bool,
+    /// What is at the incoming name is not only what the run made (somebody put something of their own in its place or in it):
+    /// recovery leaves it alone. A reader from before this record existed finds it unreadable and, as for any damaged journal,
+    /// deletes nothing on its word and reports it.
+    kept: bool,
 }
 
 /// Parses a restore journal; `Ok(None)` if nothing was ever recorded in it. Only whole lines count (a torn last line is ignored)
@@ -362,6 +355,7 @@ fn parse_restore(text: &str) -> Result<Option<Restore>, String> {
             ["made", dev, ino] => r.made = Some((dev.parse().map_err(|_| "bad record")?, ino.parse().map_err(|_| "bad record")?)),
             ["outgoing", name] if r.id.len() == 16 && *name == outgoing_name(&r.id) => r.outgoing = Some(name.to_string()),
             ["swapped"] => r.swapped = true,
+            ["kept"] => r.kept = true,
             _ => return Err(format!("unreadable record {line:?}")),
         }
     }
@@ -430,9 +424,17 @@ fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep:
         return rep.failures.push(format!("the operation \"{label}\" cannot be recovered: the folders cannot be looked at; journal {jname} kept"));
     };
     let mods_is_new = mods_here && r.made.is_some_and(|m| game.open_dir("mods").and_then(|d| d.identity()).is_ok_and(|id| id == m));
+    // What is at the incoming name is ours to remove only if it is the folder the run made (by identity, when that was recorded)
+    // and nothing was found moved into it. Whatever cannot be told is left alone.
+    let left_alone = r.incoming.as_deref().filter(|n| {
+        matches!(game.kind(n), Ok(Some(Kind::Dir)) | Err(_)) && (r.kept || r.made.is_some_and(|m| !game.open_dir(n).and_then(|d| d.identity()).is_ok_and(|id| id == m)))
+    });
     // Our own unique names only, and only if they are folders.
     let remove = |n: &Option<String>| -> Result<(), String> {
         let Some(n) = n else { return Ok(()) };
+        if left_alone == Some(n.as_str()) {
+            return Ok(());
+        }
         match game.kind(n) {
             Ok(None) => Ok(()),
             Ok(Some(Kind::Dir)) => remove_tree(game, n, 0).map_err(|e| format!("{} could not be removed: {e}", shown(n))),
@@ -455,6 +457,9 @@ fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep:
     } else {
         ("undid the restore that was interrupted: the mods folder was not touched", remove(&r.incoming))
     };
+    if let (Ok(()), Some(n)) = (&result, left_alone) {
+        rep.log.push(format!("left {} alone: it is not only what the restore made", shown(n)));
+    }
     match result {
         Ok(()) => {
             let _ = jdir.unlink(jname);
