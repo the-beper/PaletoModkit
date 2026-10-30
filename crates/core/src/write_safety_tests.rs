@@ -1407,7 +1407,8 @@ fn a_restore_never_writes_through_a_folder_swapped_for_a_link_to_the_originals()
     assert_unchanged(&originals, &snapshot(&game.root.join("x64")));
     assert!(result.is_err(), "the restore went on over a folder that was swapped");
     assert_unchanged(&mods, &mods_tree(&game));
-    assert_nothing_left(&game);
+    // What was found moved into the new folder is kept, with the folder, for the user to look at.
+    assert!(crate::txn::pending(&game).is_empty());
 }
 
 #[test]
@@ -1682,4 +1683,88 @@ fn an_extraction_into_a_name_with_two_spellings_warns() {
     let (_, log) = crate::vfs::write_into(&game.root.join("scripts/FOO"), "extracting", |o| o.write("a.txt", b"x").map(drop)).unwrap();
     assert_eq!(std::fs::read(game.root.join("scripts/Foo/a.txt")).unwrap(), b"x");
     assert_eq!(warnings(&log).len(), 1, "{log:?}");
+}
+
+// ---- follow-ups of the review of the snapshot copy ----
+
+#[test]
+fn a_foreign_folder_at_the_incoming_name_is_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+    let root = game.root.clone();
+    // The game's own `x64` is moved onto the name of the folder being filled.
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root);
+        std::fs::rename(&at, at.with_extension("aside")).unwrap();
+        std::fs::rename(root.join("x64"), &at).unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("left in place"), "{err}");
+    assert_unchanged(&originals, &snapshot(&incoming(&game.root)));
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert!(crate::txn::pending(&game).is_empty());
+}
+
+#[test]
+fn a_foreign_folder_moved_into_the_incoming_one_is_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+    let root = game.root.clone();
+    // The game's own `x64` takes the place of the subfolder being filled.
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root).join("x64");
+        std::fs::rename(&at, at.with_extension("aside")).unwrap();
+        std::fs::rename(root.join("x64"), &at).unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert!(result.is_err());
+    assert_unchanged(&originals, &snapshot(&incoming(&game.root).join("x64")));
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert!(crate::txn::pending(&game).is_empty());
+}
+
+#[test]
+fn a_snapshot_of_a_mods_link_into_the_games_data_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    symlink("x64", game.root.join("mods")).unwrap();
+    assert!(crate::snapshots::create(&game, "x").is_err(), "the game's own x64 was copied through a mods link");
+    assert!(crate::snapshots::list(&game).is_empty());
+    assert_nothing_left(&game);
+}
+
+#[test]
+fn copied_folders_keep_the_permissions_of_their_source() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode_of = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().unwrap();
+    let (game, _) = restore_setup(dir.path());
+    std::fs::set_permissions(game.root.join("mods/sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(game.root.join("mods/x64"), std::fs::Permissions::from_mode(0o750)).unwrap();
+    let snap = crate::snapshots::create(&game, "modes").unwrap();
+    assert_eq!((mode_of(snap.dir.join("mods/sub")), mode_of(snap.dir.join("mods/x64"))), (0o700, 0o750));
+    std::fs::set_permissions(game.root.join("mods/sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::snapshots::restore(&game, &snap.id).unwrap();
+    assert_eq!((mode_of(game.root.join("mods/sub")), mode_of(game.root.join("mods/x64"))), (0o700, 0o750));
+}
+
+#[test]
+fn a_mods_link_planted_to_the_incoming_folder_does_not_make_recovery_remove_the_old_mods() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    // The restore stops between its two renames: `mods` is only under its aside name.
+    faults::arm_at(Point::Rename, 2, Fault::Crash);
+    assert!(crate::snapshots::restore(&game, &snap.id).is_err());
+    assert!(faults::disarm());
+    let named = |end: &str| std::fs::read_dir(&game.root).unwrap().flatten().map(|e| e.file_name()).find(|n| n.to_string_lossy().ends_with(end)).unwrap();
+    let (new, old) = (named("-mods.new"), named("-mods.old"));
+    assert!(!game.root.join("mods").exists());
+    symlink(&new, game.root.join("mods")).unwrap();
+    let _ = crate::txn::recover(&game).unwrap();
+    assert_eq!(std::fs::read(game.root.join(&old).join("x64/m.rpf")).unwrap(), b"current", "the old mods folder was removed");
 }

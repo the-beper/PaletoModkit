@@ -576,6 +576,19 @@ impl Dir {
         std::fs::canonicalize(format!("/proc/self/fd/{}", self.fd()))
     }
 
+    /// The permission bits (`0o777`) of the directory itself.
+    pub fn mode(&self) -> io::Result<u32> {
+        let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+        retry(|| cvt(unsafe { libc::fstat(self.fd(), &mut st) }))?;
+        Ok(st.st_mode & 0o777)
+    }
+
+    /// Sets the permission bits of the directory itself.
+    pub fn set_mode(&self, mode: u32) -> io::Result<()> {
+        // SAFETY: the descriptor of this open folder is valid for the call.
+        retry(|| cvt(unsafe { libc::fchmod(self.fd(), mode & 0o777) })).map(drop)
+    }
+
     /// Device and inode of the directory itself.
     pub fn identity(&self) -> io::Result<(u64, u64)> {
         let mut st = unsafe { std::mem::zeroed::<libc::stat>() };

@@ -12,13 +12,14 @@
 //! (`<id>.restore`), so that one interrupted between them is put right at the next
 //! change (see [`recover_restores`]). Only names a run made itself are ever deleted.
 
+use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::fsroot::{Dir, GameRoots, Kind, random};
+use crate::fsroot::{Dir, GameRoots, Kind, RootKind, random};
 use crate::txn::{self, Pending, PendingState, Report};
 use crate::{Error, Game};
 
@@ -113,9 +114,10 @@ pub fn create(game: &Game, label: &str) -> Result<Snapshot, Error> {
     // Built under a name of its own, so a folder that is somebody else's is never touched.
     let (partial, temp) = snaps.mkdir_unique(".partial")?;
     let label = label.trim();
-    // `mods` may be a link the user made (to another drive); everything below it is entered without following links.
+    // The mods folder as the resolver checked it (it may be a link the user made, to another drive, but not to the
+    // game's data or the like); everything below it is entered without following links.
     let built = (|| {
-        let (from, to) = (roots.game.dir.open_dir_following("mods")?, partial.mkdir("mods")?);
+        let (from, to) = (roots.anchor_root(RootKind::Mods)?.dir.try_clone()?, partial.mkdir("mods")?);
         copy_dir(&from, &to, &mods, 0)?;
         let mut file = partial.create_excl(LABEL)?;
         file.write_all(label.as_bytes())?;
@@ -178,7 +180,8 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
         let _ = jdir.unlink(&jname);
         return Err(e.into());
     }
-    match swap(&roots, &snapshot, &mut journal, &incoming, &outgoing) {
+    let mut made = None;
+    match swap(&roots, &snapshot, &mut journal, &incoming, &outgoing, &mut made) {
         Ok(made) => {
             // The two renames must be on disk before the old folder goes: a removal that outran them could, after a crash, leave neither
             // folder. If they cannot be flushed, nothing is removed and the next change finishes the restore (its recovery flushes again first).
@@ -204,10 +207,17 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
             Ok(())
         }
         Err(e) => {
-            // The same code that recovers after a crash puts the old folder back.
+            // The same code that recovers after a crash puts the old folder back. What is at the incoming name is removed
+            // only if it is the folder this run made and nothing was found moved into it: else somebody has put
+            // something of their own there (the game's `x64`, say), which is not ours to delete.
+            let game = &roots.game.dir;
+            let ours = made.as_ref().is_some_and(|m| game.names_dir(&incoming, m).unwrap_or(false));
+            let kept = (is_replaced(&e) || !ours) && game.kind(&incoming).ok().flatten().is_some();
             let mut rep = Report::default();
-            recover_restores(&roots, &jdir, &mut rep);
-            if rep.failures.is_empty() {
+            recover_restores_keeping(&roots, &jdir, &mut rep, kept.then_some(incoming.as_str()));
+            if kept {
+                Err(Error::Package(format!("{e}; {} was left in place, because it is not only what this restore made. Look at it before removing it", roots.game.shown.join(&incoming).display())))
+            } else if rep.failures.is_empty() {
                 Err(e)
             } else {
                 Err(Error::Package(format!("{e}; the mods folder could not be put back as it was: {}", rep.failures.join("; "))))
@@ -241,11 +251,32 @@ fn remove_old(game: &Dir, outgoing: &str) -> io::Result<()> {
     }
 }
 
-/// The copy and the two renames, each announced in the journal first. Gives the folder that was made.
-fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &str, outgoing: &str) -> Result<Dir, Error> {
+/// A folder this copy made was found replaced or moved: somebody is working against it, so what is at its name is left alone.
+#[derive(Debug)]
+struct Replaced(String);
+
+impl fmt::Display for Replaced {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Replaced {}
+
+fn replaced(what: String) -> Error {
+    Error::Io(io::Error::other(Replaced(what)))
+}
+
+fn is_replaced(e: &Error) -> bool {
+    matches!(e, Error::Io(io) if io.get_ref().is_some_and(|inner| inner.is::<Replaced>()))
+}
+
+/// The copy and the two renames, each announced in the journal first. Gives the folder that was made (also in `made_slot`, for the error path).
+fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &str, outgoing: &str, made_slot: &mut Option<Dir>) -> Result<Dir, Error> {
     let game = &roots.game.dir;
     note(journal, &format!("incoming {incoming}\n"))?;
     let made = game.mkdir(incoming)?;
+    *made_slot = made.try_clone().ok();
     // The snapshot's copy of `mods` is entered one folder at a time, never through a link.
     let from = snapshots_folder(roots, false)?.ok_or_else(|| Error::Package(format!("no snapshot {}", snapshot.id)))?.open_dir(&snapshot.id)?.open_dir("mods")?;
     // Every file and folder is on disk when this returns, and so is the new folder's name: recovery takes `made` as complete.
@@ -255,7 +286,7 @@ fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &s
     note(journal, &format!("made {dev} {ino}\n"))?;
     // The renames work by name: it must still lead to the folder that was filled.
     if !game.names_dir(incoming, &made)? {
-        return Err(Error::Package(format!("{} was replaced while it was being filled: nothing was restored", roots.game.shown.join(incoming).display())));
+        return Err(replaced(format!("{} was replaced while it was being filled: nothing was restored", roots.game.shown.join(incoming).display())));
     }
     if game.kind("mods")?.is_some() {
         note(journal, &format!("outgoing {outgoing}\n"))?;
@@ -354,19 +385,24 @@ pub(crate) fn pending_restores(roots: &GameRoots, jdir: &Dir) -> Vec<Pending> {
 /// and then the old one is removed; otherwise the old one is put back (renamed, never copied) and the
 /// incoming one removed. What cannot be decided is kept, with its journal, and reported in `rep`.
 pub(crate) fn recover_restores(roots: &GameRoots, jdir: &Dir, rep: &mut Report) {
+    recover_restores_keeping(roots, jdir, rep, None);
+}
+
+/// [`recover_restores`], leaving alone what is at the name `keep` (an incoming folder that is not only what the run made).
+fn recover_restores_keeping(roots: &GameRoots, jdir: &Dir, rep: &mut Report, keep: Option<&str>) {
     for name in restore_journals(jdir) {
         match read_restore(jdir, &name) {
             Ok(None) => {
                 // Nothing was ever recorded in it, so nothing was changed for it.
                 let _ = jdir.unlink(&name);
             }
-            Ok(Some(r)) => recover_restore(roots, jdir, &name, &r, rep),
+            Ok(Some(r)) => recover_restore(roots, jdir, &name, &r, rep, keep),
             Err(why) => rep.failures.push(format!("the restore journal {name} is damaged ({why}); nothing was deleted on its word, its `.paleto-*` folders are listed by `leftovers`")),
         }
     }
 }
 
-fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep: &mut Report) {
+fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep: &mut Report, keep: Option<&str>) {
     let game = &roots.game.dir;
     let shown = |n: &str| roots.game.shown.join(n).display().to_string();
     let label = format!("restoring snapshot {}", r.snapshot);
@@ -377,10 +413,13 @@ fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep:
     let (Ok(_), Ok(out_here), Ok(mods_here)) = (here(&r.incoming), here(&r.outgoing), game.kind("mods").map(|k| k.is_some())) else {
         return rep.failures.push(format!("the operation \"{label}\" cannot be recovered: the folders cannot be looked at; journal {jname} kept"));
     };
-    let mods_is_new = mods_here && r.made.is_some_and(|m| game.open_dir_following("mods").and_then(|d| d.identity()).is_ok_and(|id| id == m));
+    let mods_is_new = mods_here && r.made.is_some_and(|m| game.open_dir("mods").and_then(|d| d.identity()).is_ok_and(|id| id == m));
     // Our own unique names only, and only if they are folders.
     let remove = |n: &Option<String>| -> Result<(), String> {
         let Some(n) = n else { return Ok(()) };
+        if keep == Some(n.as_str()) {
+            return Ok(());
+        }
         match game.kind(n) {
             Ok(None) => Ok(()),
             Ok(Some(Kind::Dir)) => remove_tree(game, n, 0).map_err(|e| format!("{} could not be removed: {e}", shown(n))),
@@ -480,7 +519,7 @@ fn copy_dir(src: &Dir, dst: &Dir, shown: &Path, depth: usize) -> Result<(), Erro
                 copy_dir(&from, &to, &at, depth + 1)?;
                 // The name must still lead to the folder that was filled.
                 if !dst.names_dir(&name, &to)? {
-                    return Err(Error::Package(format!("{} was replaced while it was being filled", at.display())));
+                    return Err(replaced(format!("{} was replaced while it was being filled", at.display())));
                 }
             }
             Some(Kind::File) => {
@@ -496,6 +535,8 @@ fn copy_dir(src: &Dir, dst: &Dir, shown: &Path, depth: usize) -> Result<(), Erro
             None => {}
         }
     }
+    // The folder keeps the permissions of its source (a private one stays private), and its owner can always use it.
+    dst.set_mode(src.mode()? | 0o700)?;
     dst.sync()?;
     Ok(())
 }

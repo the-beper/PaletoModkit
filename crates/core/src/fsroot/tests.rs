@@ -1010,3 +1010,23 @@ fn a_tool_folder_is_judged_against_every_spelling_of_the_games_data() {
     let own = roots.game.dir.open_dir("mods_disabled").unwrap();
     roots.check_owned_folder(&own, &shown).unwrap();
 }
+
+#[test]
+fn a_listing_that_fails_refuses_the_tool_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let game = dir.path().join("game");
+    std::fs::create_dir(game.join("mods_disabled")).unwrap();
+    let own = roots.game.dir.open_dir("mods_disabled").unwrap();
+    faults::arm_at(faults::Point::List, 1, faults::Mode::Fail(io::ErrorKind::Other));
+    let result = roots.check_owned_folder(&own, &game.join("mods_disabled"));
+    faults::disarm();
+    assert!(result.is_err(), "a folder was accepted without looking at the game's x64 and update");
+}
+
+#[test]
+fn a_warning_cannot_fake_a_line_of_the_log() {
+    let found = Found { name: "Foo\nwarning: fake".into(), kind: Kind::Dir, others: vec!["foo\r\nx".into()] };
+    let warning = case_warning(Path::new("/g/sc\nripts"), &found).unwrap();
+    assert!(!warning.contains(['\n', '\r']), "{warning:?}");
+}

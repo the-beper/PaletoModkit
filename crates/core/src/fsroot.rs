@@ -331,12 +331,13 @@ fn case_warning(folder: &Path, found: &Found) -> Option<String> {
     if found.others.is_empty() {
         return None;
     }
-    let mut all: Vec<String> = std::iter::once(&found.name).chain(&found.others).map(|n| format!("\"{n}\"")).collect();
+    // Names come from the game folder: written escaped, so that one with a newline cannot pass for a line of the log.
+    let mut all: Vec<String> = std::iter::once(&found.name).chain(&found.others).map(|n| format!("{n:?}")).collect();
     all.sort();
     let last = all.pop().expect("at least two");
     Some(format!(
-        "warning: {} holds {} and {last}, names that differ only in case: \"{}\" was used (first in sorted order); rename or remove one, the game sees only one",
-        folder.display(),
+        "warning: {} holds {} and {last}, names that differ only in case: {:?} was used (first in sorted order); rename or remove one, the game sees only one",
+        folder.display().to_string().escape_debug(),
         all.join(", "),
         found.name
     ))
@@ -648,7 +649,7 @@ impl GameRoots {
     fn check_owned_folder(&self, top: &Dir, shown: &Path) -> Result<(), Error> {
         let mut others = vec![("game", self.game.id)];
         // Every spelling of them, not only the one the resolver would pick: the folder must be none of them.
-        let present = self.game.dir.names().unwrap_or_default();
+        let present = self.game.dir.names()?;
         for name in ["x64", "update"] {
             for actual in present.iter().filter(|n| n.eq_ignore_ascii_case(name)) {
                 if let Ok(dir) = self.game.dir.open_dir_following(actual)
