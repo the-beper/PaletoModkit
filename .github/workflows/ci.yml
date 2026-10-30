@@ -94,6 +94,34 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         # Warnings and errors fail the job; info and style notes differ between shellcheck versions (the runner's apt one is older).
         run: shellcheck -s sh -S warning packaging/*.sh packaging/tests/*.sh packaging/tests/gh .claude/flatpak-bg.sh
+      - name: Install actionlint and zizmor
+        if: steps.changes.outputs.code == 'true'
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          # From the release's own checksums file (actionlint_1.7.12_checksums.txt), linux amd64 tarball.
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ZIZMOR_VERSION: "1.31.1"
+          # The digest GitHub shows for the release asset zizmor-x86_64-unknown-linux-gnu.tar.gz.
+          ZIZMOR_SHA256: d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+        run: |
+          dir="$RUNNER_TEMP/lint-tools"
+          mkdir -p "$dir"
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$dir/$tarball" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$tarball"
+          echo "$ACTIONLINT_SHA256  $dir/$tarball" | sha256sum -c -
+          tar -xzf "$dir/$tarball" -C "$dir" actionlint
+          tarball="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$dir/$tarball" "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/$tarball"
+          echo "$ZIZMOR_SHA256  $dir/$tarball" | sha256sum -c -
+          tar -xzf "$dir/$tarball" -C "$dir" zizmor
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: actionlint
+        if: steps.changes.outputs.code == 'true'
+        run: actionlint -color
+      - name: zizmor
+        if: steps.changes.outputs.code == 'true'
+        # No network and no token: the checks that need GitHub's API are skipped.
+        run: zizmor --offline .github/workflows
       - name: Simulate the release pipeline
         if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/release-sim.sh
