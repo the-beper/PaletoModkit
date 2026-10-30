@@ -294,6 +294,9 @@ jobs:
     # The key is a secret of this environment only: configure required reviewers and the deployment branches and
     # tags there (docs/release.md).
     environment: flatpak-signing
+    # The hash of flatpak-sign-result.txt, which holds the hashes of what finish-flatpak reads from the artifact of this job.
+    outputs:
+      result_sha256: ${{ steps.sign.outputs.result_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
@@ -335,6 +338,7 @@ jobs:
         run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --fresh
       # The only step with the key: it signs the named commits and the summary, in a keyring in memory.
       - name: Sign
+        id: sign
         env:
           FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
         run: packaging/flatpak-sign.sh --sign --tag "$TAG" --commit "$COMMIT" --work "$RUNNER_TEMP/signwork" --out "$RUNNER_TEMP/signres"
@@ -364,6 +368,7 @@ jobs:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
       MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
+      RESULT_SHA256: ${{ needs.sign-flatpak.outputs.result_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

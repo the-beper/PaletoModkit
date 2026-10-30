@@ -133,6 +133,7 @@ final)
     for f in flatpak-signed-repo.tar flatpak-pubkey.gpg "$BUNDLE_FILE"; do
         [ -f "$IN/$f" ] && [ ! -L "$IN/$f" ] || die 2 "$IN/$f is missing"
     done
+    [ "$(sha256_of "$IN/flatpak-pubkey.gpg")" = "$(kv_get "$S" pubkey_sha256)" ] || die 2 "flatpak-pubkey.gpg does not have the recorded hash (pubkey_sha256): its bytes go into the files users add the repository with"
     [ "$(sha256_of "$IN/flatpak-signed-repo.tar")" = "$(kv_get "$S" repo_tar_sha256)" ] || die 2 "flatpak-signed-repo.tar does not have the recorded hash"
     [ "$(sha256_of "$IN/$BUNDLE_FILE")" = "$(kv_get "$S" bundle_sha256)" ] || die 2 "the Flatpak bundle does not have the recorded hash"
     [ "$(stat -c %s "$IN/$BUNDLE_FILE")" = "$(kv_get "$S" bundle_size)" ] || die 2 "the Flatpak bundle does not have the recorded size"

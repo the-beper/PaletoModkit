@@ -55,8 +55,10 @@
 #   flatpak-sign.sh --cleanup [--work DIR]   stops gpg agents and removes the temporary keyrings and the work
 #                                            folder (run it in an "if: always()" step)
 # MANIFEST_SHA256 (environment): the hash of release-manifest.txt that the verify job pinned as a job output; --check-prepared
-# and --finish refuse (exit 2) a manifest with another hash, or without a hash, before they read it. --finish writes
-# signed_sha256 (the hash of flatpak-signed.txt) to GITHUB_OUTPUT for the publish job.
+# and --finish refuse (exit 2) a manifest with another hash, or without a hash, before they read it. RESULT_SHA256: the hash of
+# flatpak-sign-result.txt that --sign wrote to GITHUB_OUTPUT (that file holds the hashes of everything else --finish reads from
+# the artifact of the sign job, which a compromised job could replace); --finish checks it first. --finish writes signed_sha256
+# (the hash of flatpak-signed.txt) to GITHUB_OUTPUT for the publish job.
 # The key must be the one of FLATPAK_KEY_FPR in release.conf and, with --site, the published one: no rotation.
 # Temporary files go to $RUNNER_TEMP (else $TMPDIR, else /tmp). Exit codes: see release-lib.sh (4: signing).
 set -eu
@@ -417,6 +419,14 @@ sign() {
     mkdir -p "$OUT"
     cp "$WORK/prepared.txt" "$OUT/flatpak-prepared.txt"
     if [ "$SKIP" = 1 ]; then
+        # --finish reads nothing else of a skip, and still gets a record that is pinned
+        {
+            echo "format=1"
+            echo "tag=$TAG"
+            echo "commit=$COMMIT"
+            echo "prepared_sha256=$(sha256_of "$OUT/flatpak-prepared.txt")"
+        } > "$OUT/flatpak-sign-result.txt"
+        job_output result_sha256 "$(sha256_of "$OUT/flatpak-sign-result.txt")"
         echo "nothing to sign"
         return 0
     fi
@@ -470,8 +480,12 @@ sign() {
         echo "tag=$TAG"
         echo "commit=$COMMIT"
         echo "signed_tar_sha256=$(sha256_of "$OUT/flatpak-sign-result-repo.tar")"
+        echo "prepared_sha256=$(sha256_of "$OUT/flatpak-prepared.txt")"
+        echo "base_sha256=$(sha256_of "$OUT/flatpak-base.txt")"
+        echo "pubkey_sha256=$(sha256_of "$OUT/flatpak-pubkey.gpg")"
         echo "key_fpr=$FPR"
     } > "$OUT/flatpak-sign-result.txt"
+    job_output result_sha256 "$(sha256_of "$OUT/flatpak-sign-result.txt")"
     echo "signed $TAG"
 }
 
@@ -480,6 +494,11 @@ finish() {
     [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$MANIFEST" ] && [ -n "$IN" ] && [ -n "$OUT" ] || die 1 "usage: see the header of $0"
     [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
     check_pinned "$MANIFEST" "${MANIFEST_SHA256:-}" "$MANIFEST"
+    # The artifact of the sign job: its record is the one the job pinned, and the record has the hash of every other file.
+    R=$IN/flatpak-sign-result.txt
+    [ -f "$R" ] && [ ! -L "$R" ] || die 2 "$R is missing"
+    check_pinned "$R" "${RESULT_SHA256:-}" "$R"
+    [ "$(sha256_of "$IN/flatpak-prepared.txt")" = "$(kv_get "$R" prepared_sha256)" ] || die 2 "flatpak-prepared.txt does not have the hash the signing job recorded"
     prepared_state "$IN/flatpak-prepared.txt"
     P=$IN/flatpak-prepared.txt
     mkdir -p "$OUT"
@@ -504,11 +523,13 @@ finish() {
     done
     [ "$(kv_get "$R" tag)" = "$TAG" ] && [ "$(kv_get "$R" commit)" = "$COMMIT" ] || die 2 "$R is not for $TAG at $COMMIT"
     [ "$(sha256_of "$IN/flatpak-sign-result-repo.tar")" = "$(kv_get "$R" signed_tar_sha256)" ] || die 2 "the signed repository is not the one that was described"
+    [ "$(sha256_of "$IN/flatpak-pubkey.gpg")" = "$(kv_get "$R" pubkey_sha256)" ] || die 2 "flatpak-pubkey.gpg does not have the hash the signing job recorded"
     rm -rf "$WORK"
     mkdir -p "$WORK"
     # The record of the signing job: the mode and the published heads it checked, not what the preparation said.
     B=$IN/flatpak-base.txt
     [ -f "$B" ] && [ ! -L "$B" ] || die 2 "$B is missing"
+    [ "$(sha256_of "$B")" = "$(kv_get "$R" base_sha256)" ] || die 2 "$B does not have the hash the signing job recorded"
     [ "$(kv_get "$B" format)" = 1 ] || die 2 "$B: unknown format"
     MODE=$(kv_get "$B" mode)
     case $MODE in fresh | bootstrap | site) ;; *) die 2 "$B: unknown mode $MODE" ;; esac
@@ -571,6 +592,7 @@ finish() {
         echo "bundle_sha256=$(sha256_of "$OUT/PaletoModkit-x86_64.flatpak")"
         echo "bundle_size=$(stat -c %s "$OUT/PaletoModkit-x86_64.flatpak")"
         echo "repo_tar_sha256=$(sha256_of "$OUT/flatpak-signed-repo.tar")"
+        echo "pubkey_sha256=$(sha256_of "$IN/flatpak-pubkey.gpg")"
         echo "unsigned_tar_sha256=$(kv_get "$P" unsigned_tar_sha256)"
         echo "key_fpr=$FPR"
     } > "$OUT/flatpak-signed.txt"

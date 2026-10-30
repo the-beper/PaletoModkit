@@ -122,8 +122,8 @@ sign() {
     sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
         --unsigned "$BASE/b/$v/flatpak-unsigned-repo.tar" --site "$site" --work "$out.pwork" --out "$out.prep" "$@" || return $?
     MANIFEST_SHA256=$pin sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" --site "$site" "$@" || return $?
-    FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
-    MANIFEST_SHA256=$pin sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
+    FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") GITHUB_OUTPUT="$out.sign.gho" sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
+    MANIFEST_SHA256=$pin RESULT_SHA256=$(sed -n 's/^result_sha256=//p' "$out.sign.gho") sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.work"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.pwork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.fwork"

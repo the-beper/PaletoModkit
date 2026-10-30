@@ -211,6 +211,7 @@ job_sign() {
     rm -f "$d/sign-prepare.log" "$d/sign-check.log" "$d/sign-sign.log" "$d/sign-finish.log"
     rm -rf "$d/prepared" "$d/signres"
     : > "$d/finish.gho"
+    : > "$d/sign.gho"
     # shellcheck disable=SC2086
     run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --work "$rt/prepwork" --out "$d/prepared"
@@ -222,12 +223,12 @@ job_sign() {
     fi
     if [ "$rc" = 0 ]; then
         # shellcheck disable=SC2086
-        run "$d/sign-sign.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sign_args --work "$rt/signwork" --out "$d/signres"
+        run "$d/sign-sign.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/sign.gho" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sign_args --work "$rt/signwork" --out "$d/signres"
         rc=$RC
     fi
     if [ "$rc" = 0 ]; then
         # shellcheck disable=SC2086
-        run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/finish.gho" sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --work "$rt/finwork" --out "$d/signed"
+        run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/sign.gho" result_sha256)" GITHUB_OUTPUT="$d/finish.gho" sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --work "$rt/finwork" --out "$d/signed"
         rc=$RC
     fi
     cat "$d"/sign-prepare.log "$d"/sign-check.log "$d"/sign-sign.log "$d"/sign-finish.log > "$d/sign.log" 2> /dev/null || true
@@ -1068,7 +1069,7 @@ sc_sign_secret_env() {
     : > "$rt/seen"
     : > "$rt/calls"
     # shellcheck disable=SC2086
-    run "$d/p2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sargs
+    run "$d/p2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/p2.gho" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sargs
     assert_rc "sign" 0
     assert_eq "the secret seen by a child process of --sign" 0 "$(wc -c < "$rt/seen")"
     # the sign step unpacks nothing and makes no commit, no appstream data and no delta: it signs
@@ -1084,7 +1085,7 @@ sc_sign_secret_env() {
     run "$d/p3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --finish $fargs
     assert_rc "finish with the secret" 1
     # shellcheck disable=SC2086
-    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
+    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/p2.gho" result_sha256)" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
     assert_rc "finish" 0
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
@@ -1424,8 +1425,12 @@ sc_sign_hostile_result() {
     mkdir -p "$rt"
     m=$d/verified/release-manifest.txt
     # shellcheck disable=SC2329
-    hr_finish() { # IN
-        in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/fw" --out "$rt/out"
+    hr_finish() { # IN: the record of the signing job is made to fit the files of IN and pinned, as a forger who could also change the
+        # job output would do it (the pin itself is tested in sign_pins), so that the checks of finish itself are reached
+        for x in flatpak-prepared.txt:prepared_sha256 flatpak-base.txt:base_sha256 flatpak-pubkey.gpg:pubkey_sha256 flatpak-sign-result-repo.tar:signed_tar_sha256; do
+            [ ! -f "$1/${x%%:*}" ] || sed -i "s/^${x##*:}=.*/${x##*:}=$(sha256sum "$1/${x%%:*}" | cut -d' ' -f1)/" "$1/flatpak-sign-result.txt"
+        done
+        in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(sha256sum "$1/flatpak-sign-result.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/fw" --out "$rt/out"
     }
     # shellcheck disable=SC2329
     hr_copy() { rm -rf "$d/hr.$1"; cp -a "$d/signres" "$d/hr.$1"; }
@@ -1537,17 +1542,56 @@ sc_sign_pins() {
     e=$LIVE/runs/2
     m=$e/verified/release-manifest.txt
     # shellcheck disable=SC2329
-    fin() { # PIN
-        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" GITHUB_OUTPUT="$rt/fin.gho" sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$(kv "$e/validate.out" commit)" \
-            --manifest "$m" --in "$e/signres" --work "$rt/fw" --out "$rt/out"
+    fin() { # MANIFEST_PIN RESULT_PIN IN
+        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" RESULT_SHA256="$2" GITHUB_OUTPUT="$rt/fin.gho" sh packaging/flatpak-sign.sh --finish --tag "$tag" \
+            --commit "$(kv "$e/validate.out" commit)" --manifest "$m" --in "$3" --work "$rt/fw" --out "$rt/out"
     }
-    run "$e/f1.log" fin ""
+    mp=$(kv "$e/verify.gho" manifest_sha256)
+    rp=$(kv "$e/sign.gho" result_sha256)
+    assert_eq "the pin is the hash of the record of the sign job" "$(sha256sum "$e/signres/flatpak-sign-result.txt" | cut -d' ' -f1)" "$rp"
+    run "$e/f1.log" fin "" "$rp" "$e/signres"
     assert_rc "finish with an empty pin" 2
-    run "$e/f2.log" fin "$(printf 'a%.0s' $(seq 64))"
+    run "$e/f2.log" fin "$(printf 'a%.0s' $(seq 64))" "$rp" "$e/signres"
     assert_rc "finish with another hash" 2
     assert_log "$e/f2.log" "pinned"
-    run "$e/f3.log" fin "$(kv "$e/verify.gho" manifest_sha256)"
-    assert_rc "finish with the pin" 0
+    run "$e/f3.log" fin "$mp" "$rp" "$e/signres"
+    assert_rc "finish with the pins" 0
+    run "$e/f4.log" fin "$mp" "" "$e/signres"
+    assert_rc "finish with an empty pin of the sign job" 2
+    run "$e/f5.log" fin "$mp" "$(printf 'a%.0s' $(seq 64))" "$e/signres"
+    assert_rc "finish with another pin of the sign job" 2
+    assert_log "$e/f5.log" "pinned"
+    # a skip record forged into the result of the sign job: nothing is signed, publish would say "nothing to do"
+    rm -rf "$e/hr.skip"
+    cp -a "$e/signres" "$e/hr.skip"
+    sed -i 's/^skip=.*/skip=1/' "$e/hr.skip/flatpak-prepared.txt"
+    run "$e/f6.log" fin "$mp" "$rp" "$e/hr.skip"
+    assert_rc "finish with a forged skip" 2
+    assert_log "$e/f6.log" "recorded"
+    sed -i "s/^prepared_sha256=.*/prepared_sha256=$(sha256sum "$e/hr.skip/flatpak-prepared.txt" | cut -d' ' -f1)/" "$e/hr.skip/flatpak-sign-result.txt"
+    run "$e/f7.log" fin "$mp" "$rp" "$e/hr.skip"
+    assert_rc "finish with a forged skip and a record that fits it" 2
+    assert_log "$e/f7.log" "pinned"
+    # the base of gh-pages in the record changed to the head of gh-pages after it moved: the lease of publish would not see it
+    rm -rf "$e/hr.base"
+    cp -a "$e/signres" "$e/hr.base"
+    sed -i "s/^base_gh_pages=.*/base_gh_pages=$(printf 'c%.0s' $(seq 40))/" "$e/hr.base/flatpak-base.txt"
+    run "$e/f8.log" fin "$mp" "$rp" "$e/hr.base"
+    assert_rc "finish with another base of gh-pages" 2
+    assert_log "$e/f8.log" "recorded"
+    sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$e/hr.base/flatpak-base.txt" | cut -d' ' -f1)/" "$e/hr.base/flatpak-sign-result.txt"
+    run "$e/f9.log" fin "$mp" "$rp" "$e/hr.base"
+    assert_rc "finish with another base of gh-pages and a record that fits it" 2
+    assert_log "$e/f9.log" "pinned"
+    # the public key in another encoding: the same key, other bytes in the files users add the repository with
+    rm -rf "$e/hr.key"
+    cp -a "$e/signres" "$e/hr.key"
+    # the same key, armored by hand (the checksum line is optional)
+    { echo '-----BEGIN PGP PUBLIC KEY BLOCK-----'; echo; base64 -w64 "$e/signres/flatpak-pubkey.gpg"; echo '-----END PGP PUBLIC KEY BLOCK-----'; } > "$e/hr.key/flatpak-pubkey.gpg"
+    cmp -s "$e/signres/flatpak-pubkey.gpg" "$e/hr.key/flatpak-pubkey.gpg" && fail "the other encoding of the key has the same bytes"
+    run "$e/f10.log" fin "$mp" "$rp" "$e/hr.key"
+    assert_rc "finish with the key in another encoding" 2
+    assert_log "$e/f10.log" "recorded"
     assert_eq "finish pinned flatpak-signed.txt" "$(sha256sum "$rt/out/flatpak-signed.txt" | cut -d' ' -f1)" "$(kv "$rt/fin.gho" signed_sha256)"
     snapshot > "$SIM/snap.before"
     # the bundle replaced, and flatpak-signed.txt fitted to it: the files tell a consistent story, the pin does not
@@ -1567,6 +1611,13 @@ sc_sign_pins() {
     assert_rc "publish with a swapped manifest" 2
     assert_log "$e/publish.log" "pinned"
     cp "$e/manifest.good" "$e/verified/release-manifest.txt"
+    # the public key in another encoding (the same key): flatpak-signed.txt records the hash of the file
+    cp "$e/signed/flatpak-pubkey.gpg" "$e/pubkey.good"
+    cp "$e/hr.key/flatpak-pubkey.gpg" "$e/signed/flatpak-pubkey.gpg"
+    job_publish 2 release
+    assert_rc "publish with the key in another encoding" 2
+    assert_log "$e/publish.log" "pubkey_sha256"
+    cp "$e/pubkey.good" "$e/signed/flatpak-pubkey.gpg"
     # no pin
     cp "$e/finish.gho" "$e/finish.good"
     : > "$e/finish.gho"
