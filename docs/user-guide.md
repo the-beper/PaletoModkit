@@ -69,6 +69,10 @@ In the game folder itself, **New folder…**, **Rename…** and **Delete** work 
 
 On disk, a rename that only changes upper and lower case is allowed. A name already used in the folder, in any case, is not: the game does not tell them apart.
 
+### Extracting and exporting into a game folder
+
+**Extract…**, the exports of textures, sounds and models, the OIV package and the same commands of the [command line](cli.md) write wherever you pick. If that is inside a game folder (also one reached through a link, or by the real place of a linked `mods` folder), the files go through the same checks as every other change to a game: game data (`x64/`, `update/`, archives) only into `mods/`, never the programs, the game's own `.dll` and `.txt` files or this tool's folders, and nothing is written through a link. A refusal says why and writes nothing. The whole operation is one journaled change under the game's lock, undone if any file fails, so an interrupted extraction is cleaned up by the next change. Files are put in place one after the other: recoverable, but not atomic for a program reading the folder at that moment. Outside every game folder nothing changes.
+
 ## Text and XML files
 
 Selecting a text file shows it in the preview panel, where you can edit it:

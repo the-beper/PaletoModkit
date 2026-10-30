@@ -41,7 +41,8 @@ paleto info update/update.rpf
 paleto ls update/update.rpf/common/data
 paleto ls -r x64e.rpf/levels/gta5/vehicles.rpf
 
-# Extract a file or a folder (into the current folder, or -o FOLDER)
+# Extract a file or a folder (into the current folder, or -o FOLDER; into a game folder only
+# where other changes may go: mods/, scripts/ and so on, see the user guide)
 paleto extract update/update.rpf/common/data/dlclist.xml -o out/
 
 # Add or replace files and folders in an archive folder

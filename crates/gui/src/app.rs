@@ -568,7 +568,7 @@ impl Action {
                 | Action::ExportTextures(..)
                 | Action::ExportModel(_)
                 | Action::SavePreview
-                | Action::Extract(_)
+                | Action::Extract(..)
                 | Action::Add(_)
                 | Action::AddLegacy { .. }
                 | Action::InstallAddonPacks
@@ -686,7 +686,8 @@ enum Action {
     SavePreview,
     /// Re-indent the XML being edited.
     FormatPreview,
-    Extract(Vec<String>),
+    /// Extract the named entries into a folder (asked for unless given).
+    Extract(Vec<String>, Option<PathBuf>),
     Add(Vec<PathBuf>),
     PickAdd { folders: bool },
     AskDelete(Vec<String>),
@@ -1079,6 +1080,11 @@ impl App {
     /// Replaces a sound of the previewed audio container with a WAV or MP3 file.
     pub fn replace_sound(&mut self, id: u32, file: &Path, ctx: &egui::Context) {
         self.apply(Action::ReplaceSound(id, Some(file.to_path_buf())), ctx);
+    }
+
+    /// Extracts the named entries of the open archive folder into `dir`, as the toolbar does.
+    pub fn extract_to(&mut self, names: Vec<String>, dir: &Path, ctx: &egui::Context) {
+        self.apply(Action::Extract(names, Some(dir.to_path_buf())), ctx);
     }
 
     /// Exports every sound of the previewed audio container into `dir`.
@@ -1926,17 +1932,18 @@ impl App {
                 };
                 self.task = Some(Task::spawn("Exporting sounds", ctx, move || {
                     let run = || -> Result<String, String> {
-                        for &i in &indices {
-                            let path = match &dest {
-                                ExportDest::File(path) => path.clone(),
-                                ExportDest::Folder(dir) => dir.join(format!("{}.wav", audio::file_stem(&sounds[i]))),
-                            };
-                            std::fs::write(&path, sounds[i].to_wav()).map_err(|e| format!("{}: {e}", path.display()))?;
-                        }
-                        Ok(match &dest {
+                        let (dir, picked) = dest.folder_and_name();
+                        let (_, log) = vfs::write_into(dir, "exporting sounds", |out| {
+                            for &i in &indices {
+                                out.write(&picked.clone().unwrap_or_else(|| format!("{}.wav", audio::file_stem(&sounds[i]))), &sounds[i].to_wav())?;
+                            }
+                            Ok(())
+                        })
+                        .map_err(|e| e.to_string())?;
+                        Ok(with_notes(match &dest {
                             ExportDest::File(path) => format!("exported {}", path.display()),
                             ExportDest::Folder(dir) => format!("{} sounds exported to {}", indices.len(), dir.display()),
-                        })
+                        }, &log))
                     };
                     match run() {
                         Ok(message) => Outcome::Done { message, reload: None },
@@ -1966,18 +1973,14 @@ impl App {
                 };
                 self.task = Some(Task::spawn("Exporting textures", ctx, move || {
                     let run = || -> Result<String, String> {
-                        for &i in &indices {
-                            let tex = &dict.textures[i];
-                            let path = match &dest {
-                                ExportDest::File(path) => path.clone(),
-                                ExportDest::Folder(dir) => dir.join(tex.file_name(png)),
-                            };
-                            textures::write(tex, png, &path)?;
-                        }
-                        Ok(match &dest {
+                        let (dir, picked) = dest.folder_and_name();
+                        // Every texture is encoded before anything is written.
+                        let files = indices.iter().map(|&i| Ok((picked.clone().unwrap_or_else(|| dict.textures[i].file_name(png)), textures::encode(&dict.textures[i], png)?))).collect::<Result<Vec<_>, String>>()?;
+                        let (_, log) = vfs::write_into(dir, "exporting textures", |out| files.iter().try_for_each(|(name, data)| out.write(name, data).map(drop))).map_err(|e| e.to_string())?;
+                        Ok(with_notes(match &dest {
                             ExportDest::File(path) => format!("exported {}", path.display()),
                             ExportDest::Folder(dir) => format!("{} textures exported to {}", indices.len(), dir.display()),
-                        })
+                        }, &log))
                     };
                     match run() {
                         Ok(message) => Outcome::Done { message, reload: None },
@@ -1994,18 +1997,18 @@ impl App {
                     let run = || -> Result<String, String> {
                         let (stem, ext) = file.rsplit_once('.').ok_or_else(|| format!("{file}: not a model"))?;
                         let export = paleto_formats::xml_export::export(&source.data, ext, stem, &source.dictionaries).map_err(|e| format!("{file}: {e}"))?;
-                        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-                        let write = |path: PathBuf, data: &[u8]| std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()));
-                        write(dir.join(format!("{file}.xml")), export.xml.as_bytes())?;
-                        // The textures go in a folder named after the model, where CodeWalker looks for them.
-                        let textures = dir.join(paleto_formats::xml_export::texture_folder(stem));
-                        if !export.textures.is_empty() {
-                            std::fs::create_dir_all(&textures).map_err(|e| format!("{}: {e}", textures.display()))?;
-                        }
-                        for (name, dds) in &export.textures {
-                            write(textures.join(name), dds)?;
-                        }
-                        Ok(format!("exported {file}.xml and {} textures to {}", export.textures.len(), dir.display()))
+                        let (_, log) = vfs::write_into(&dir, "exporting a model", |out| {
+                            out.mkdir("")?;
+                            out.write(&format!("{file}.xml"), export.xml.as_bytes())?;
+                            // The textures go in a folder named after the model, where CodeWalker looks for them.
+                            let textures = paleto_formats::xml_export::texture_folder(stem);
+                            for (name, dds) in &export.textures {
+                                out.write(&format!("{textures}/{name}"), dds)?;
+                            }
+                            Ok(())
+                        })
+                        .map_err(|e| e.to_string())?;
+                        Ok(with_notes(format!("exported {file}.xml and {} textures to {}", export.textures.len(), dir.display()), &log))
                     };
                     match run() {
                         Ok(message) => Outcome::Done { message, reload: None },
@@ -2038,12 +2041,12 @@ impl App {
                     Ok(format!("saved {name}"))
                 });
             }
-            Action::Extract(names) => {
+            Action::Extract(names, picked) => {
                 let Some(Location::Archive(location)) = self.browser.as_ref().map(|b| b.location.clone()) else { return };
-                let Some(dest) = rfd::FileDialog::new().set_title("Extract to").pick_folder() else { return };
+                let Some(dest) = picked.or_else(|| rfd::FileDialog::new().set_title("Extract to").pick_folder()) else { return };
                 let keys = self.keys.clone();
                 self.task = Some(Task::spawn("Extracting", ctx, move || match extract(&location, keys.as_deref(), &names, &dest) {
-                    Ok(n) => Outcome::Done { message: format!("{n} files extracted to {}", dest.display()), reload: None },
+                    Ok((n, notes)) => Outcome::Done { message: with_notes(format!("{n} files extracted to {}", dest.display()), &notes), reload: None },
                     Err(e) => Outcome::Failed(e),
                 }));
             }
@@ -3318,7 +3321,7 @@ impl App {
                     .on_disabled_hover_text("Select files inside an .rpf archive to extract them")
                     .clicked()
                 {
-                    actions.push(Action::Extract(selected.clone()));
+                    actions.push(Action::Extract(selected.clone(), None));
                 }
                 if ui.add_enabled(!selected.is_empty(), button("🗑", "Delete")).on_hover_text("Delete the selection (Delete)").clicked() {
                     actions.push(Action::AskDelete(selected.clone()));
@@ -3517,7 +3520,7 @@ impl App {
                             actions.push(Action::Preview(name.clone()));
                         }
                         if in_archive && ui.add_enabled(!busy, egui::Button::new("Extract…")).clicked() {
-                            actions.push(Action::Extract(targets.clone()));
+                            actions.push(Action::Extract(targets.clone(), None));
                         }
                         if ui.add_enabled(!busy && targets.len() == 1, egui::Button::new("Rename…")).clicked() {
                             actions.push(Action::AskRename(name.clone()));
@@ -5177,32 +5180,54 @@ fn sort_rows(rows: &mut [Row], settings: &Settings) {
     });
 }
 
-fn extract(location: &ArchivePath, keys: Option<&Keys>, names: &[String], dest: &Path) -> Result<usize, String> {
+/// Extracts the named entries (folders with all they hold) of `location` into `dest`: into a game folder one
+/// transaction for all of them, through the checks of every other change to a game (see [`vfs::write_into`]).
+/// Returns how many files, and what the writer noted.
+fn extract(location: &ArchivePath, keys: Option<&Keys>, names: &[String], dest: &Path) -> Result<(usize, Vec<String>), String> {
     let (archive, dir) = location.open(keys).map_err(|e| e.to_string())?;
-    let mut count = 0;
+    let mut files: Vec<(String, usize)> = Vec::new();
     for name in names {
         let idx = archive.children(dir).find(|&i| &archive.entries[i].name == name).ok_or(format!("{name} not found"))?;
-        let files: Vec<(String, usize)> = if archive.entries[idx].is_dir() {
-            archive.walk(idx).into_iter().filter(|(_, i)| !archive.entries[*i].is_dir()).map(|(p, i)| (format!("{name}/{p}"), i)).collect()
+        if archive.entries[idx].is_dir() {
+            files.extend(archive.walk(idx).into_iter().filter(|(_, i)| !archive.entries[*i].is_dir()).map(|(p, i)| (format!("{name}/{p}"), i)));
         } else {
-            vec![(name.clone(), idx)]
-        };
-        // Every name is checked before anything of this one is written: the archive is not trusted.
-        let files = files.into_iter().map(|(rel, i)| vfs::extract_path(dest, &rel).map(|out| (rel, out, i))).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-        for (rel, out, i) in files {
-            std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| e.to_string())?;
-            let data = archive.read(i, keys).map_err(|e| format!("{rel}: {e}"))?;
-            std::fs::write(&out, data).map_err(|e| format!("{}: {e}", out.display()))?;
-            count += 1;
+            files.push((name.clone(), idx));
         }
     }
-    Ok(count)
+    // Every name is checked before anything is written: the archive is not trusted.
+    for (rel, _) in &files {
+        vfs::extract_path(dest, rel).map_err(|e| e.to_string())?;
+    }
+    let (_, notes) = vfs::write_into(dest, "extracting files", |out| {
+        for (rel, i) in &files {
+            let data = archive.read(*i, keys).map_err(|e| paleto_core::Error::Io(std::io::Error::other(format!("{rel}: {e}"))))?;
+            out.write(rel, &data)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+    Ok((files.len(), notes))
+}
+
+/// `message` with what the writer noted when it finished (a backup it could not remove), if anything.
+fn with_notes(message: String, notes: &[String]) -> String {
+    if notes.is_empty() { message } else { format!("{message} ({})", notes.join("; ")) }
 }
 
 /// The file as editable text, if it looks like text.
 enum ExportDest {
     File(PathBuf),
     Folder(PathBuf),
+}
+
+impl ExportDest {
+    /// The folder written into, and the name of the file if the user picked one.
+    fn folder_and_name(&self) -> (&Path, Option<String>) {
+        match self {
+            ExportDest::File(path) => (path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")), Some(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+            ExportDest::Folder(dir) => (dir, None),
+        }
+    }
 }
 
 fn is_ytd(name: &str) -> bool {
@@ -5340,7 +5365,7 @@ mod tests {
         ed.add_file("ok.txt", b"y".to_vec()).unwrap();
         ed.save(&archive).unwrap();
         let location = ArchivePath::new(archive.clone());
-        assert_eq!(extract(&location, None, &["dd".into(), "ok.txt".into()], &out), Ok(2));
+        assert_eq!(extract(&location, None, &["dd".into(), "ok.txt".into()], &out), Ok((2, Vec::new())));
         std::fs::remove_dir_all(out.join("dd")).unwrap();
         std::fs::remove_file(out.join("ok.txt")).unwrap();
         // Empty the folder's name in the names table (the root's is empty already).

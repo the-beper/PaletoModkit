@@ -1,6 +1,6 @@
 //! Texture dictionary (`.ytd`) viewer for the preview panel.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText};
@@ -261,10 +261,9 @@ fn checkerboard(painter: &egui::Painter, rect: egui::Rect, dark: bool) {
     }
 }
 
-/// Writes a texture as DDS (all mip levels) or PNG (largest level).
-pub fn write(tex: &Texture, png: bool, path: &Path) -> Result<(), String> {
-    let data = if png { tex.to_png().map_err(|e| e.to_string())? } else { tex.to_dds() };
-    std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
+/// A texture as DDS (all mip levels) or PNG (largest level), to be written.
+pub fn encode(tex: &Texture, png: bool) -> Result<Vec<u8>, String> {
+    if png { tex.to_png().map_err(|e| e.to_string()) } else { Ok(tex.to_dds()) }
 }
 
 #[cfg(test)]

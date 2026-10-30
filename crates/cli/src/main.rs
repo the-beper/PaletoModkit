@@ -486,18 +486,22 @@ fn main() -> Result<()> {
             let (archive, keys, idx) = resolve(&path, cli.game.as_deref())?;
             let entry = &archive.entries[idx];
             if entry.is_dir() {
-                let root = vfs::extract_path(&output, if idx == 0 { archive.name.trim_end_matches(".rpf") } else { &entry.name })?;
+                let folder = if idx == 0 { archive.name.trim_end_matches(".rpf") } else { &entry.name };
+                let root = vfs::extract_path(&output, folder)?;
                 // Every name is checked before anything is written: the archive is not trusted.
-                let files = archive.walk(idx).into_iter().filter(|(_, i)| !archive.entries[*i].is_dir()).map(|(p, i)| Ok((vfs::extract_path(&root, &p)?, i))).collect::<Result<Vec<_>>>()?;
-                let mut count = 0;
-                for (out, i) in files {
-                    write_file(&out, &archive.read(i, keys.as_ref())?)?;
-                    count += 1;
-                }
-                println!("{count} files extracted to {}", root.display());
+                let files = archive.walk(idx).into_iter().filter(|(_, i)| !archive.entries[*i].is_dir()).map(|(p, i)| vfs::extract_path(&root, &p).map(|_| (format!("{folder}/{p}"), i))).collect::<Result<Vec<_>, _>>()?;
+                let (_, log) = vfs::write_into(&output, "extracting files", |out| {
+                    for (rel, i) in &files {
+                        out.write(rel, &archive.read(*i, keys.as_ref())?)?;
+                    }
+                    Ok(())
+                })?;
+                show_notes(log);
+                println!("{} files extracted to {}", files.len(), root.display());
             } else {
-                let dest = vfs::extract_path(&output, &entry.name)?;
-                write_file(&dest, &archive.read(idx, keys.as_ref())?)?;
+                let data = archive.read(idx, keys.as_ref())?;
+                let (dest, log) = vfs::write_into(&output, "extracting a file", |out| out.write(&entry.name, &data))?;
+                show_notes(log);
                 println!("extracted {}", dest.display());
             }
         }
@@ -591,14 +595,17 @@ fn main() -> Result<()> {
             let file = Path::new(&path).file_name().and_then(|n| n.to_str()).with_context(|| format!("no file name in {path}"))?;
             let (stem, ext) = file.rsplit_once('.').with_context(|| format!("{path}: not a model"))?;
             let export = xml_export::export(&data, ext, stem, &dictionaries).with_context(|| format!("reading {path}"))?;
-            write_file(&output.join(format!("{file}.xml")), export.xml.as_bytes())?;
-            println!("wrote {}", output.join(format!("{file}.xml")).display());
-            // The textures go in a folder named after the model, where CodeWalker looks for them.
-            for (name, dds) in &export.textures {
-                let dest = output.join(xml_export::texture_folder(stem)).join(name);
-                write_file(&dest, dds)?;
+            let (_, log) = vfs::write_into(&output, "exporting a model", |out| {
+                let dest = out.write(&format!("{file}.xml"), export.xml.as_bytes())?;
                 println!("wrote {}", dest.display());
-            }
+                // The textures go in a folder named after the model, where CodeWalker looks for them.
+                for (name, dds) in &export.textures {
+                    let dest = out.write(&format!("{}/{name}", xml_export::texture_folder(stem)), dds)?;
+                    println!("wrote {}", dest.display());
+                }
+                Ok(())
+            })?;
+            show_notes(log);
         }
         Command::Textures { path, output, png, .. } => {
             let data = if Path::new(&path).is_file() {
@@ -608,14 +615,21 @@ fn main() -> Result<()> {
                 archive.read(idx, keys.as_ref())?
             };
             let ytd = TextureDictionary::parse(&data).with_context(|| format!("reading {path}"))?;
-            for tex in &ytd.textures {
-                let srgb = if tex.srgb { " sRGB" } else { "" };
-                let cube = if tex.faces > 1 { " cube map" } else { "" };
-                println!("{:>5}x{:<5} {:>2} mips  {:<11} {}", tex.width, tex.height, tex.levels, format!("{}{srgb}{cube}", tex.format.name()), tex.name);
-                if let Some(dir) = &output {
-                    let data = if png { tex.to_png()? } else { tex.to_dds() };
-                    write_file(&dir.join(tex.file_name(png)), &data)?;
+            let list = |mut out: Option<&mut vfs::Output<'_>>| -> Result<(), paleto_core::Error> {
+                for tex in &ytd.textures {
+                    let srgb = if tex.srgb { " sRGB" } else { "" };
+                    let cube = if tex.faces > 1 { " cube map" } else { "" };
+                    println!("{:>5}x{:<5} {:>2} mips  {:<11} {}", tex.width, tex.height, tex.levels, format!("{}{srgb}{cube}", tex.format.name()), tex.name);
+                    if let Some(out) = out.as_deref_mut() {
+                        let data = if png { tex.to_png().map_err(std::io::Error::other)? } else { tex.to_dds() };
+                        out.write(&tex.file_name(png), &data)?;
+                    }
                 }
+                Ok(())
+            };
+            match &output {
+                Some(dir) => show_notes(vfs::write_into(dir, "exporting textures", |out| list(Some(out)))?.1),
+                None => list(None)?,
             }
             let edition = if ytd.enhanced { "Enhanced" } else { "Legacy" };
             println!("{} textures ({edition} format)", ytd.textures.len());
@@ -663,11 +677,18 @@ fn main() -> Result<()> {
             let data = read_any(&path, cli.game.as_deref())?;
             let key = audio_key(&path, cli.game.as_deref());
             let sounds = paleto_formats::awc::parse(&data, key.as_ref()).with_context(|| format!("reading {path}"))?;
-            for sound in &sounds {
-                println!("{:08X}  {:>6} Hz  {:>7.2} s", sound.id, sound.sample_rate, sound.duration_secs());
-                if let Some(dir) = &output {
-                    write_file(&dir.join(format!("{:08X}.wav", sound.id)), &sound.to_wav())?;
+            let list = |mut out: Option<&mut vfs::Output<'_>>| -> Result<(), paleto_core::Error> {
+                for sound in &sounds {
+                    println!("{:08X}  {:>6} Hz  {:>7.2} s", sound.id, sound.sample_rate, sound.duration_secs());
+                    if let Some(out) = out.as_deref_mut() {
+                        out.write(&format!("{:08X}.wav", sound.id), &sound.to_wav())?;
+                    }
                 }
+                Ok(())
+            };
+            match &output {
+                Some(dir) => show_notes(vfs::write_into(dir, "exporting sounds", |out| list(Some(out)))?.1),
+                None => list(None)?,
             }
             println!("{} sounds", sounds.len());
         }
@@ -1103,20 +1124,25 @@ fn main() -> Result<()> {
                 }
             } else {
                 let output = output.context("--output is needed with files")?;
-                std::fs::create_dir_all(&output)?;
                 let data: Vec<Vec<u8>> = files.iter().map(std::fs::read).collect::<Result<_, _>>()?;
                 let names: Vec<String> = files.iter().map(|f| f.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
                 let inputs: Vec<(&str, &[u8])> = names.iter().zip(&data).map(|(n, d)| (n.as_str(), d.as_slice())).collect();
-                for ((name, file), outcome) in names.iter().zip(&files).zip(convert::convert(&tool, &inputs)?) {
-                    match outcome {
-                        convert::Outcome::Converted(new) => {
-                            write_file(&output.join(name), &new)?;
-                            println!("converted {}", file.display());
+                let outcomes = convert::convert(&tool, &inputs)?;
+                let (_, log) = vfs::write_into(&output, "converting files", |out| {
+                    out.mkdir("")?;
+                    for ((name, file), outcome) in names.iter().zip(&files).zip(outcomes) {
+                        match outcome {
+                            convert::Outcome::Converted(new) => {
+                                out.write(name, &new)?;
+                                println!("converted {}", file.display());
+                            }
+                            convert::Outcome::Unchanged => println!("{}: already in the Enhanced format", file.display()),
+                            convert::Outcome::Failed(e) => println!("! {}: {e}", file.display()),
                         }
-                        convert::Outcome::Unchanged => println!("{}: already in the Enhanced format", file.display()),
-                        convert::Outcome::Failed(e) => println!("! {}: {e}", file.display()),
                     }
-                }
+                    Ok(())
+                })?;
+                show_notes(log);
             }
         }
     }
@@ -1183,11 +1209,19 @@ fn print_entry(archive: &Archive, idx: usize, path: &str) {
     }
 }
 
+/// Writes a file the user named: as it always did outside a game folder, through the confined, journaled writer inside one.
 fn write_file(path: &Path, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let folder = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).with_context(|| format!("{}: not a file name", path.display()))?;
+    show_notes(vfs::write_into(folder, "writing a file", |out| out.write(name, data).map(drop))?.1);
+    Ok(())
+}
+
+/// What the writer noted when it finished (a backup it could not remove).
+fn show_notes(log: Vec<String>) {
+    for line in log {
+        eprintln!("paleto: {line}");
     }
-    std::fs::write(path, data).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Splits "dir/archive.rpf/inside/path" into the archive on disk and the rest.

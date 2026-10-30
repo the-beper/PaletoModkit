@@ -77,3 +77,42 @@ fn new_follows_the_game_that_is_named() {
     let out = paleto(dir.path(), &["--game", &root.to_string_lossy(), "new", &target]);
     assert!(out.status.success() && root.join("mods/x64/n.rpf").is_file(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// A loose archive `src.rpf` outside the game, holding `d/f.txt`.
+fn source(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("src.rpf");
+    let mut archive = paleto_rpf::ArchiveEditor::new("src.rpf");
+    archive.add_file("d/f.txt", b"extracted".to_vec()).unwrap();
+    archive.save(&path).unwrap();
+    path
+}
+
+#[test]
+fn extracting_into_a_game_folder_goes_through_the_confined_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = game(dir.path());
+    let src = source(dir.path());
+    let from = format!("{}/d", src.display());
+    let before = original(&root);
+    // Original game data is refused, whichever way the folder is named, and nothing is written.
+    for out in [root.join("x64"), root.join("x64/new")] {
+        let done = paleto(dir.path(), &["extract", &from, "-o", &out.to_string_lossy()]);
+        assert!(!done.status.success() && !out.join("d").exists(), "{out:?}");
+        let text = String::from_utf8_lossy(&done.stderr);
+        assert!(text.contains("original game file") || text.contains("game's own data"), "{text}");
+    }
+    assert!(!root.join("x64/new").exists());
+    assert_eq!(original(&root), before);
+    // The mods folder takes it, in one journaled change that leaves nothing behind.
+    std::fs::create_dir_all(root.join("mods")).unwrap();
+    let done = paleto(dir.path(), &["extract", &from, "-o", &root.join("mods/out").to_string_lossy()]);
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert_eq!(std::fs::read(root.join("mods/out/d/f.txt")).unwrap(), b"extracted");
+    assert_eq!(original(&root), before);
+    assert!(std::fs::read_dir(root.join("mods/out/d")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".paleto-")));
+    // Outside every game folder it is as it was.
+    let done = paleto(dir.path(), &["extract", &from, "-o", &dir.path().join("plain/out").to_string_lossy()]);
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert_eq!(std::fs::read(dir.path().join("plain/out/d/f.txt")).unwrap(), b"extracted");
+    assert!(!dir.path().join("plain").join(".paleto").exists());
+}

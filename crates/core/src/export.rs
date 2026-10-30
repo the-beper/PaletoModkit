@@ -298,18 +298,32 @@ pub fn write_oiv(game: &Game, keys: Option<&Keys>, changes: &[Changed], meta: &M
         meta.description.replace("]]>", "]] >"),
     );
 
-    let file = std::fs::File::create(out)?;
+    // The package is written where the user chose: into a game folder, as a file of the confined writer.
+    let folder = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = out.file_name().and_then(|n| n.to_str()).ok_or_else(|| Error::UnsafePath { path: out.display().to_string(), why: "is not a file name".into() })?;
+    let need = payload.iter().map(|(_, data)| data.len() as u64).sum::<u64>() + assembly.len() as u64;
+    let (_, log) = crate::vfs::write_into(folder, "writing a package", |o| {
+        o.write_with(name, need, |file| write_zip(file, &assembly, &payload).map_err(|e| std::io::Error::other(e.to_string()))).map(drop)
+    })?;
+    for line in log {
+        eprintln!("paleto: {line}");
+    }
+    Ok(changes.len())
+}
+
+/// The zip of an OIV package: its `assembly.xml` and the files of the content.
+fn write_zip(file: &mut std::fs::File, assembly: &str, payload: &[(String, Vec<u8>)]) -> Result<(), Error> {
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(true);
     let zip_err = |e: zip::result::ZipError| Error::Package(e.to_string());
     zip.start_file("assembly.xml", opts).map_err(zip_err)?;
     zip.write_all(assembly.as_bytes())?;
-    for (source, data) in &payload {
+    for (source, data) in payload {
         zip.start_file(format!("content/{source}"), opts).map_err(zip_err)?;
         zip.write_all(data)?;
     }
     zip.finish().map_err(zip_err)?;
-    Ok(changes.len())
+    Ok(())
 }
 
 /// "a/b.rpf/c/d.rpf/e.ydr" → ("a/b.rpf", ["c/d.rpf"], "e.ydr"); the last
@@ -500,6 +514,12 @@ mod tests {
         let oiv = dir.path().join("mine.oiv");
         let meta = Metadata { name: "My mods".into(), version: "1.0".into(), author: "me".into(), description: "test".into() };
         write_oiv(&game, None, &changes, &meta, &oiv).unwrap();
+        // Into the game folder the package goes through the confined writer: not into original data, in `mods/` yes.
+        assert!(write_oiv(&game, None, &changes, &meta, &root.join("update/p.oiv")).is_err());
+        assert!(!root.join("update/p.oiv").exists());
+        write_oiv(&game, None, &changes, &meta, &root.join("mods/p.oiv")).unwrap();
+        assert_eq!(crate::Package::open(&root.join("mods/p.oiv")).unwrap().metadata.name, "My mods");
+        std::fs::remove_file(root.join("mods/p.oiv")).unwrap();
 
         // On a clean mods folder, the package rebuilds the same files.
         let before = [contents(&root.join("mods/x64e.rpf")), contents(&root.join("mods/update/update.rpf"))];
