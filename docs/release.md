@@ -34,7 +34,7 @@ These are GitHub settings. Only the maintainer can change them, from the web pag
 | Immutable releases | Settings, General | Turn on. A published release can no longer get other files. |
 | Pages | Settings, Pages | Deploy from `gh-pages`, root. Set it after the first run. |
 
-The first release also needs the first publication: run the workflow by hand with `bootstrap_pages` (see [Broken gh-pages](#broken-gh-pages)).
+`bootstrap_pages` is only for a repository without `gh-pages` (see [Broken gh-pages](#broken-gh-pages)). This one has had it since v1.5.1: the first stable tag builds on it, and `validate` refuses a bootstrap (exit 5).
 
 ## Cutting a release
 
