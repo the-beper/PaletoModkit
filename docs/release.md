@@ -58,6 +58,8 @@ The tag must point to a commit that is on `main`. `release-validate.sh` refuses 
    ```
 
    The tag is `vMAJOR.MINOR.PATCH`, or `-rc.N` after it. Nothing else (`v1.6`, `v1.6.0-beta.1`) is accepted. A tag push is always a release.
+
+   Push only the tag; never make the release on the GitHub web page ("Draft a new release", "Publish release"). The workflow makes it, with its files. A release published by hand has no files and, being immutable, can never get them: `validate` then stops ("published but incomplete"), and that tag can no longer be released. Cut the next version (`-rc.N+1`, or the next patch).
 4. Watch the run. The builds take most of the time. When `sign-flatpak` waits, open the run and approve the deployment to `flatpak-signing`. Check first that the run is yours and the tag is the one you pushed.
 5. When `publish` ends, check the release page and `flatpak remote-info` as in [the next section](#artifacts-and-how-to-verify-them).
 

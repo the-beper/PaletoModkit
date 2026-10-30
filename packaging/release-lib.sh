@@ -279,6 +279,9 @@ release_plan() {
     if [ -n "$pub_id" ]; then
         if assets_complete "$pub_id"; then complete=1; fi
     fi
+    # A release published without the files is usually one made by hand on the web page; an immutable release
+    # can never get them, and the tag cannot move: only the next version can be released.
+    incomplete="the release $t is published but incomplete (made by hand? push only the tag: the workflow makes the release); this tag can no longer be released, cut the next version (docs/release.md)"
     if is_rc "$t"; then
         [ "$mode" = release ] || die 3 "a release candidate is not published to the Flatpak repository"
         others=$(awk -F '\t' -v t="$t" '$2 != t && $3 == "false" { print $2 }' "$d/releases.tsv")
@@ -287,7 +290,7 @@ release_plan() {
             [ "$(semver_cmp "$t" "$x")" = 1 ] || die 3 "$t is not above the published $x"
         done
         if [ -n "$pub_id" ]; then
-            [ "$complete" = 1 ] || die 3 "the release $t is published but incomplete"
+            [ "$complete" = 1 ] || die 3 "$incomplete"
             echo noop
         else
             echo publish
@@ -318,7 +321,8 @@ release_plan() {
         return 0
     fi
     if [ -n "$pub_id" ]; then
-        [ "$pages_cmp" = 0 ] && [ "$complete" = 1 ] || die 3 "$t is published but not matched by gh-pages: use publish-flatpak"
+        [ "$complete" = 1 ] || die 3 "$incomplete"
+        [ "$pages_cmp" = 0 ] || die 3 "$t is published but not matched by gh-pages: use publish-flatpak"
         echo noop
     else
         echo publish
