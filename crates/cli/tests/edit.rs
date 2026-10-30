@@ -87,6 +87,59 @@ fn source(dir: &Path) -> std::path::PathBuf {
     path
 }
 
+/// A run that opened no game (so none is known to the program) still finds the one installed, by the real place of
+/// its linked `mods` folder on another drive: the folder is confined, and a link in it is not followed.
+#[test]
+fn an_installed_game_is_found_by_the_real_place_of_its_mods_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(".local/share/Steam/steamapps/common/Grand Theft Auto V");
+    std::fs::create_dir_all(root.join("x64")).unwrap();
+    std::fs::write(root.join("GTA5.exe"), b"").unwrap();
+    std::fs::write(root.join("x64/a.rpf"), b"original").unwrap();
+    let mods = dir.path().join("other drive/mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    std::os::unix::fs::symlink(&mods, root.join("mods")).unwrap();
+    // A link in the mods folder to the originals.
+    std::os::unix::fs::symlink(root.join("x64"), mods.join("d")).unwrap();
+    let src = source(dir.path());
+    let from = format!("{}/d", src.display());
+    let done = paleto(dir.path(), &["extract", &from, "-o", &mods.to_string_lossy()]);
+    assert!(!done.status.success(), "{}", String::from_utf8_lossy(&done.stdout));
+    assert!(!root.join("x64/f.txt").exists());
+    assert_eq!(std::fs::read(root.join("x64/a.rpf")).unwrap(), b"original");
+    // Elsewhere in the same folder it is written.
+    std::fs::remove_file(mods.join("d")).unwrap();
+    let done = paleto(dir.path(), &["extract", &from, "-o", &mods.to_string_lossy()]);
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert_eq!(std::fs::read(mods.join("d/f.txt")).unwrap(), b"extracted");
+    // It went through the game's lock and journal, which are kept in the game folder.
+    assert!(root.join(".paleto").is_dir());
+}
+
+/// Every staged file used to stay open until the commit: with 600 files and 200 descriptors allowed, the extraction failed.
+#[test]
+fn a_big_extraction_into_a_game_does_not_hold_every_file_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = game(dir.path());
+    std::fs::create_dir_all(root.join("mods")).unwrap();
+    let mut archive = paleto_rpf::ArchiveEditor::new("big.rpf");
+    for i in 0..600 {
+        archive.add_file(&format!("d/f{i}.txt"), format!("file {i}").into_bytes()).unwrap();
+    }
+    archive.save(&dir.path().join("big.rpf")).unwrap();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("ulimit -n 200 && exec \"$0\" \"$@\"")
+        .arg(env!("CARGO_BIN_EXE_paleto"))
+        .args(["extract", &format!("{}/d", dir.path().join("big.rpf").display()), "-o", &root.join("mods/big").to_string_lossy()])
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(root.join("mods/big/d/f599.txt")).unwrap(), b"file 599");
+}
+
 #[test]
 fn extracting_into_a_game_folder_goes_through_the_confined_writer() {
     let dir = tempfile::tempdir().unwrap();

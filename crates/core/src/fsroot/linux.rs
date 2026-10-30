@@ -7,7 +7,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileExt, MetadataExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -551,6 +551,11 @@ impl Dir {
         };
         unsafe { libc::closedir(dirp) };
         result.map(|()| names)
+    }
+
+    /// Where this folder really is now (links resolved), by the kernel's own name for the open folder.
+    pub fn real_path(&self) -> io::Result<PathBuf> {
+        std::fs::canonicalize(format!("/proc/self/fd/{}", self.fd()))
     }
 
     /// Device and inode of the directory itself.

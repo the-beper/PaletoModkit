@@ -301,6 +301,9 @@ pub fn extract_path(dest: &Path, rel: &str) -> Result<PathBuf, Error> {
 
 /// Where an export or an extraction writes: a folder the user picked, reached through [`write_into`].
 pub struct Output<'r> {
+    /// The folder as the user named it, for what is returned and said.
+    shown: PathBuf,
+    /// The folder as it really is (links resolved, a part that does not exist yet appended): what is written.
     dest: PathBuf,
     inside: Option<Inside<'r>>,
 }
@@ -313,6 +316,25 @@ struct Inside<'r> {
     base: PathBuf,
 }
 
+/// The nearest folder of `dest` that exists, as it really is (every link resolved), and the plain names below
+/// it that do not exist yet. A path is never reasoned on as written: `new/../..` below a folder that is not there
+/// would be taken for a place it is not, so a `..` or a link that leads nowhere in the part that is missing is refused.
+fn real_anchor(dest: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>), Error> {
+    let refuse = |why: &str| Error::UnsafePath { path: dest.display().to_string(), why: why.to_string() };
+    let mut anchor = dest.to_path_buf();
+    let mut rest = Vec::new();
+    while !anchor.exists() {
+        if std::fs::symlink_metadata(&anchor).is_ok() {
+            return Err(refuse("goes through a link that leads nowhere"));
+        }
+        let Some(name) = anchor.file_name() else { return Err(refuse("has a `..` below a folder that does not exist")) };
+        rest.push(name.to_owned());
+        anchor.pop();
+    }
+    rest.reverse();
+    Ok((std::fs::canonicalize(&anchor)?, rest))
+}
+
 /// Runs `body`, which writes files below `dest` (a folder the user picked, perhaps not made yet) through the
 /// [`Output`] it is given, and returns its result with what the commit noted. Outside every game folder it
 /// writes as it always did (folders made, files created). In a game folder (see [`owner_of`]; also one reached
@@ -322,27 +344,17 @@ struct Inside<'r> {
 /// refused (game data goes into `mods/`), and an error undoes every file of the operation, saying honestly what
 /// the undo could not (files are put in place one after the other, recoverable, not atomic for a reader).
 pub fn write_into<T>(dest: &Path, label: &str, body: impl FnOnce(&mut Output<'_>) -> Result<T, Error>) -> Result<(T, Vec<String>), Error> {
-    let dest = std::path::absolute(dest)?;
-    // The folder may not exist yet: the nearest one that does says which game it is in.
-    let mut anchor = dest.clone();
-    let mut rest = Vec::new();
-    while !anchor.exists() {
-        let Some(name) = anchor.file_name().map(|n| n.to_owned()) else { break };
-        rest.push(name);
-        anchor.pop();
-    }
-    // `..` in a folder reached through a link goes where the link leads: the real place is looked at then.
-    if anchor.exists() && anchor.components().any(|c| c == std::path::Component::ParentDir) {
-        anchor = std::fs::canonicalize(&anchor)?;
-    }
-    let Some(game) = Some(&anchor).filter(|a| a.exists()).and_then(|a| owner_of(a)) else {
-        return body(&mut Output { dest, inside: None }).map(|t| (t, Vec::new()));
+    let shown = std::path::absolute(dest)?;
+    let (anchor, rest) = real_anchor(&shown)?;
+    let real = anchor.join(rest.iter().collect::<PathBuf>());
+    let Some(game) = owner_of(&anchor) else {
+        return body(&mut Output { shown, dest: real, inside: None }).map(|t| (t, Vec::new()));
     };
-    let not_in_game = || Error::UnsafePath { path: dest.display().to_string(), why: format!("is not in the game folder {}", game.root.display()) };
-    let base = in_game(&anchor, &game).ok_or_else(not_in_game)?.join(rest.iter().rev().collect::<PathBuf>());
+    let not_in_game = || Error::UnsafePath { path: shown.display().to_string(), why: format!("is not in the game folder {}", game.root.display()) };
+    let base = in_game(&anchor, &game).ok_or_else(not_in_game)?.join(rest.iter().collect::<PathBuf>());
     let roots = game.roots()?;
     let txn = Txn::begin(&roots, label)?;
-    let mut out = Output { dest: dest.clone(), inside: Some(Inside { roots: &roots, txn, base }) };
+    let mut out = Output { shown, dest: real, inside: Some(Inside { roots: &roots, txn, base }) };
     match body(&mut out) {
         Ok(done) => {
             let Some(Inside { txn, .. }) = out.inside.take() else { return Err(Error::Io(io::Error::other("the output was already finished"))) };
@@ -370,26 +382,28 @@ impl Output<'_> {
     /// the folders it needs are made with it. A name that is there is replaced (a link by a file, never written
     /// through); one written twice in the operation is a conflict.
     pub fn write_with(&mut self, rel: &str, need: u64, write: impl FnOnce(&mut File) -> io::Result<()>) -> Result<PathBuf, Error> {
-        let path = extract_path(&self.dest, rel)?;
-        let Some(inside) = &mut self.inside else {
+        let path = extract_path(&self.shown, rel)?;
+        if self.inside.is_none() {
             let at = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(at)?;
-            }
-            let mut file = File::create(&path).map_err(at)?;
-            write(&mut file).map_err(at)?;
+            let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+            let dir = self.plain_folder(parent).map_err(at)?;
+            // A new file of an unpredictable name renamed over the name: a link or a hard link there is replaced, never written through.
+            crate::fsroot::replace_file(&dir, name, write).map_err(at)?;
             return Ok(path);
-        };
+        }
+        let Some(inside) = &mut self.inside else { return Ok(path) };
         let mut dest = local_dest(inside.roots, &RelPath::parse(&inside.base.join(rel).to_string_lossy())?)?;
-        inside.txn.stage_sized(&mut dest, need, write)?;
+        let staged = inside.txn.stage_sized(&mut dest, need, write)?;
+        // A package of thousands of files would otherwise hold thousands open.
+        inside.txn.release(staged);
         Ok(path)
     }
 
     /// Makes the folder `rel` below the folder (the folder itself if `rel` is empty). In a game folder it only
     /// checks that the policy lets files go there: folders are made with the files in them, and an empty one is not made.
     pub fn mkdir(&mut self, rel: &str) -> Result<(), Error> {
-        let path = if rel.is_empty() { self.dest.clone() } else { extract_path(&self.dest, rel)? };
-        let Some(inside) = &self.inside else { return std::fs::create_dir_all(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())).into()) };
+        let path = if rel.is_empty() { self.shown.clone() } else { extract_path(&self.shown, rel)? };
+        let Some(inside) = &self.inside else { return self.plain_folder(rel).map(drop).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())).into()) };
         let below = inside.base.join(rel);
         if below.as_os_str().is_empty() {
             return Ok(());
@@ -399,6 +413,34 @@ impl Output<'_> {
             return Ok(());
         }
         local_dest(inside.roots, &rel).map(drop)
+    }
+
+    /// Outside every game: the folder `rel` below the output folder, opened (and made) one name at a time. A link
+    /// on the way is followed as it always was, but only if the folder it leads to is not in a game folder; that is
+    /// judged on the folder as opened, not on a name that could be changed in between.
+    fn plain_folder(&self, rel: &str) -> io::Result<Dir> {
+        let not_in_a_game = |dir: &Dir| -> io::Result<()> {
+            match owner_of(&dir.real_path()?) {
+                Some(game) => Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("that is in the game folder {}, where files are written only as the other changes to a game are: pick a folder in it that takes them", game.root.display()))),
+                None => Ok(()),
+            }
+        };
+        std::fs::create_dir_all(&self.dest)?;
+        let mut dir = Dir::open_path(&self.dest)?;
+        not_in_a_game(&dir)?;
+        for name in rel.split('/').filter(|n| !n.is_empty()) {
+            dir = match dir.kind(name)? {
+                None => dir.mkdir(name)?,
+                Some(Kind::Dir) => dir.open_dir(name)?,
+                Some(Kind::Link) => {
+                    let linked = dir.open_dir_following(name)?;
+                    not_in_a_game(&linked)?;
+                    linked
+                }
+                Some(_) => return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{name} is not a folder"))),
+            };
+        }
+        Ok(dir)
     }
 }
 
@@ -434,6 +476,8 @@ pub fn owner_of(path: &Path) -> Option<Game> {
     let above = |p: &Path| p.ancestors().find_map(|dir| Game::open(dir).ok());
     let abs = std::path::absolute(path).ok()?;
     above(&abs).or_else(|| std::fs::canonicalize(path).ok().and_then(|real| above(&real))).or_else(|| Game::known().into_iter().find(|g| in_game(path, g).is_some()))
+        // A run that never opened a game (keys were cached) knows none: the installed ones are looked at too.
+        .or_else(|| crate::game::detect_installs().into_iter().find(|g| in_game(path, g).is_some()))
 }
 
 /// Runs `f` under the lock of the game that `path` belongs to (see [`owner_of`]), if it belongs to one:
@@ -1054,6 +1098,83 @@ mod tests {
         assert_eq!(std::fs::read(elsewhere.join("x64/c.dat")).unwrap(), b"c");
         assert_clean(&game, "linked mods");
         assert!(!game.root.join("x64/c.dat").exists());
+    }
+
+    /// `..` below a folder that is not there is not a place that can be reasoned on as written: it used to be taken
+    /// for outside every game, made `mods/new`, and then truncated the original it really led to.
+    #[test]
+    fn output_with_dotdot_below_a_missing_folder_is_refused_and_nothing_is_made() {
+        use crate::fixtures::{assert_clean, assert_unchanged, game_folder, snapshot};
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_folder(dir.path(), Edition::Legacy);
+        std::fs::create_dir(game.root.join("mods")).unwrap();
+        let (before, original) = (snapshot(&game.root), std::fs::metadata(game.root.join("x64/a.rpf")).unwrap());
+        for dest in ["mods/new/../../x64", "x64/sub/..", "mods/new/..", "mods/a/b/../../../x64/c/.."] {
+            let e = put(&game.root.join(dest), &[("a.rpf", b"")]).unwrap_err();
+            assert!(matches!(e, Error::UnsafePath { .. }), "{dest}: {e}");
+        }
+        assert_unchanged(&before, &snapshot(&game.root));
+        let after = std::fs::metadata(game.root.join("x64/a.rpf")).unwrap();
+        assert_eq!((after.ino(), after.len(), after.mtime_nsec()), (original.ino(), original.len(), original.mtime_nsec()));
+        assert_clean(&game, "dotdot");
+        // Where every part exists, `..` is resolved for real: it names the originals, which are refused.
+        std::fs::create_dir(game.root.join("mods/real")).unwrap();
+        assert!(put(&game.root.join("mods/real/../../x64"), &[("a.rpf", b"")]).is_err());
+        assert_eq!(std::fs::metadata(game.root.join("x64/a.rpf")).unwrap().len(), original.len());
+    }
+
+    #[test]
+    fn output_outside_every_game_never_writes_through_a_link_into_one_or_in_place() {
+        use crate::fixtures::{assert_unchanged, game_folder, snapshot};
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_folder(dir.path(), Edition::Legacy);
+        std::fs::create_dir(game.root.join("mods")).unwrap();
+        let before = snapshot(&game.root);
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        // A folder link in the names, or the folder picked itself, leading into a game: refused, nothing made there.
+        symlink(game.root.join("x64"), out.join("dd")).unwrap();
+        symlink(game.root.join("mods"), out.join("mm")).unwrap();
+        assert!(put(&out, &[("dd/a.rpf", b"new")]).is_err());
+        assert!(put(&out, &[("mm/newdir/f.txt", b"new")]).is_err());
+        assert!(put(&out.join("dd"), &[("a.rpf", b"new")]).is_err());
+        assert_unchanged(&before, &snapshot(&game.root));
+        // A link at the name of a file is replaced, and what it leads to stays as it is.
+        let other = dir.path().join("other.txt");
+        std::fs::write(&other, b"other").unwrap();
+        symlink(&other, out.join("l.txt")).unwrap();
+        symlink(game.root.join("x64/a.rpf"), out.join("a.rpf")).unwrap();
+        put(&out, &[("l.txt", b"new"), ("a.rpf", b"new")]).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"other");
+        assert_eq!(std::fs::read(out.join("l.txt")).unwrap(), b"new");
+        assert!(!std::fs::symlink_metadata(out.join("l.txt")).unwrap().file_type().is_symlink());
+        assert_unchanged(&before, &snapshot(&game.root));
+        // A hard link to a file elsewhere: the file gets a new inode, the other name keeps the old bytes.
+        let hard = dir.path().join("hard.txt");
+        std::fs::hard_link(&other, &hard).unwrap();
+        let inode = std::fs::metadata(&other).unwrap().ino();
+        put(dir.path(), &[("hard.txt", b"changed")]).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"other");
+        assert_eq!(std::fs::metadata(&other).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(&hard).unwrap(), b"changed");
+        // A folder link that leads outside every game is still followed.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        symlink(&elsewhere, out.join("ok")).unwrap();
+        put(&out, &[("ok/f.txt", b"f")]).unwrap();
+        assert_eq!(std::fs::read(elsewhere.join("f.txt")).unwrap(), b"f");
+    }
+
+    #[test]
+    fn running_out_of_room_says_the_margin_is_this_tools() {
+        use crate::fixtures::game_folder;
+        let dir = tempfile::tempdir().unwrap();
+        let game = game_folder(dir.path(), Edition::Legacy);
+        let e = write_into(&game.root.join("scripts"), "test", |out| out.write_with("big.asi", u64::MAX / 2, |_| Ok(())).map(drop)).unwrap_err().to_string();
+        assert!(e.contains("not enough free space") && e.contains("safety margin of this tool") && e.contains("on that disk"), "{e}");
+        assert!(!game.root.join("scripts/big.asi").exists());
     }
 
     #[test]

@@ -497,7 +497,7 @@ fn enough_space(dest: &Resolved, need: u64) -> Result<(), Error> {
         return Ok(());
     }
     let folder = dest.path().parent().map(|p| p.display().to_string()).unwrap_or_default();
-    Err(Error::Io(io::Error::new(io::ErrorKind::StorageFull, format!("{folder}: not enough free space: {} are needed and at least {} must stay free, but only {} are free", size_text(need), size_text(FREE_MARGIN), size_text(free)))))
+    Err(Error::Io(io::Error::new(io::ErrorKind::StorageFull, format!("{folder}: not enough free space: {} are needed and at least {} must stay free on that disk (a safety margin of this tool, so that a change can always be undone), but only {} are free", size_text(need), size_text(FREE_MARGIN), size_text(free)))))
 }
 
 // ---- recovery ----
