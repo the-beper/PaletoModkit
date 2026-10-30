@@ -409,7 +409,8 @@ pub fn legacy_in_archive(archive: &Archive, keys: Option<&Keys>) -> Vec<String> 
     while let Some((prefix, child)) = queue.pop() {
         let archive = child.as_ref().unwrap_or(archive);
         for (path, i) in archive.walk(0) {
-            // The parser refuses odd names; the paths found here go on to edit the archive, so check again.
+            // The parser refuses odd names; the paths found here go on to edit the archive, so check again. Skipped
+            // without a message on purpose: it cannot happen with the parser, and this list has no channel for one.
             if !crate::vfs::is_plain_entry_path(&path) {
                 continue;
             }
