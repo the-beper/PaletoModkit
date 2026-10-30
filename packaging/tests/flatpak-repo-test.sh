@@ -119,13 +119,14 @@ sign() {
     shift 4
     man=$BASE/m/$v/release-manifest.txt
     pin=$(sha256sum "$man" | cut -d' ' -f1) # the job output of the verify job
-    sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
+    GITHUB_OUTPUT="$out.prep.gho" sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
         --unsigned "$BASE/b/$v/flatpak-unsigned-repo.tar" --site "$site" --work "$out.pwork" --out "$out.prep" "$@" || return $?
-    MANIFEST_SHA256=$pin GITHUB_OUTPUT="$out.check.gho" sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.cwork" --out "$out.checked" --site "$site" "$@" || return $?
+    ppin=$(sed -n 's/^prepared_sha256=//p' "$out.prep.gho") # the job output of the prepare job
+    MANIFEST_SHA256=$pin PREPARED_SHA256=$ppin GITHUB_OUTPUT="$out.check.gho" sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.cwork" --out "$out.checked" --site "$site" "$@" || return $?
     ckp=$(sed -n 's/^checked_sha256=//p' "$out.check.gho") # the job output of the check job
-    CHECKED_SHA256=$ckp sh "$PKG/flatpak-sign.sh" --unpack --tag "v$v" --commit "$COMMIT" --in "$out.checked" --work "$out.swork" || return $?
+    CHECKED_SHA256=$ckp PREPARED_SHA256=$ppin sh "$PKG/flatpak-sign.sh" --unpack --tag "v$v" --commit "$COMMIT" --in "$out.checked" --work "$out.swork" || return $?
     FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") GITHUB_OUTPUT="$out.sign.gho" sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.swork" --out "$out.res" || return $?
-    MANIFEST_SHA256=$pin CHECKED_SHA256=$ckp RESULT_SHA256=$(sed -n 's/^result_sha256=//p' "$out.sign.gho") sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --checked "$out.checked" --work "$out.fwork" --out "$out" || return $?
+    MANIFEST_SHA256=$pin CHECKED_SHA256=$ckp PREPARED_SHA256=$ppin RESULT_SHA256=$(sed -n 's/^result_sha256=//p' "$out.sign.gho") sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --checked "$out.checked" --work "$out.fwork" --out "$out" || return $?
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.swork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.cwork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.pwork"

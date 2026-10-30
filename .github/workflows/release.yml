@@ -245,6 +245,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    # The hash of flatpak-prepared.txt (which names the commit of every head), which check-flatpak, sign-flatpak and finish-flatpak
+    # require: the commits the key signs are the ones this job made, whatever a later job says.
+    outputs:
+      prepared_sha256: ${{ steps.prep_site.outputs.prepared_sha256 || steps.prep_bootstrap.outputs.prepared_sha256 || steps.prep_fresh.outputs.prepared_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
@@ -273,12 +277,15 @@ jobs:
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
         run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
       - name: Check the builds and gh-pages, prepare the repository
+        id: prep_site
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
         run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
       - name: Check the builds and gh-pages, prepare the repository (first publication)
+        id: prep_bootstrap
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
         run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --bootstrap --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
       - name: Check the builds, prepare the repository (release candidate, a repository of its own)
+        id: prep_fresh
         if: ${{ needs.validate.outputs.prerelease == 'true' }}
         run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --fresh --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -307,6 +314,7 @@ jobs:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
       MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
+      PREPARED_SHA256: ${{ needs.prepare-flatpak.outputs.prepared_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -354,7 +362,7 @@ jobs:
           retention-days: 14
 
   sign-flatpak:
-    needs: [validate, check-signing-env, check-flatpak]
+    needs: [validate, check-signing-env, prepare-flatpak, check-flatpak]
     if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.check-signing-env.result == 'success' && needs.check-flatpak.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -383,11 +391,13 @@ jobs:
           artifact-ids: ${{ needs.check-flatpak.outputs.checked_artifact_id }}
           path: checked
       # Without the key, and apart from the Sign step because the secret is in the environment of that shell and its children can read
-      # it: the hash of the record against the job output of check-flatpak, then the files against the record; unpacks the repository.
+      # it: the hash of the record against the job output of check-flatpak and the one of prepared.txt against the job output of
+      # prepare-flatpak (the check job cannot change what is signed), then the files against them; unpacks the repository.
       # No ostree, gpg, flatpak, git or network.
       - name: Unpack the checked repository
         env:
           CHECKED_SHA256: ${{ needs.check-flatpak.outputs.checked_sha256 }}
+          PREPARED_SHA256: ${{ needs.prepare-flatpak.outputs.prepared_sha256 }}
         run: packaging/flatpak-sign.sh --unpack --tag "$TAG" --commit "$COMMIT" --in checked --work "$RUNNER_TEMP/signwork"
       # The only step with the key: it signs the named commits and the summary, in a keyring in memory.
       - name: Sign
@@ -403,12 +413,13 @@ jobs:
           name: flatpak-sign-result-${{ needs.validate.outputs.commit }}
           path: ${{ runner.temp }}/signres/
           if-no-files-found: error
-          retention-days: 14
+          # finish-flatpak runs right after. The summary in it was signed over the base of this run: it is not kept for a later one.
+          retention-days: 1
 
   # Verifies the signed repository with the public key only and makes the bundle, on a machine that never held the key
   # (the disk of the signing machine is not trusted to be clean: a deleted file is not wiped).
   finish-flatpak:
-    needs: [validate, verify, check-flatpak, sign-flatpak]
+    needs: [validate, verify, prepare-flatpak, check-flatpak, sign-flatpak]
     if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' && needs.check-flatpak.result == 'success' && needs.sign-flatpak.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -422,6 +433,7 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
       MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
       CHECKED_SHA256: ${{ needs.check-flatpak.outputs.checked_sha256 }}
+      PREPARED_SHA256: ${{ needs.prepare-flatpak.outputs.prepared_sha256 }}
       RESULT_SHA256: ${{ needs.sign-flatpak.outputs.result_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
