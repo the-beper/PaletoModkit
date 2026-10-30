@@ -544,6 +544,7 @@ ENGINE
     assert_eq "commit in flatpak-build.txt" "$(git -C "$w" rev-parse HEAD)" "$(kv "$SIM/bfout/flatpak-build.txt" commit)"
     assert_log "$SIM/engine.log" "--privileged"
     assert_log "$SIM/engine.log" "@sha256:"
+    assert_log "$SIM/engine.log" "export FLATPAK_SYSTEM_DIR=/work/flatpak"
     if grep -q -i 'gnupg\|GPG' "$SIM/engine.log"; then fail "the container was given something about GPG"; fi
     # what a release verify makes of the exported repository
     run "$SIM/bf.log" in_dir "$w" sh packaging/release-verify.sh builds --tag v1.5.1 --commit "$(git -C "$w" rev-parse HEAD)" --flatpak "$SIM/bfout" --out "$SIM/bfverified"

@@ -2,7 +2,7 @@
 # Builds the Flatpak, unsigned, with flatpak-builder in the Flathub build image (podman, or docker for local
 # use), as the release workflow does. Signing is a separate step with the key (packaging/flatpak-sign.sh): no
 # key ever enters the build container, and the script refuses to run with GPG_KEY_ID or GNUPGHOME set.
-#   WORK=dir        builder cache and repository (default ~/.cache/paleto-flatpak)
+#   WORK=dir        builder cache, Flatpak installation (WORK/flatpak) and repository (default ~/.cache/paleto-flatpak)
 #   OUT=dir         where the results are copied (default dist/)
 #   CPUS=n          cores the build may use, to leave the rest of the machine free (default: all)
 #   BUNDLE=1|0      make the unsigned bundle PaletoModkit-x86_64.flatpak in OUT (default 1, for local use)
@@ -15,8 +15,8 @@
 #   FLATPAK_CONTAINER_MODE=minimal  instead of --privileged, only the seccomp and fuse options flatpak-builder
 #                   needs (untested on a runner: bwrap may fail to create a namespace)
 # The image is used by digest, and inside it the SDK and its extensions are updated to the commits in
-# release.conf and checked with flatpak info. Needs the network (crates, NuGet packages, the Flathub runtime)
-# and about 15 GB.
+# release.conf and checked with flatpak info; the installation is in WORK, not in the image's layers (see below).
+# Needs the network (crates, NuGet packages, the Flathub runtime) and about 15 GB.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -75,6 +75,11 @@ set -e
 git config --global --add safe.directory /src
 git config --global --add safe.directory /src/third_party/codewalker
 ./packaging/flatpak-cargo-sources.sh
+# The Flatpak system installation lives in the bind-mounted work folder: the image ships the SDK in its overlay
+# layers, and updating it there fails with EXDEV (rename across layers). libflatpak, so flatpak and
+# flatpak-builder, read FLATPAK_SYSTEM_DIR; the image's own installation is not used.
+mkdir -p /work/flatpak
+export FLATPAK_SYSTEM_DIR=/work/flatpak
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 SDK=org.freedesktop.Sdk//26.08
 RUST=org.freedesktop.Sdk.Extension.rust-stable//26.08
