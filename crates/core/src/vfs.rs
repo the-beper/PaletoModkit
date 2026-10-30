@@ -308,6 +308,8 @@ pub struct Output<'r> {
     missing: Vec<std::ffi::OsString>,
     /// Folders already judged not to be in a game (device and inode), so that a long extraction asks once for each.
     judged: std::collections::HashSet<(u64, u64)>,
+    /// Folders already looked at for what a game holds.
+    looked_at: std::collections::HashSet<PathBuf>,
     inside: Option<Inside<'r>>,
 }
 
@@ -350,13 +352,13 @@ pub fn write_into<T>(dest: &Path, label: &str, body: impl FnOnce(&mut Output<'_>
     let shown = std::path::absolute(dest)?;
     let (anchor, rest) = real_anchor(&shown)?;
     let Some(game) = owner_of(&anchor) else {
-        return body(&mut Output { shown, anchor, missing: rest, judged: Default::default(), inside: None }).map(|t| (t, Vec::new()));
+        return body(&mut Output { shown, anchor, missing: rest, judged: Default::default(), looked_at: Default::default(), inside: None }).map(|t| (t, Vec::new()));
     };
     let not_in_game = || Error::UnsafePath { path: shown.display().to_string(), why: format!("is not in the game folder {}", game.root.display()) };
     let base = in_game(&anchor, &game).ok_or_else(not_in_game)?.join(rest.iter().collect::<PathBuf>());
     let roots = game.roots()?;
     let txn = Txn::begin(&roots, label)?;
-    let mut out = Output { shown, anchor, missing: Vec::new(), judged: Default::default(), inside: Some(Inside { roots: &roots, txn, base }) };
+    let mut out = Output { shown, anchor, missing: Vec::new(), judged: Default::default(), looked_at: Default::default(), inside: Some(Inside { roots: &roots, txn, base }) };
     match body(&mut out) {
         Ok(done) => {
             let Some(Inside { txn, .. }) = out.inside.take() else { return Err(Error::Io(io::Error::other("the output was already finished"))) };
@@ -445,14 +447,38 @@ impl Output<'_> {
             return Ok(());
         }
         let real = dir.real_path()?;
-        match owner_of(&real) {
-            Some(game) => Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is in the game folder {}, where files are written only as the other changes to a game are: pick a folder in it that takes them", real.display(), game.root.display()))),
-            None => {
-                self.judged.insert(id);
-                Ok(())
+        if let Some(game) = owner_of(&real) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is in the game folder {}, where files are written only as the other changes to a game are: pick a folder in it that takes them", real.display(), game.root.display())));
+        }
+        // A folder that only looks like a game (no executable, mid-update, a drive holding the data) is one too.
+        for folder in real.ancestors() {
+            if !self.looked_at.contains(folder) {
+                if let Some(sign) = looks_like_game(folder) {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} looks like a game folder ({} is in {}): files are not written there, pick another folder", real.display(), sign, folder.display())));
+                }
+                self.looked_at.insert(folder.to_path_buf());
             }
         }
+        self.judged.insert(id);
+        Ok(())
     }
+}
+
+/// Why `dir` looks like a game folder or its data: it holds (in any case) a game executable, the launcher or one of the
+/// big archives, or an `update` folder holding `update.rpf`. Broader than [`Game::open`], which chooses games and must
+/// not take a folder for one on such signs; used where a write must not land in a game that was not recognised.
+fn looks_like_game(dir: &Path) -> Option<String> {
+    const SIGNS: [&str; 6] = ["gta5.exe", "gta5_enhanced.exe", "playgtav.exe", "x64a.rpf", "common.rpf", "update.rpf"];
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if SIGNS.contains(&name.as_str()) {
+            return Some(entry.file_name().to_string_lossy().into_owned());
+        }
+        if name == "update" && std::fs::read_dir(entry.path()).is_ok_and(|inner| inner.flatten().any(|f| f.file_name().to_string_lossy().eq_ignore_ascii_case("update.rpf"))) {
+            return Some("update/update.rpf".into());
+        }
+    }
+    None
 }
 
 /// Lists local files below `path` (or `path` itself) with their path relative
@@ -1212,6 +1238,43 @@ mod tests {
         assert_eq!(std::fs::read(home.join("out/a/b/x/y/z.txt")).unwrap(), b"z");
         put(&common, &[("Other Game/x64/a.rpf", b"mine")]).unwrap();
         assert_eq!(std::fs::read(common.join("Other Game/x64/a.rpf")).unwrap(), b"mine");
+    }
+
+    /// A folder that is not recognised as a game (no executable, another one, mid-update) but holds what a game holds
+    /// is not written into, nor anything below it.
+    #[test]
+    fn output_into_a_folder_that_looks_like_a_game_is_refused() {
+        use crate::fixtures::{rpf, snapshot};
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let shapes: [(&str, &[&str]); 5] = [("exe-upper", &["gta5.EXE"]), ("launcher", &["PlayGTAV.exe"]), ("no-exe", &["X64A.rpf"]), ("common", &["Common.RPF"]), ("enhanced", &["GTA5_ENHANCED.exe"])];
+        for (shape, signs) in shapes {
+            let root = dir.path().join(shape);
+            std::fs::create_dir_all(root.join("x64")).unwrap();
+            for sign in signs {
+                std::fs::write(root.join(sign), b"sign").unwrap();
+            }
+            std::fs::write(root.join("x64/a.rpf"), b"original").unwrap();
+            let before = (snapshot(&root), std::fs::metadata(root.join("x64/a.rpf")).unwrap().ino());
+            // Into it, into a folder of it, and from the folder above it.
+            for (dest, name) in [(root.clone(), "x64/a.rpf".to_string()), (root.join("x64"), "a.rpf".into()), (root.join("x64/new"), "b.rpf".into()), (dir.path().to_path_buf(), format!("{shape}/x64/a.rpf"))] {
+                assert!(put(&dest, &[(&name, b"new")]).is_err(), "{shape}: {dest:?} {name}");
+                assert_eq!((snapshot(&root), std::fs::metadata(root.join("x64/a.rpf")).unwrap().ino()), before, "{shape}");
+            }
+        }
+        // A drive that holds the game's `update` folder (linked or not) and nothing else.
+        let drive = dir.path().join("drive");
+        rpf(&drive.join("update/update.rpf"), "update.rpf", &[("a.txt", b"a")]);
+        let original = std::fs::read(drive.join("update/update.rpf")).unwrap();
+        let inode = std::fs::metadata(drive.join("update/update.rpf")).unwrap().ino();
+        assert!(put(&drive, &[("update/update.rpf", b"new")]).is_err());
+        assert!(put(&drive.join("update"), &[("update.rpf", b"new")]).is_err());
+        assert!(put(&drive.join("update/x64"), &[("b.rpf", b"new")]).is_err());
+        assert_eq!((std::fs::read(drive.join("update/update.rpf")).unwrap(), std::fs::metadata(drive.join("update/update.rpf")).unwrap().ino()), (original, inode));
+        assert!(!drive.join("update/x64").exists());
+        // An ordinary folder takes it, an unrelated archive name included.
+        put(&dir.path().join("plain"), &[("update/mine.rpf", b"mine"), ("x64/a.rpf", b"mine")]).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("plain/x64/a.rpf")).unwrap(), b"mine");
     }
 
     #[test]

@@ -1292,7 +1292,8 @@ impl Loose {
     fn write(&self, data: &[u8]) -> Result<()> {
         match &self.copy_of {
             Some((game, rel)) => Ok(game.replace_game_file(rel, data)?),
-            None => Ok(std::fs::write(&self.file, data)?),
+            // A new file renamed over the name: a hard link or a link swapped in since the check is replaced, never written through.
+            None => Ok(paleto_core::game::replace_file(&self.file, |f| std::io::Write::write_all(f, data))?),
         }
     }
 }
@@ -1505,6 +1506,26 @@ mod tests {
         write_any(&b.join("plugin.ini").display().to_string(), None, b"new".to_vec()).unwrap();
         assert_eq!(std::fs::read(b.join("plugin.ini")).unwrap(), b"new");
         assert!(!a.join("mods").exists());
+    }
+
+    /// A loose file outside every game is replaced by a new one, not written in place: a hard link keeps its bytes, a link is replaced.
+    #[test]
+    fn a_loose_file_is_replaced_not_written_through_a_hard_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, other) = (dir.path().join("a.txt"), dir.path().join("other.txt"));
+        std::fs::write(&file, b"old").unwrap();
+        std::fs::hard_link(&file, &other).unwrap();
+        let loose = Loose { file: file.clone(), copy_of: None };
+        loose.write(b"new").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"new");
+        assert_eq!(std::fs::read(&other).unwrap(), b"old");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"target").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        loose.write(b"again").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"target");
+        assert_eq!(std::fs::read(&file).unwrap(), b"again");
     }
 
     /// A file in a game folder is never written in place or through a link, and the game's own files are refused.
