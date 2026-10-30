@@ -24,8 +24,8 @@
 #       one, see repo_config); deletes the old summary files and static deltas; compares the content checksums of the app and Debug commits
 #       with release-manifest.txt, which the verify job made from the build output on its own; and checks every head that is
 #       not the published one (the new commits): parent, ref binding, exactly the metadata keys of an honest run, xa.ref,
-#       xa.metadata and the sizes as the verified build had them, no detached metadata, date; and that the other heads are
-#       byte for byte the published ones. A release candidate goes with --fresh and a stable release never does. Writes
+#       xa.metadata and the sizes as the verified build had them, subject and body, no detached metadata, date; and that
+#       the other heads are byte for byte the published ones. A release candidate goes with --fresh and a stable release never does. Writes
 #       DIR of --work with the repository, the list of refs and commits that --sign may sign (the new heads, as they are
 #       now) and base.txt (the mode, gh-pages and the published heads that were checked).
 #   flatpak-sign.sh --sign --tag vX.Y.Z --commit SHA --work DIR --out DIR     job sign-flatpak, the secret, and only it
