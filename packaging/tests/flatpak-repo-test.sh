@@ -120,7 +120,7 @@ sign() {
     man=$BASE/m/$v/release-manifest.txt
     sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
         --unsigned "$BASE/b/$v/flatpak-unsigned-repo.tar" --site "$site" --work "$out.pwork" --out "$out.prep" "$@" || return $?
-    sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" || return $?
+    sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" --site "$site" "$@" || return $?
     FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
     sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.work"
@@ -157,7 +157,8 @@ legacy_sign() {
     rm -rf "$3" "$3.u"
     mkdir -p "$3" "$3.u"
     tar -C "$3.u" -xf "$BASE/b/$1/flatpak-unsigned-repo.tar"
-    if [ -n "$2" ]; then cp -a "$2/repo" "$3/repo"; else ostree --repo="$3/repo" init --mode=archive-z2; fi
+    # the config of the published repository, byte for byte (the scripts refuse any other)
+    if [ -n "$2" ]; then cp -a "$2/repo" "$3/repo"; else ostree --repo="$3/repo" init --mode=archive-z2 && printf '[core]\nrepo_version=1\nmode=archive-z2\nindexed-deltas=true\n' > "$3/repo/config"; fi
     flatpak build-commit-from --untrusted --src-repo="$3.u/repo" --gpg-sign="$FPR_K" --gpg-homedir="$BASE/ahome" --no-update-summary \
         "$3/repo" "$APP_REF" "runtime/$ID.Debug/x86_64/master" > /dev/null 2>&1
     flatpak build-update-repo --gpg-sign="$FPR_K" --gpg-homedir="$BASE/ahome" --generate-static-deltas --prune --prune-depth=3 "$3/repo" > /dev/null 2>&1

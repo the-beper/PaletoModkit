@@ -5,8 +5,9 @@ name: Release
 # environment, in one step of one job. Everything that parses untrusted data (the build output, gh-pages: tar,
 # ostree, gpg --show-keys, flatpak) runs in jobs without the key, on other virtual machines: `verify`,
 # `prepare-flatpak` and `finish-flatpak`. `sign-flatpak` first checks, without the key, what `prepare-flatpak` handed
-# over against the manifest of `verify` (the content checksums), then signs the commits and the summary in a keyring
-# in memory (nothing is built or generated there, and there are no static deltas) and removes it. `finish-flatpak`
+# over against the manifest of `verify` (the content checksums) and against gh-pages, fetched again (config, parents,
+# commit metadata), then signs the new commits and the summary in a keyring in memory (nothing is built or generated
+# there, and there are no static deltas) and removes it. `finish-flatpak`
 # verifies the signed repository like a client does and makes the bundle, on a machine that never held the key. Only
 # `publish` can write (the draft release, then gh-pages through a credential helper, then the release). The rules are
 # in docs/release.md, the scripts in packaging/release-*.sh and flatpak-sign.sh, simulated by
@@ -307,10 +308,24 @@ jobs:
         with:
           name: verified-${{ needs.validate.outputs.commit }}
           path: in
-      # Without the key: unpack what prepare-flatpak made, check its refs and compare its content with the manifest
-      # of the verify job; this names the commits the next step may sign.
+      # The published repository again, without credentials: the base of the checks below is not what prepare-flatpak says.
+      - name: Fetch gh-pages
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
+        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages"
+      - name: Fetch gh-pages (first publication)
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
+        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
+      # Without the key: unpack what prepare-flatpak made, check its refs, config and new commits against gh-pages and its
+      # content against the manifest of the verify job; this names the commits the next step may sign.
       - name: Check the prepared repository
-        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --check-remote
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --site "$RUNNER_TEMP/pages" --check-remote
+      - name: Check the prepared repository (first publication)
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --site "$RUNNER_TEMP/pages" --bootstrap --check-remote
+      - name: Check the prepared repository (release candidate, a repository of its own)
+        if: ${{ needs.validate.outputs.prerelease == 'true' }}
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --fresh
       # The only step with the key: it signs the named commits and the summary, in a keyring in memory.
       - name: Sign
         env:

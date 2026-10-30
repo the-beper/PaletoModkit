@@ -410,6 +410,44 @@ check_unsigned_repo() {
     check_commit_content "$1" "$2"
 }
 
+# repo_config: the config of every repository of the release, to the byte: what "ostree init --mode=archive-z2" and flatpak
+# build-update-repo write, and what the published repository has. The file is not signed, but every ostree and flatpak call
+# reads it, and flatpak build-update-repo copies [flatpak] redirect-url, gpg-keys and title from it into the summary that
+# the key signs: it is refused, never rewritten.
+repo_config() { printf '[core]\nrepo_version=1\nmode=archive-z2\nindexed-deltas=true\n'; }
+
+# check_repo_config REPO: succeeds if the config of REPO is a plain file with exactly the bytes of repo_config.
+check_repo_config() { [ -f "$1/config" ] && [ ! -L "$1/config" ] && repo_config | cmp -s - "$1/config"; }
+
+# The metadata keys of an honest run (flatpak 1.14.6, ostree 2024.5): the app, Debug and appstream commits of
+# build-commit-from and build-update-repo, and the summary of build-update-repo with static deltas and the sparse cache.
+# New versions of flatpak add keys (xa.title, xa.redirect-url, xa.gpg-keys, ...): an allowlist fails closed.
+# shellcheck disable=SC2034
+COMMIT_KEYS="ostree.ref-binding ostree.collection-binding xa.ref xa.from_commit xa.metadata xa.download-size xa.installed-size"
+# shellcheck disable=SC2034
+SUMMARY_KEYS="ostree.summary.mode ostree.summary.tombstone-commits ostree.summary.indexed-deltas ostree.summary.last-modified ostree.static-deltas xa.cache-version xa.cache xa.sparse-cache"
+
+# commit_keys REPO COMMIT, summary_keys REPO: the metadata keys, one per line (a key with a newline in it is listed as two
+# lines, and neither is in a list of known keys).
+commit_keys() { ostree --repo="$1" show --list-metadata-keys "$2"; }
+summary_keys() { ostree --repo="$1" summary --list-metadata-keys; }
+
+# unknown_keys "KEY..." < LIST: the lines of LIST that are not one of the KEYs.
+unknown_keys() { awk -v ok="$1" 'BEGIN { n = split(ok, a, " "); for (i = 1; i <= n; i++) known[a[i]] = 1 } !($0 in known)'; }
+
+# commit_time REPO COMMIT: the date of a commit, in seconds since 1970; fails if there is none.
+commit_time() {
+    ct=$(ostree --repo="$1" show "$2" | sed -n 's/^Date: *//p' | head -n1)
+    [ -n "$ct" ] && date -u -d "$ct" +%s
+}
+
+# chain_ok REPO COMMIT BASE: COMMIT is BASE (published already) or its parent is BASE (BASE empty: it has no parent).
+chain_ok() {
+    [ -z "$3" ] || [ "$2" != "$3" ] || return 0
+    cp_par=$(ostree --repo="$1" rev-parse "$2^" 2> /dev/null) || cp_par=""
+    [ "$cp_par" = "$3" ]
+}
+
 # content_sum REPO REF: the content checksum of the head commit of a ref (the same for a commit and its signed copy).
 content_sum() { ostree --repo="$1" log "$2" | sed -n 's/^ContentChecksum: *//p' | head -n1; }
 
