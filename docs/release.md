@@ -174,6 +174,8 @@ The release is refused with exit 3, in `validate` and again in `publish`, when:
 - the tag is already on `gh-pages` for another commit, or is published with other files than this build;
 - the Flatpak id, branch or remote files would change.
 
+A new stable version is refused with exit 5 when `gh-pages` has a lower version than the highest published stable release: a release is published only after its Pages, so `gh-pages` was rolled back (a signed but older state) or not updated. Restore it first ([Broken gh-pages](#broken-gh-pages)). A release without the files (made by hand) does not count, and candidates have no Pages.
+
 The Flatpak history is a chain: each commit has the published one as parent, and an older commit on top would be refused by clients. The answer to a bad release is always a new, higher version. There is no rollback mode. A user can go back locally with `flatpak update --commit`.
 
 Tag the same version again after a failure only if nothing was published. An equal tag with the same commit and a complete release is a no-op (`plan=noop`, exit 0).
@@ -189,7 +191,7 @@ Every release keeps the previous state in the branch `gh-pages-previous`. If `gh
    git push --force-with-lease=gh-pages:<broken-sha> origin origin/gh-pages-previous:gh-pages
    ```
 
-2. Start the workflow by hand from `main`, with the highest published tag and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched.
+2. Start the workflow by hand from `main`, with the highest published tag and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched. It is the only mode that runs while `gh-pages` is below the highest release.
 
 A refused `repo/config` (exit 2 in `prepare-flatpak` or `sign-flatpak`) means someone changed the unsigned file on `gh-pages`: treat it as an incident, restore from `gh-pages-previous` the same way.
 
@@ -235,7 +237,7 @@ Rules:
 | `verify` fails (missing file, checksum, converter missing from the tarball) | 2 | The build is wrong, not the pipeline. Fix, release a higher version. |
 | `check-signing-env` fails | 3 or 5 | 3: the environment is missing, has no required reviewer or does not limit deployments to selected branches and tags; fix it under Settings, Environments ([One-time setup](#one-time-setup)), then re-run failed jobs. 5: GitHub could not be read; check the job's token permissions (`contents: read`, `actions: read`), then re-run. Nothing was signed. |
 | `sign-flatpak` not approved, or rejected | - | Nothing was published. Re-run the job and approve. |
-| `sign-flatpak` fails in `--check-prepared` (mode, config, refs, parents, bindings, metadata keys, dates or checksums differ from `gh-pages` or the manifest) | 2, 3 or 5 | The prepared repository is wrong. Nothing was signed. Re-run all jobs; if it repeats, release a higher version. |
+| `sign-flatpak` fails in `--check-prepared` (mode, config, refs, names or entries of the archive, parents, bindings, metadata keys, dates or checksums differ from `gh-pages` or the manifest; a skip that `gh-pages` does not confirm) | 2, 3 or 5 | The prepared repository is wrong. Nothing was signed. Re-run all jobs; if it repeats, release a higher version. |
 | `sign-flatpak` fails because a head moved | see log | The repository changed between the check and the signing. Nothing was published. Re-run all jobs. |
 | `finish-flatpak` fails (signature, content, config, summary keys or parents do not verify) | 2 or 4 | Do not publish. Re-run all jobs; if it repeats, treat it as an incident. |
 | `sign-flatpak` fails on the key | 4 | The secret is empty or is not the pinned key. Put the right one in the environment, re-run failed jobs. |
@@ -246,6 +248,8 @@ Rules:
 | Pages wait timed out | 5 | The push worked but the site is slow. The draft stays. Re-run `publish`. |
 | Pages ahead of the release (gh-pages at the tag, draft missing or another build) | 5 | Do not push again. If the draft is missing and the build is the right one, re-run the original run's `publish`. Else the repository serves a build with no release: release a higher version. |
 | Published but mismatched with the record | 3 | Do not re-run. Release a higher version. |
+| `publish` says the signing job skipped a tag that `gh-pages` does not have | 5 | The record of the skip is not true; nothing was published. Re-run all jobs. |
+| `validate` or `publish` says `gh-pages` is below the published release | 5 | Restore it ([Broken gh-pages](#broken-gh-pages)). |
 | Publication cancelled while pending | - | The release is a draft. Re-run after the other runs finish. |
 
 ## How users get updates
