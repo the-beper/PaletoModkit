@@ -280,6 +280,7 @@ An empty or malformed hash or commit makes `release-validate.sh` stop with exit 
 | Test | Needs | Checks |
 | :--- | :--- | :--- |
 | `tarball-test.sh` | GNU tar, gzip | The tarball packing is deterministic. |
+| `clean-dist-test.sh` | none | `build-release.sh` removes only what it makes from `dist/`. |
 | `check-env-test.sh` | `jq` | The pre-flight check of the signing environment, on saved API answers and a stub of `gh`. |
 | `release-sim.sh`, `flatpak-repo-test.sh` | `flatpak`, `ostree`, `gpg` (and `git`, `jq`, `tar`, `curl` for the first) | The whole pipeline, and signing with the real flatpak client. |
 
@@ -287,6 +288,7 @@ A test prints `SKIP` and exits 77 when a tool is missing. They use throwaway key
 
 ```bash
 sh packaging/tests/tarball-test.sh           # the tarball packing is deterministic
+sh packaging/tests/clean-dist-test.sh        # the release build leaves foreign files in dist/ alone
 sh packaging/tests/check-env-test.sh         # the pre-flight check of the signing environment
 sh packaging/tests/release-sim.sh            # the whole pipeline against a local remote and a stub of gh
 sh packaging/tests/release-sim.sh -l         # list the scenarios
