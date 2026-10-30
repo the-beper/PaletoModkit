@@ -190,6 +190,8 @@ push_pages() {
         [ "$(git -C "$g" rev-parse HEAD)" = "$PG_HEAD" ] || die 5 "gh-pages moved while publishing"
         link=$(find "$g" -path "$g/.git" -prune -o -type l -print | head -n1)
         [ -z "$link" ] || die 2 "gh-pages holds a symbolic link ($link)"
+        # The static delta leads from the base that flatpak-signed.txt records: it must be the app head published now, or a client on it gets no delta.
+        [ "$(cat "$g/repo/refs/heads/$APP_REF" 2> /dev/null)" = "$(kv_get "$S" base_app_commit)" ] || die 5 "the app commit published on gh-pages is not the base the signed repository was made from: run all jobs again"
         cp "$g/paleto-modkit.flatpakrepo" "$g/paleto-modkit.flatpakref" "$TMP/old/" || die 5 "gh-pages has no .flatpakrepo or .flatpakref"
         git -C "$g" checkout -q --orphan paleto-new
         git -C "$g" rm -rqf .

@@ -1781,11 +1781,14 @@ sc_signed_deltas() {
         sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$d/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$d/signed/flatpak-signed.txt"
         sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
         snapshot > "$SIM/snap.before"
+        sd_pg=$(git ls-remote "$REMOTE" refs/heads/gh-pages)
         job_publish 1 release
-        assert_rc "publish with $1" 2
+        assert_rc "publish with $1" "${4:-2}"
         assert_log "$d/publish.log" "$3"
         snapshot > "$SIM/snap.after"
-        cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "$1: the remote changed"
+        [ "$sd_pg" = "$(git ls-remote "$REMOTE" refs/heads/gh-pages)" ] || fail "$1: gh-pages changed"
+        # (a refusal after the draft release was made, exit 5, leaves the draft; gh-pages is what must not change)
+        [ "${4:-2}" != 2 ] || cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "$1: the remote changed"
     }
     # shellcheck disable=SC2329
     m_second() { mkdir -p "$1/deltas/ab/cdef"; echo x > "$1/deltas/ab/cdef/superblock"; }
@@ -1805,6 +1808,21 @@ sc_signed_deltas() {
     m_unrecorded() { sed -i 's/^delta_superblock_sha256=.*/delta_superblock_sha256=/' "$2"; }
     # shellcheck disable=SC2329
     m_superblock() { printf Z >> "$(find "$1/deltas" -name superblock)"; }
+    # a delta, its record and its folder name all from another base than the published head: structurally an honest finish, so only
+    # the comparison with the app head of gh-pages stops it
+    # shellcheck disable=SC2329
+    m_base() {
+        mb_old=$(dirname "$(find "$1/deltas" -name superblock)")
+        mb_tmp=$(mktemp -d "$SIM/mb.XXXXXX")
+        cp -a "$mb_old/." "$mb_tmp/"
+        rm -rf "$1/deltas"
+        mb_new=$1/$(lib_run "delta_dir $(printf 'e%.0s' $(seq 64)) $app")
+        mkdir -p "$mb_new"
+        cp -a "$mb_tmp/." "$mb_new/"
+        rm -rf "$mb_tmp"
+        sed -i "s/^base_app_commit=.*/base_app_commit=$(printf 'e%.0s' $(seq 64))/" "$2"
+    }
+    sd_try base m_base "not the base the signed repository was made from" 5
     sd_try second m_second "not the one from"
     sd_try index m_index "not the one from"
     sd_try file m_file "not the one from"
