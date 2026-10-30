@@ -6,7 +6,7 @@
 #       DIR: the artifacts of the earlier jobs in one folder (see release-verify.sh final)
 #       --bootstrap  gh-pages does not exist yet and this creates it
 #       release          the release (a prerelease for -rc.N: nothing on gh-pages) and, for a stable tag, Pages
-#       publish-flatpak  only Pages, for a release that is already published and is the highest
+#       publish-flatpak  only Pages, for the highest published release with all its files
 # Environment: GH_TOKEN, GH_REPO (the gh CLI; the token is also handed to git by a credential helper that reads
 # it, never in a URL), REMOTE, RELEASE_WAIT (seconds to wait for the list of releases to show a change, default 60)
 # and RELEASE_POLL (3), PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), GITHUB_RUN_ID

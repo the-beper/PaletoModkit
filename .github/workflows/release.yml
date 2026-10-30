@@ -17,7 +17,7 @@ name: Release
 #
 #   validate -> build-linux  \
 #            -> build-flatpak -> verify -> prepare-flatpak -> check-flatpak -> sign-flatpak -> finish-flatpak -> publish
-#            -> check-signing-env -----^ (also needed by sign-flatpak; finish-flatpak also needs verify and check-flatpak)
+#            -> check-signing-env -----^ (also needed by check-flatpak and sign-flatpak; finish-flatpak also needs verify and check-flatpak)
 #            (-> build-windows: slot for M2, below)
 #
 # Jobs that may have a skipped ancestor (build-linux is skipped in publish-flatpak mode) say so with an explicit
@@ -170,7 +170,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # The hash of release-manifest.txt, which the later jobs get as a run artifact (a compromised job can replace those):
-    # job outputs cannot be changed by other jobs, and sign-flatpak, finish-flatpak and publish check the manifest against it.
+    # job outputs cannot be changed by other jobs, and check-flatpak, finish-flatpak and publish check the manifest against it.
     outputs:
       manifest_sha256: ${{ steps.verify_linux.outputs.manifest_sha256 || steps.verify_flatpak.outputs.manifest_sha256 }}
     env:
@@ -425,7 +425,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    # The hash of flatpak-signed.txt (which holds the hashes of the signed repository and of the bundle), checked by publish.
+    # The hash of flatpak-signed.txt (the hashes of the signed repository, the bundle, the public key and the delta superblock), checked by publish.
     outputs:
       signed_sha256: ${{ steps.finish.outputs.signed_sha256 }}
     env:
