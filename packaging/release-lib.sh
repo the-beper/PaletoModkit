@@ -188,6 +188,31 @@ pages_state() {
 gh_releases() {
     gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | [.id, .tag_name, .draft, .prerelease] | @tsv'
 }
+# gh_wait_release KIND ARG: the list of releases is a few seconds behind a create, a delete or an edit, so every
+# change is waited for in the list (RELEASE_POLL seconds apart, up to RELEASE_WAIT; 3 and 60) before it is used.
+# KIND: listed (a release of tag ARG is listed), gone (the release with id ARG is not), published (the release of
+# tag ARG is not a draft). Prints the matching rows of the last list; fails when the time is up.
+gh_wait_release() {
+    waited=0
+    while :; do
+        all=$(gh_releases) || die 5 "cannot list the releases of $GH_REPO"
+        case $1 in
+            listed) hit=$(printf '%s\n' "$all" | awk -F '\t' -v t="$2" '$2 == t') ;;
+            gone) hit=$(printf '%s\n' "$all" | awk -F '\t' -v i="$2" '$1 == i') ;;
+            published) hit=$(printf '%s\n' "$all" | awk -F '\t' -v t="$2" '$2 == t && $3 == "false"') ;;
+            *) die 1 "gh_wait_release: unknown kind $1" ;;
+        esac
+        if [ "$1" = gone ]; then
+            [ -z "$hit" ] && return 0
+        elif [ -n "$hit" ]; then
+            printf '%s\n' "$hit"
+            return 0
+        fi
+        [ "$waited" -lt "${RELEASE_WAIT:-60}" ] || return 1
+        sleep "${RELEASE_POLL:-3}"
+        waited=$((waited + ${RELEASE_POLL:-3}))
+    done
+}
 # gh_assets ID: asset id, name, size, state, digest, tab separated.
 gh_assets() {
     gh api --paginate "repos/$GH_REPO/releases/$1/assets?per_page=100" --jq '.[] | [.id, .name, .size, .state, .digest] | @tsv'

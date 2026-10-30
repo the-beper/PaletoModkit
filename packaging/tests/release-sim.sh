@@ -234,7 +234,7 @@ job_publish() { # RUN MODE
     cp "$d"/signed/* "$d/in/"
     boot=""
     [ "$BOOTSTRAP" != true ] || boot=--bootstrap
-    run "$d/publish.log" in_dir "$d/build" env RUNNER_TEMP="$SIM/rt/$1" PAGES_WAIT=3 PAGES_POLL=1 GITHUB_RUN_ID="$1" GITHUB_RUN_ATTEMPT=1 \
+    run "$d/publish.log" in_dir "$d/build" env RUNNER_TEMP="$SIM/rt/$1" PAGES_WAIT=3 PAGES_POLL=1 RELEASE_WAIT=6 RELEASE_POLL=1 GITHUB_RUN_ID="$1" GITHUB_RUN_ATTEMPT=1 \
         sh packaging/release-publish.sh --mode "$mode" --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" --in "$d/in" $boot
 }
 
@@ -666,6 +666,23 @@ sc_interrupted_upload() {
     assert_eq "draft" false "$(stub_field v1.6.0 draft)"
     assert_eq "gh-pages commits" 1 "$(pages_count)"
     assert_eq "one release" 1 "$(grep -lx v1.6.0 "$GH_STUB_DIR"/rel/*/tag | wc -l)"
+}
+# The list of releases is seconds behind a create and a delete: the job waits for it (run 1 gets as far as the
+# upload, run 2 replaces that draft because it is another build) and ends with one published release.
+sc_listing_lag() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    echo 2 > "$GH_STUB_DIR/lag"
+    echo upload:2 > "$GH_STUB_DIR/fail"
+    pipeline 1 v1.6.0 release
+    [ "$RC" != 0 ] || fail "the interrupted upload did not fail"
+    [ ! -s "$GH_STUB_DIR/fail" ] || fail "run 1 did not get as far as the upload"
+    pipeline 2 v1.6.0 release
+    assert_rc "run 2" 0
+    assert_log "$LIVE/runs/2/publish.log" 'replacing it'
+    assert_eq "one release" 1 "$(grep -lx v1.6.0 "$GH_STUB_DIR"/rel/*/tag | wc -l)"
+    assert_eq "draft" false "$(stub_field v1.6.0 draft)"
+    assert_eq "assets" 5 "$(stub_assets v1.6.0)"
 }
 sc_interrupted_edit() {
     commit_release 1.6.0
@@ -1268,7 +1285,7 @@ restore() {
 
 SCENARIOS="valid_stable invalid_tag mismatch_cargo mismatch_lock mismatch_metainfo mismatch_date mismatch_submodule mismatch_extra_submodule mismatch_rc_type mismatch_stable_dev
 empty_pin identity_change prerelease main_moved tag_not_on_main build_failure converter_failure missing_zsync zsync_length flipped_appimage tool_pin build_flatpak_script sim_guard
-gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
+gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
 pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
