@@ -78,6 +78,53 @@ jobs:
           appstreamcli validate --no-net packaging/io.github.the_beper.PaletoModkit.metainfo.xml
           xmllint --noout packaging/io.github.the_beper.PaletoModkit.mime.xml
 
+  # The oldest compiler the workspace claims to support: `rust-version` of Cargo.toml, read from there so that the
+  # claim and the test cannot drift. Not a required check: a dependency update may raise the minimum, and then the
+  # answer is to raise `rust-version` (and the docs) in the same pull request, or to hold the update back.
+  msrv:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
+            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          version=$(sed -n 's/^rust-version = "\([0-9][0-9.]*\)"$/\1/p' Cargo.toml | head -n1)
+          [ -n "$version" ] || { echo "no rust-version in Cargo.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install the declared Rust
+        if: steps.changes.outputs.code == 'true'
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          rustup toolchain install "$MSRV" --profile minimal --no-self-update
+          rustup default "$MSRV"
+          rustc -V
+      - if: steps.changes.outputs.code == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo check with the declared Rust
+        if: steps.changes.outputs.code == 'true'
+        run: cargo check --locked --workspace --all-targets --all-features
+
   # The release scripts and their tests: no secret, no network but the loopback, nothing of GitHub.
   release-tooling:
     if: github.event_name != 'schedule'
