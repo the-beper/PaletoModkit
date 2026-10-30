@@ -1442,7 +1442,8 @@ sc_sign_hostile_prepared() {
         sed -i -e "s/^prepared_tar_sha256=.*/prepared_tar_sha256=$(sha256sum "$d/hx.$1/flatpak-prepared-repo.tar" | cut -d' ' -f1)/" \
             -e "s/^prepared_app_commit=.*/prepared_app_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse "$APP_REF")/" \
             -e "s/^prepared_appstream_commit=.*/prepared_appstream_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse appstream/x86_64 2> /dev/null || true)/" \
-            -e "s/^prepared_appstream2_commit=.*/prepared_appstream2_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse appstream2/x86_64 2> /dev/null || true)/" "$d/hx.$1/flatpak-prepared.txt"
+            -e "s/^prepared_appstream2_commit=.*/prepared_appstream2_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse appstream2/x86_64 2> /dev/null || true)/" -e '/^commitmeta=/d' "$d/hx.$1/flatpak-prepared.txt"
+        (cd "$rt/hx.$1/repo" && find objects -type f \( -name '*.commitmeta' -o -name '*.commitmeta2' \) | LC_ALL=C sort | while read -r f; do echo "commitmeta=$f $(sha256sum "$f" | cut -d' ' -f1)"; done) >> "$d/hx.$1/flatpak-prepared.txt"
     }
     # shellcheck disable=SC2329
     hx_u64() { # N: the text of a uint64 that ostree prints as N (it byte-swaps what it prints)
@@ -2018,7 +2019,7 @@ sc_check_compromised() {
     }
     # shellcheck disable=SC2329
     cc_unpack() { # NAME: the check job pins its own record; the pin of the preparation is the real one
-        in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$d/cc.$1/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$pp" \
+        in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$d/cc.$1/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="${CC_PIN:-$pp}" \
             sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/cc.$1" --work "$rt/sw.$1"
     }
     # shellcheck disable=SC2329
@@ -2028,6 +2029,7 @@ sc_check_compromised() {
         assert_rc "unpack with $1" 2
         assert_log "$d/cc.$1.log" "$3"
         [ ! -e "$rt/sw.$1/repo" ] || fail "$1: a repository was unpacked"
+        CC_PIN=""
     }
     # shellcheck disable=SC2329
     cc_obj() { printf '%s/objects/%s/%s' "$1" "$(printf '%s' "$2" | cut -c1-2)" "$(printf '%s' "$2" | cut -c3-)"; }
@@ -2059,6 +2061,19 @@ sc_check_compromised() {
     # shellcheck disable=SC2329
     cc_meta() { echo x > "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta"; }
 
+    # the detached metadata, which flatpak build-update-repo parses with the key: the published commits' (signatures) and flatpak's (.commitmeta2)
+    # shellcheck disable=SC2329
+    cc_meta2() { f=$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta2; chmod u+w "$f"; printf Z >> "$f"; }
+    # shellcheck disable=SC2329
+    cc_metapub() { f=$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF^")").commitmeta; chmod u+w "$f"; printf Z >> "$f"; }
+    # shellcheck disable=SC2329
+    cc_metagone() { rm -f "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta2"; }
+    # shellcheck disable=SC2329
+    cc_metaplant() { mkdir -p "$1/objects/ab"; cp "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta2" "$1/objects/ab/$(printf 'c%.0s' $(seq 62)).commitmeta2"; }
+    # the description names no commit for appstream2, with a pin that fits (a compromised preparation), and the tar has the ref
+    # shellcheck disable=SC2329
+    cc_unlisted() { sed -i 's/^prepared_appstream2_commit=.*/prepared_appstream2_commit=/' "$2/prepared.txt"; CC_PIN=$(sha256sum "$2/prepared.txt" | cut -d' ' -f1); }
+
     # the control: what the check job really made
     cc_make honest :
     run "$d/cc.honest.log" cc_unpack honest
@@ -2076,6 +2091,11 @@ sc_check_compromised() {
     cc_refuse oddobj cc_oddobj "does not accept"
     cc_refuse oddname cc_oddname "does not accept"
     cc_refuse meta cc_meta "detached metadata"
+    cc_refuse meta2 cc_meta2 "detached metadata files"
+    cc_refuse metapub cc_metapub "detached metadata files"
+    cc_refuse metagone cc_metagone "detached metadata files"
+    cc_refuse metaplant cc_metaplant "detached metadata files"
+    cc_refuse unlisted cc_unlisted "did not describe"
     # the preparation's pin, empty or foreign
     run "$d/cc.pin1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="" sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/checked" --work "$rt/sw.pin1"
     assert_rc "unpack with no pin of the preparation" 2

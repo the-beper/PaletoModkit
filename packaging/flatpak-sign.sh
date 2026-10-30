@@ -41,7 +41,8 @@
 #       is for this tag and commit, the tar and signlist have the hashes it records, signlist has only lines of a known ref and a
 #       commit and each is the commit prepared.txt names, the tar has only config, objects (named as an archive repository names
 #       them), refs and an empty tmp (no summary, state or lock), every head prepared.txt names is a commit object whose SHA-256
-#       is its id and is the ref in the tar, a commit to sign has no detached metadata; then the tar is unpacked into an empty
+#       is its id and is the ref in the tar, no other ref is, the detached metadata files (.commitmeta, .commitmeta2) are exactly
+#       those prepared.txt lists with their hashes, a commit to sign has none of its own; then the tar is unpacked into an empty
 #       --work (extract_repo_tar: no link, no static delta) and its config is the expected one. This is a step of its own: the secret is in the environment
 #       of the --sign step, where the children of the shell can read it.
 #   flatpak-sign.sh --sign --tag vX.Y.Z --commit SHA --work DIR --out DIR     job sign-flatpak, the secret, and only it
@@ -238,7 +239,7 @@ prepare() {
     fi
 
     # The new commits, unsigned, on top of the published repository, with summary and appstream data.
-    PREP_SHA="" PREP_APP="" PREP_DEBUG="" PREP_AS="" PREP_AS2=""
+    PREP_SHA="" PREP_APP="" PREP_DEBUG="" PREP_AS="" PREP_AS2="" PREP_META=""
     if [ "$SKIP" = 0 ]; then
         if [ "$MODE" = site ]; then
             cp -a "$SITE/repo" "$WORK/repo"
@@ -257,6 +258,7 @@ prepare() {
         }
         rm -rf "$WORK/repo/tmp"
         mkdir "$WORK/repo/tmp"
+        PREP_META=$(commitmeta_dir "$WORK/repo")
         PREP_APP=$(ostree --repo="$WORK/repo" rev-parse "$APP_REF")
         PREP_DEBUG=$(ostree --repo="$WORK/repo" rev-parse "$DEBUG_REF")
         if repo_refs "$WORK/repo" | grep -qxF appstream/x86_64; then PREP_AS=$(ostree --repo="$WORK/repo" rev-parse appstream/x86_64); fi
@@ -286,6 +288,7 @@ prepare() {
         echo "prepared_debug_commit=$PREP_DEBUG"
         echo "prepared_appstream_commit=$PREP_AS"
         echo "prepared_appstream2_commit=$PREP_AS2"
+        printf '%s\n' "$PREP_META" | sed -n 's/^./commitmeta=&/p'
     } > "$OUT/flatpak-prepared.txt"
     job_output prepared_sha256 "$(sha256_of "$OUT/flatpak-prepared.txt")"
     if [ "$SKIP" = 1 ]; then echo "$TAG is already published for this commit: nothing to sign"; else echo "prepared $TAG ($MODE)"; fi
@@ -293,6 +296,13 @@ prepare() {
 
 # base_head FILE REF: the published head of REF in a base record (flatpak-base.txt), empty if there is none.
 base_head() { awk -v r="$2" '$1 == "head" && $2 == r { print $3; exit }' "$1"; }
+
+# commitmeta_dir REPO: "objects/xx/yyyy.commitmeta[2] SHA-256" for every detached metadata file of REPO, sorted. flatpak build-update-repo
+# parses the one of every head with the key at hand, so the description pins them all (ostree.gpgsigs of the published commits,
+# xa.reachable and the sizes that flatpak writes), and --unpack accepts exactly this set.
+commitmeta_dir() {
+    (cd "$1" && find objects -type f \( -name '*.commitmeta' -o -name '*.commitmeta2' \) | LC_ALL=C sort | while read -r cm_f; do printf '%s %s\n' "$cm_f" "$(sha256_of "$cm_f")"; done)
+}
 
 # prepared_id FILE REF: the commit of REF that the description FILE names (empty if it names none)
 prepared_id() {
@@ -339,6 +349,7 @@ check_output() {
         tar_safe "$OUT/flatpak-checked-repo.tar" repo
         check_repo_tar "$OUT/flatpak-checked-repo.tar"
         check_signing_tar "$OUT/flatpak-checked-repo.tar"
+        check_commitmeta "$OUT/flatpak-checked-repo.tar" "$WORK/prepared.txt"
         cp "$WORK/signlist" "$WORK/base.txt" "$OUT/"
         co_tar=$(sha256_of "$OUT/flatpak-checked-repo.tar")
         co_base=$(sha256_of "$OUT/base.txt")
@@ -501,14 +512,26 @@ check_signing_tar() {
     [ -z "$cst" ] || die 2 "$1: a member that the signing job does not accept in a checked repository: $cst"
 }
 
+# check_commitmeta TAR PREPARED: the detached metadata files of TAR are those PREPARED lists, with the same hashes: no other, none missing.
+check_commitmeta() {
+    cm_want=$(sed -n 's/^commitmeta=//p' "$2" | LC_ALL=C sort)
+    cm_got=$(tar -tf "$1" | sed -n 's|^repo/\(objects/[0-9a-f]\{2\}/[0-9a-f]\{62\}\.commitmeta2\{0,1\}\)$|\1|p' | LC_ALL=C sort |
+        while read -r cm_f; do printf '%s %s\n' "$cm_f" "$(tar -xOf "$1" "repo/$cm_f" | sha256sum | cut -d' ' -f1)"; done)
+    [ "$cm_got" = "$cm_want" ] || die 2 "$1: the detached metadata files (.commitmeta, .commitmeta2) are not the ones the preparation described"
+}
+
 # check_signing_content TAR LIST PREPARED: what the key will sign is what the preparation described, whatever the check job says.
 # PREPARED is pinned by the job output of prepare-flatpak. Every head it names is a commit object whose SHA-256 is its id and is
 # the ref in the tar, and the list names only those commits; a listed commit has no detached metadata yet.
 check_signing_content() {
     csc_names=$(tar -tf "$1")
+    check_commitmeta "$1" "$3"
     for csc_ref in "$APP_REF" "$DEBUG_REF" appstream/x86_64 appstream2/x86_64; do
         csc_id=$(prepared_id "$3" "$csc_ref")
-        [ -n "$csc_id" ] || continue
+        if [ -z "$csc_id" ]; then
+            if printf '%s\n' "$csc_names" | grep -qxF "repo/refs/heads/$csc_ref"; then die 2 "$csc_ref: the tar has this ref, which the preparation did not describe"; fi
+            continue
+        fi
         is_hex "$csc_id" 64 || die 2 "$3: $csc_ref has no valid commit"
         csc_obj=repo/objects/$(printf '%s' "$csc_id" | cut -c1-2)/$(printf '%s' "$csc_id" | cut -c3-)
         [ "$(tar -xOf "$1" "$csc_obj.commit" 2> /dev/null | sha256sum | cut -d' ' -f1)" = "$csc_id" ] || die 2 "$csc_ref: the commit object in the tar is not the commit $csc_id the preparation described"
