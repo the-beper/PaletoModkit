@@ -1,8 +1,8 @@
 //! Snapshots of the mods folder: whole copies kept in the game folder's
 //! `mods_snapshots/<time>/`, to go back to a state that worked.
 //!
-//! Copies use `std::fs::copy`, which on btrfs, XFS and bcachefs shares the
-//! data with the original (a reflink): instant and taking no space until a
+//! Copies go from one open folder to another (see [`copy_dir`]) with `io::copy`, which on btrfs, XFS and
+//! bcachefs shares the data with the original (a reflink): instant and taking no space until a
 //! file changes. On other filesystems they are full copies.
 //!
 //! Every change runs under the game lock and takes no fixed name: a snapshot is
@@ -14,6 +14,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -112,11 +113,15 @@ pub fn create(game: &Game, label: &str) -> Result<Snapshot, Error> {
     // Built under a name of its own, so a folder that is somebody else's is never touched.
     let (partial, temp) = snaps.mkdir_unique(".partial")?;
     let label = label.trim();
-    let built = copy_tree(&mods, &snapshots_dir(game).join(&temp).join("mods")).and_then(|()| {
+    // `mods` may be a link the user made (to another drive); everything below it is entered without following links.
+    let built = (|| {
+        let (from, to) = (roots.game.dir.open_dir_following("mods")?, partial.mkdir("mods")?);
+        copy_dir(&from, &to, &mods, 0)?;
         let mut file = partial.create_excl(LABEL)?;
         file.write_all(label.as_bytes())?;
-        Ok(file.sync_all()?)
-    });
+        file.sync_all()?;
+        Ok::<(), Error>(partial.sync()?)
+    })();
     match built.and_then(|()| publish(&snaps, &temp)) {
         Ok(secs) => {
             let _ = snaps.sync();
@@ -174,12 +179,18 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
         return Err(e.into());
     }
     match swap(&roots, &snapshot, &mut journal, &incoming, &outgoing) {
-        Ok(()) => {
+        Ok(made) => {
             // The two renames must be on disk before the old folder goes: a removal that outran them could, after a crash, leave neither
             // folder. If they cannot be flushed, nothing is removed and the next change finishes the restore (its recovery flushes again first).
             if let Err(e) = roots.game.dir.sync() {
                 return Err(Error::Package(format!(
                     "the snapshot is in place, but not yet confirmed: the game folder could not be flushed to disk ({e}). The old mods folder (`{outgoing}` in the game folder, if there was one) and the restore journal are kept, and the next change to this game finishes the restore"
+                )));
+            }
+            // The renames work by name: if the folder at `mods` is not the one that was made, the old one is not removed.
+            if !roots.game.dir.names_dir("mods", &made).unwrap_or(false) {
+                return Err(Error::Package(format!(
+                    "the folder now at `mods` is not the copy this restore made (it was replaced while the restore ran). The old mods folder (`{outgoing}` in the game folder, if there was one) and the restore journal are kept; the next change to this game decides what to do"
                 )));
             }
             // The restore is done. The old folder is only garbage now: if it cannot be removed, the journal stays and the next change does it.
@@ -230,15 +241,22 @@ fn remove_old(game: &Dir, outgoing: &str) -> io::Result<()> {
     }
 }
 
-/// The copy and the two renames, each announced in the journal first.
-fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &str, outgoing: &str) -> Result<(), Error> {
+/// The copy and the two renames, each announced in the journal first. Gives the folder that was made.
+fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &str, outgoing: &str) -> Result<Dir, Error> {
     let game = &roots.game.dir;
     note(journal, &format!("incoming {incoming}\n"))?;
     let made = game.mkdir(incoming)?;
-    copy_tree(&snapshot.mods(), &roots.game.shown.join(incoming))?;
-    made.sync()?;
+    // The snapshot's copy of `mods` is entered one folder at a time, never through a link.
+    let from = snapshots_folder(roots, false)?.ok_or_else(|| Error::Package(format!("no snapshot {}", snapshot.id)))?.open_dir(&snapshot.id)?.open_dir("mods")?;
+    // Every file and folder is on disk when this returns, and so is the new folder's name: recovery takes `made` as complete.
+    copy_dir(&from, &made, &snapshot.mods(), 0)?;
+    game.sync()?;
     let (dev, ino) = made.identity()?;
     note(journal, &format!("made {dev} {ino}\n"))?;
+    // The renames work by name: it must still lead to the folder that was filled.
+    if !game.names_dir(incoming, &made)? {
+        return Err(Error::Package(format!("{} was replaced while it was being filled: nothing was restored", roots.game.shown.join(incoming).display())));
+    }
     if game.kind("mods")?.is_some() {
         note(journal, &format!("outgoing {outgoing}\n"))?;
         game.rename("mods", outgoing, false)?;
@@ -246,7 +264,7 @@ fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &s
     game.rename(incoming, "mods", false)?;
     // What the files say decides at recovery; a record that cannot be written changes nothing.
     let _ = note(journal, "swapped\n");
-    Ok(())
+    Ok(made)
 }
 
 /// A restore of an older version that failed between its two renames left the mods folder only
@@ -433,20 +451,52 @@ pub fn shares_copies(dir: &Path) -> bool {
         .is_some_and(|(_, fs)| matches!(fs.as_str(), "btrfs" | "xfs" | "bcachefs"))
 }
 
-pub(crate) fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dst.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &to)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &to)?;
-        } else {
-            std::fs::copy(entry.path(), &to)?;
+// Runs each time a folder is about to be copied, with its place in the source (tests swap folders there).
+#[cfg(test)]
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    pub(crate) static DURING_COPY: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Copies what is in the open folder `src` into the empty open folder `dst`, one name at a time on open handles: nothing is
+/// looked up by path again, so a folder swapped for a link meanwhile cannot lead the copy anywhere else. A link inside is
+/// made again as it is (it is judged when something is written through it); a pipe, a socket, a device, a name that is not
+/// UTF-8 and folders nested more than 64 deep are refused. Every file and folder is flushed to disk, so a copy that is
+/// done is whole. `shown` is where `src` is, for messages.
+fn copy_dir(src: &Dir, dst: &Dir, shown: &Path, depth: usize) -> Result<(), Error> {
+    if depth > 64 {
+        return Err(Error::Package(format!("{}: folders nested more than 64 deep", shown.display())));
+    }
+    let names = src.names_strict().map_err(|e| if e.kind() == io::ErrorKind::InvalidData { Error::Package(format!("{}: {e}, so it cannot be copied", shown.display())) } else { e.into() })?;
+    for name in names {
+        let at = shown.join(&name);
+        let io_at = |e: io::Error| Error::Io(io::Error::new(e.kind(), format!("{}: {e}", at.display())));
+        match src.kind(&name)? {
+            Some(Kind::Dir) => {
+                let to = dst.mkdir(&name)?;
+                #[cfg(test)]
+                DURING_COPY.with(|h| h.borrow_mut().as_mut().map(|hook| hook(&at)));
+                let from = src.open_dir(&name).map_err(io_at)?;
+                copy_dir(&from, &to, &at, depth + 1)?;
+                // The name must still lead to the folder that was filled.
+                if !dst.names_dir(&name, &to)? {
+                    return Err(Error::Package(format!("{} was replaced while it was being filled", at.display())));
+                }
+            }
+            Some(Kind::File) => {
+                let mut from = src.open_read(&name).map_err(io_at)?;
+                let mode = from.metadata()?.permissions().mode() & 0o777;
+                let mut to = dst.create_excl(&name)?;
+                io::copy(&mut from, &mut to)?;
+                to.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                txn::sync_file(&to)?;
+            }
+            Some(Kind::Link) => dst.symlink(&src.read_link(&name)?, &name)?,
+            Some(Kind::Other) => return Err(Error::Package(format!("{} is not a file, folder or link (a pipe, a socket or a device), so it cannot be copied", at.display()))),
+            None => {}
         }
     }
+    dst.sync()?;
     Ok(())
 }
 

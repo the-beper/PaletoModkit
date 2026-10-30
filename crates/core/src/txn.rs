@@ -175,7 +175,7 @@ fn backup_name(txn: &str, i: usize) -> String {
     format!(".paleto-{txn}-{i}.old")
 }
 
-fn sync_file(file: &File) -> io::Result<()> {
+pub(crate) fn sync_file(file: &File) -> io::Result<()> {
     fault!(SyncFile);
     file.sync_all()
 }

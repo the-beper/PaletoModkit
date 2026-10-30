@@ -1,7 +1,7 @@
 //! Linux backend of `fsroot`: directory handles and the `*at` system calls.
 //! Every operation names one entry of an open directory, never a path.
 
-use std::ffi::{CStr, CString, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -359,6 +359,14 @@ impl Dir {
         })
     }
 
+    /// Makes a link called `name` to `target` (stored as it is); fails if `name` exists.
+    pub fn symlink(&self, target: &OsStr, name: &str) -> io::Result<()> {
+        fault!(Create);
+        let (t, n) = (CString::new(target.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?, cstr(name)?);
+        // SAFETY: both are NUL-terminated strings that live through the call, and the folder's descriptor is open.
+        retry(|| cvt(unsafe { libc::symlinkat(t.as_ptr(), self.fd(), n.as_ptr()) })).map(drop)
+    }
+
     /// Hard-links `from` as `to`; fails if `to` exists. A link at `from` is linked itself.
     pub fn link(&self, from: &str, to: &str) -> io::Result<()> {
         fault!(Link);
@@ -523,6 +531,16 @@ impl Dir {
     /// The names in this folder that are valid UTF-8 (others cannot be matched
     /// against a package's names), without `.` and `..`.
     pub fn names(&self) -> io::Result<Vec<String>> {
+        self.list(false)
+    }
+
+    /// [`Dir::names`], but a name that is not valid UTF-8 is an error ([`io::ErrorKind::InvalidData`]) instead of left out: for
+    /// what must not silently skip an entry (a copy).
+    pub fn names_strict(&self) -> io::Result<Vec<String>> {
+        self.list(true)
+    }
+
+    fn list(&self, strict: bool) -> io::Result<Vec<String>> {
         fault!(List);
         // A new open file description: reading it leaves other handles' positions alone.
         let fd = self.openat_c(c".", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
@@ -542,11 +560,11 @@ impl Dir {
                 };
             }
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-            if let Ok(name) = name.to_str()
-                && name != "."
-                && name != ".."
-            {
-                names.push(name.to_string());
+            match name.to_str() {
+                Ok(".") | Ok("..") => {}
+                Ok(name) => names.push(name.to_string()),
+                Err(_) if strict => break Err(io::Error::new(io::ErrorKind::InvalidData, format!("the name {:?} is not valid UTF-8", name.to_string_lossy()))),
+                Err(_) => {}
             }
         };
         unsafe { libc::closedir(dirp) };
