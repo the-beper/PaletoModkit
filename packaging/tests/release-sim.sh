@@ -1253,7 +1253,7 @@ sc_sign_hostile_prepared() {
     }
     # a new app commit on the published one, with the metadata of the prepared one (the keys named in $HX_DROP are left out)
     # and what the mutator adds
-    HX_DROP=""
+    HX_DROP="" HX_SUBJECT="" HX_BODY=""
     # shellcheck disable=SC2329
     hx_commit() { # REPO OPTION...
         r=$1
@@ -1266,12 +1266,12 @@ sc_sign_hostile_prepared() {
             set -- "$@" "--add-metadata=$k=$v"
         done
         case " $HX_DROP " in *" ostree.collection-binding "*) ;; *) set -- "$@" "--add-metadata=ostree.collection-binding=''" ;; esac
-        ostree --repo="$r" commit -b "$APP_REF" --tree=ref="$APP_REF" --parent="$base_app" -s hostile "$@" > /dev/null
+        ostree --repo="$r" commit -b "$APP_REF" --tree=ref="$APP_REF" --parent="$base_app" -s "${HX_SUBJECT:-Paleto Modkit ${tag#v} ($tag)}" -m "${HX_BODY:-source $commit}" "$@" > /dev/null
     }
     # shellcheck disable=SC2329
     hx_refuse() { # NAME MUTATOR PATTERN [CODE]: the check exits with CODE (2) and names the reason
         hx_make "$1" "$2"
-        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | tamper) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
+        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | appstreamsubject | tamper) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
         run "$d/hx.$1.log" hx_check "$d/hx.$1" --site "$rt/pages2"
         assert_rc "check of a prepared repository with $1" "${4:-2}"
         assert_log "$d/hx.$1.log" "$3"
@@ -1320,7 +1320,13 @@ xa.metadata=x"; }
     mut_honest() { hx_commit "$1"; }
     # a new appstream commit on the published one, like build-update-repo makes it when the app data changed
     # shellcheck disable=SC2329
-    mut_appstream() { ostree --repo="$1" commit -b appstream2/x86_64 --tree=ref=appstream2/x86_64 --parent="$(ostree --repo="$rt/pages/repo" rev-parse appstream2/x86_64)" -s Update --add-metadata="ostree.collection-binding=''" "$@" > /dev/null; }
+    mut_appstream() { ostree --repo="$1" commit -b appstream2/x86_64 --tree=ref=appstream2/x86_64 --parent="$(ostree --repo="$rt/pages/repo" rev-parse appstream2/x86_64)" -s "${HX_SUBJECT:-Update}" --add-metadata="ostree.collection-binding=''" "$@" > /dev/null; }
+    # shellcheck disable=SC2329
+    mut_subject() { HX_SUBJECT="Visit https://evil.example/paleto"; hx_commit "$1"; HX_SUBJECT=""; }
+    # shellcheck disable=SC2329
+    mut_body() { HX_BODY="source $commit, and a link to https://evil.example/paleto"; hx_commit "$1"; HX_BODY=""; }
+    # shellcheck disable=SC2329
+    mut_appstream_subject() { HX_SUBJECT="Evil"; mut_appstream "$1"; HX_SUBJECT=""; }
     # shellcheck disable=SC2329
     mut_appstream_key() { mut_appstream "$1" --add-metadata-string=xa.title=Evil; }
 
@@ -1349,19 +1355,22 @@ xa.metadata=x"; }
     [ -d "$rt/w/repo/tmp" ] || fail "the checked repository has no tmp folder"
     rm -rf "$rt/w"
     hx_refuse config mut_config "config"
-    hx_refuse appstreamkey mut_appstream_key "metadata key"
+    hx_refuse appstreamkey mut_appstream_key "other metadata keys than"
+    hx_refuse appstreamsubject mut_appstream_subject "subject or the body"
     hx_refuse parent mut_parent "does not continue"
-    hx_refuse nobinding mut_nobinding "ref-binding"
-    hx_refuse badbinding mut_badbinding "ref-binding"
-    hx_refuse collection mut_collection "collection-binding"
-    hx_refuse extrakey mut_extrakey "metadata key"
-    hx_refuse nosize mut_nosize "metadata key"
-    hx_refuse newlinekey mut_newlinekey "metadata key"
-    hx_refuse badxaref mut_badxaref "xa.ref"
-    hx_refuse badmeta mut_badmeta "xa.metadata"
-    hx_refuse badsize mut_badsize "sizes"
-    hx_refuse badfrom mut_badfrom "xa.from_commit"
+    hx_refuse nobinding mut_nobinding "not bound to its own ref"
+    hx_refuse badbinding mut_badbinding "not bound to its own ref"
+    hx_refuse collection mut_collection "bound to a collection"
+    hx_refuse extrakey mut_extrakey "other metadata keys than"
+    hx_refuse nosize mut_nosize "other metadata keys than"
+    hx_refuse newlinekey mut_newlinekey "other metadata keys than"
+    hx_refuse badxaref mut_badxaref "another xa.ref"
+    hx_refuse badmeta mut_badmeta "xa.metadata or the sizes"
+    hx_refuse badsize mut_badsize "xa.metadata or the sizes"
+    hx_refuse badfrom mut_badfrom "verified build's commit"
     hx_refuse tamper mut_tamper "differs"
+    hx_refuse subject mut_subject "subject or the body"
+    hx_refuse body mut_body "subject or the body"
     hx_refuse commitmeta mut_commitmeta "commitmeta"
     hx_refuse future mut_future "in the future"
     hx_refuse past mut_past "older than"

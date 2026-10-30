@@ -278,8 +278,9 @@ prepared_state() {
 # one $SITE/repo): it continues the published head of its ref, says it belongs to it, has exactly the metadata keys of an
 # honest run and no detached metadata (the signature of --sign goes there), and is dated between the published head and a
 # little after now. With XA_SUM and FROM_COMMIT (app and Debug, from the manifest of the verify job): xa.ref is the ref,
-# xa.metadata and the sizes are the build's (xa_sum) and xa.from_commit is the build's commit. Not compared: the appstream
-# commits (their data is made by build-update-repo here) and the subject and body of the commit.
+# xa.metadata and the sizes are the build's (xa_sum) and xa.from_commit is the build's commit. The subject and body, which
+# users see in "flatpak remote-info --log", are what --prepare passes to build-commit-from for app and Debug and what
+# build-update-repo writes ("Update", no body) for the appstream commits. Not compared: the data of the appstream commits.
 check_new_commit() {
     chain_ok "$WORK/repo" "$2" "$3" || die 2 "$1: the new commit $2 does not continue the published head ${3:-(there is none)}"
     [ "$(ostree --repo="$WORK/repo" show --print-metadata-key=ostree.ref-binding "$2" 2> /dev/null)" = "['$1']" ] || die 2 "$1: the new commit $2 is not bound to its own ref (ostree.ref-binding)"
@@ -295,6 +296,13 @@ check_new_commit() {
         [ "$(ostree --repo="$WORK/repo" show --print-metadata-key=xa.from_commit "$2" 2> /dev/null)" = "'$5'" ] || die 2 "$1: xa.from_commit of the new commit $2 is not the verified build's commit"
     fi
     nc_time=$(commit_time "$WORK/repo" "$2") || die 2 "$1: cannot read the date of $2"
+    # (the part of "ostree show" after the header: the subject and the body, indented, then an empty line)
+    ostree --repo="$WORK/repo" show "$2" 2> /dev/null | sed '1,/^$/d' > "$WORK/msg.got"
+    case $1 in
+        appstream*) printf '    Update\n\n' ;;
+        *) printf '    Paleto Modkit %s (%s)\n\n    source %s\n\n' "$VERSION" "$TAG" "$COMMIT" ;;
+    esac > "$WORK/msg.want"
+    cmp -s "$WORK/msg.got" "$WORK/msg.want" || die 2 "$1: the subject or the body of the new commit $2 is not the expected one"
     [ "$nc_time" -le $((NOW + COMMIT_FUTURE_MARGIN)) ] || die 2 "$1: the new commit $2 is dated in the future"
     if [ -n "$3" ]; then
         nc_base=$(commit_time "$SITE/repo" "$3") || die 2 "$1: cannot read the date of the published $3"
