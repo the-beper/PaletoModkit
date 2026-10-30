@@ -13,6 +13,7 @@
 # (packaging/fetch-pinned.sh) and hashed again before use; an empty pin or another architecture than x86_64
 # refuses to build (exit 2), unless you give your own tool:
 #   EXPECT_VERSION=x.y.z  refuse (exit 2) unless Cargo.toml has this version (the release workflow sets it)
+#   SOURCE_DATE_EPOCH=n   mtime of every file in the tarball (default: the commit time of HEAD)
 #   APPIMAGETOOL=file APPIMAGETOOL_SHA256=hash  use this appimagetool (and, optionally, APPIMAGE_RUNTIME=file
 #                         APPIMAGE_RUNTIME_SHA256=hash), for other architectures or local experiments
 set -eu
@@ -29,6 +30,8 @@ fi
 ARCH=$(uname -m)
 DIST=$ROOT/dist
 NAME=paleto-modkit-$VERSION
+EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2> /dev/null || true)}
+[ -n "$EPOCH" ] || die 2 "no SOURCE_DATE_EPOCH and no git commit to take the tarball time from"
 
 # The tools first, so that a bad pin stops the build before anything is compiled.
 TOOLS=$ROOT/target/tools
@@ -84,7 +87,8 @@ stage() {
 stage "$DIST/$NAME"
 install -Dm755 packaging/install.sh "$DIST/$NAME/install.sh"
 cp README.md LICENSE THIRD_PARTY.md "$DIST/$NAME/"
-tar -C "$DIST" -czf "$DIST/PaletoModkit-$ARCH.tar.gz" "$NAME"
+# Fixed order, owner, modes and time (the commit's), so the same files give the same archive.
+reproducible_tar "$DIST" "$NAME" "$DIST/PaletoModkit-$ARCH.tar.gz" "$EPOCH"
 rm -rf "$DIST/${NAME:?}"
 
 # AppImage.

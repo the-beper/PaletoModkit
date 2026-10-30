@@ -4,7 +4,8 @@
 # Exit codes of every release script: 0 ok or nothing to do; 1 usage or internal error; 2 validation (format,
 # mismatch, missing file, checksum, structure); 3 policy refusal (downgrade, same tag with another commit or
 # content, Flatpak identity change); 4 signing (secret missing, wrong key, gpg or ostree failure); 5 remote
-# conflict (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead of the release).
+# conflict or unreadable remote (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead
+# of the release, GitHub answer missing or malformed).
 #   RELEASE_CONF  the pins file (default: release.conf next to the scripts)
 #   REMOTE        git URL of the repository (default: https://github.com/$GITHUB_REPOSITORY.git)
 #   GH_REPO, GH_TOKEN  for the gh wrappers; the token never goes in a URL, a git config or a command line
@@ -338,6 +339,15 @@ assets_complete() {
 }
 
 # ---- archives and OSTree repositories ------------------------------------------------------------------------
+
+# reproducible_tar PARENT NAME OUT EPOCH: OUT.tar.gz holding PARENT/NAME, the same bytes for the same contents
+# whatever the file times, owners, umask or directory order of the machine: sorted names, every mtime EPOCH,
+# owner 0:0, modes normalised (644/755, no group or other write), no gzip name or time. Needs GNU tar (--sort).
+reproducible_tar() {
+    LC_ALL=C tar --sort=name --format=gnu --mtime="@$4" --owner=0 --group=0 --numeric-owner --mode='u+rw,go+rX,go-w' -C "$1" -cf "$3.tmp" "$2" || return 1
+    gzip -n -9 -c "$3.tmp" > "$3" || return 1
+    rm -f "$3.tmp"
+}
 
 # tar_safe TAR PREFIX: exit 2 unless every member of the archive is a regular file or a
 # directory inside PREFIX/ (no absolute path, no .., no link or device).

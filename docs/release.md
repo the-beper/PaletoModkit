@@ -17,7 +17,7 @@ For the maintainer who cuts releases and fixes them when they fail. The workflow
 - [Bumping pins](#bumping-pins)
 - [Testing the pipeline locally](#testing-the-pipeline-locally)
 
-Exit codes of every release script: 0 ok or nothing to do, 1 usage or internal error, 2 validation (format, mismatch, missing file, checksum, structure), 3 refused by policy (downgrade, same tag with other content, Flatpak identity change), 4 signing, 5 conflict on the remote (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead of the release).
+Exit codes of every release script: 0 ok or nothing to do, 1 usage or internal error, 2 validation (format, mismatch, missing file, checksum, structure), 3 refused by policy (downgrade, same tag with other content, Flatpak identity change), 4 signing, 5 conflict on the remote or remote unreadable (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead of the release, GitHub answer missing or malformed).
 
 ## One-time setup
 
@@ -25,7 +25,7 @@ These are GitHub settings. Only the maintainer can change them, from the web pag
 
 | Setting | Where | Value |
 | :--- | :--- | :--- |
-| Environment `flatpak-signing` | Settings, Environments | Required reviewer: the maintainer. Deployment branches and tags: selected, tag rule `v*` and branch `main`. |
+| Environment `flatpak-signing` | Settings, Environments | Required reviewer: the maintainer. Deployment branches and tags: selected, tag rule `v*` and branch `main`. The release workflow checks the reviewer and the restriction before it signs (`check-signing-env`). |
 | Signing key | the same environment | Secret `FLATPAK_GPG_PRIVATE_KEY`. Move it here with `gh secret set FLATPAK_GPG_PRIVATE_KEY --env flatpak-signing`. |
 | Repository-level secret | Settings, Secrets and variables | Delete `FLATPAK_GPG_PRIVATE_KEY`. This also stops old runs, made before this workflow, from signing when they are re-run. |
 | Tag ruleset | Settings, Rules | Target `refs/tags/v*`: restrict updates and deletions. A released tag can never be moved. |
@@ -77,6 +77,7 @@ Every job checks out the commit the tag points to. Nothing comes from `main`. On
 | `build-linux` | ubuntu-22.04 | `cargo test --locked`, then `build-release.sh`: tarball, AppImage and `.zsync`. Skipped in `publish-flatpak` mode. | none |
 | `build-flatpak` | ubuntu-24.04 | `build-flatpak.sh` with `EXPORT_REPO=1`: the unsigned OSTree repository, in the pinned Flathub image. | none |
 | `verify` | ubuntu-24.04 | `release-verify.sh builds`: structure and hashes of everything built; writes `release-manifest.txt`. | none |
+| `check-signing-env` | ubuntu-24.04 | `release-check-env.sh`: fails unless the environment `flatpak-signing` exists with a required reviewer and deployments limited to selected branches and tags. A job that names a missing environment makes GitHub create it unprotected, so this runs in a job without `environment:`, in parallel with the builds; `prepare-flatpak` and `sign-flatpak` need it. | none (read-only token) |
 | `prepare-flatpak` | ubuntu-24.04 | Reads the build and `gh-pages` (the untrusted data), checks the version rules, adds the new unsigned commits on top of the published repository, makes the summary. | none |
 | `sign-flatpak` | ubuntu-24.04 | First `flatpak-sign.sh --check-prepared`, without the secret: unpacks the prepared repository, checks its refs and the content checksums of the app and Debug commits against `release-manifest.txt` from `verify`. Then `--sign` (the only step with the key): signs the heads of the four named refs and the summary, and fails if a head moved. It builds nothing and makes no bundle. | environment `flatpak-signing` (approval) |
 | `finish-flatpak` | ubuntu-24.04 | Verifies the signed repository with the public key only, on a machine that never held the key, and builds the bundle. | none (read-only, no environment) |
@@ -105,7 +106,7 @@ A release has five files:
 | `PaletoModkit-x86_64.flatpak` | The Flatpak bundle, signed with the repository key. |
 | `SHA256SUMS` | The SHA-256 of the four files above, sorted. |
 
-The files are built on GitHub's runners and are not byte-reproducible: a rebuild of the same tag is a new build, not the same one.
+The files are built on GitHub's runners and are not byte-reproducible: a rebuild of the same tag is a new build, not the same one. Only the packing of the tarball is deterministic (sorted names, owner 0:0, mtime = commit time of the tag, `gzip -n`); the binaries inside it are not.
 
 The run also keeps workflow artifacts for 14 days (30 for the Linux build). The ones to know when you debug a run:
 
@@ -228,6 +229,7 @@ Rules:
 | A pin in `release.conf` is empty or malformed | 2 | Fix the pin ([Bumping pins](#bumping-pins)). |
 | A build job fails | - | Nothing later runs, the remote is unchanged. Re-run failed jobs, or fix and release a higher version. |
 | `verify` fails (missing file, checksum, converter missing from the tarball) | 2 | The build is wrong, not the pipeline. Fix, release a higher version. |
+| `check-signing-env` fails | 3 or 5 | 3: the environment is missing, has no required reviewer or does not limit deployments to selected branches and tags; fix it under Settings, Environments ([One-time setup](#one-time-setup)), then re-run failed jobs. 5: GitHub could not be read; check the job's token permissions (`contents: read`, `actions: read`), then re-run. Nothing was signed. |
 | `sign-flatpak` not approved, or rejected | - | Nothing was published. Re-run the job and approve. |
 | `sign-flatpak` fails in `--check-prepared` (refs or checksums differ from the manifest) | see log | The prepared repository is wrong. Nothing was signed. Re-run all jobs; if it repeats, release a higher version. |
 | `sign-flatpak` fails because a head moved | see log | The repository changed between the check and the signing. Nothing was published. Re-run all jobs. |
@@ -267,9 +269,17 @@ An empty or malformed hash or commit makes `release-validate.sh` stop with exit 
 
 ## Testing the pipeline locally
 
-Both tests need `flatpak`, `ostree` and `gpg` (and `git`, `jq`, `tar`, `curl` for the first); they print `SKIP` and exit 77 when something is missing. They use throwaway keys and folders, no network and no GitHub, and never touch your real Flatpak installation or home. In the simulation `RELEASE_SIM=1` makes the scripts refuse a remote, repository or site on GitHub.
+| Test | Needs | Checks |
+| :--- | :--- | :--- |
+| `tarball-test.sh` | GNU tar, gzip | The tarball packing is deterministic. |
+| `check-env-test.sh` | `jq` | The pre-flight check of the signing environment, on saved API answers and a stub of `gh`. |
+| `release-sim.sh`, `flatpak-repo-test.sh` | `flatpak`, `ostree`, `gpg` (and `git`, `jq`, `tar`, `curl` for the first) | The whole pipeline, and signing with the real flatpak client. |
+
+A test prints `SKIP` and exits 77 when a tool is missing. They use throwaway keys and folders, no network and no GitHub, and never touch your real Flatpak installation or home. In the simulation `RELEASE_SIM=1` makes the scripts refuse a remote, repository or site on GitHub.
 
 ```bash
+sh packaging/tests/tarball-test.sh           # the tarball packing is deterministic
+sh packaging/tests/check-env-test.sh         # the pre-flight check of the signing environment
 sh packaging/tests/release-sim.sh            # the whole pipeline against a local remote and a stub of gh
 sh packaging/tests/release-sim.sh -l         # list the scenarios
 sh packaging/tests/release-sim.sh <name>     # one scenario
