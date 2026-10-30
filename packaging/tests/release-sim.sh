@@ -2032,7 +2032,7 @@ sc_check_compromised() {
     # shellcheck disable=SC2329
     cc_obj() { printf '%s/objects/%s/%s' "$1" "$(printf '%s' "$2" | cut -c1-2)" "$(printf '%s' "$2" | cut -c3-)"; }
     # shellcheck disable=SC2329
-    cc_newcommit() { ostree --repo="$1" commit -b "$APP_REF" --tree=ref="$APP_REF" --parent="$(ostree --repo="$1" rev-parse "$APP_REF")" -s "evil" > /dev/null; }
+    cc_newcommit() { ostree --repo="$1" commit -b "$APP_REF" --tree=ref="$APP_REF" --parent="$(ostree --repo="$1" rev-parse "$APP_REF")" -s "evil" > /dev/null; rm -f "$1/.lock"; }
     # shellcheck disable=SC2329
     cc_list() { sed -i "s|^$APP_REF .*|$APP_REF $(ostree --repo="$1" rev-parse "$APP_REF^")|" "$2/signlist"; }
     # a new commit, the ref, the list and the description all say so: only the pin of the description tells
