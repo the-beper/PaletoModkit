@@ -103,7 +103,7 @@ A tarball and building from source are covered in [docs/installation.md](docs/in
 | [FAQ](docs/faq.md) | What it is and is not, what has not been tried in game, common questions |
 | [Development](docs/development.md) | Project layout, building, tests, screenshots, packaging |
 
-Found a problem? [Open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose): the form asks for what helps most (edition, how you installed it, `paleto check`). Pull requests are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Found a problem? [Open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose): the form asks for what helps most (edition, how you installed it, `paleto check`). Pull requests are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md). Security problems go through private reports: see [SECURITY.md](SECURITY.md).
 
 ## Credits
 
