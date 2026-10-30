@@ -230,12 +230,12 @@ gh_wait_release() {
 gh_assets() {
     gh api --paginate "repos/$GH_REPO/releases/$1/assets?per_page=100" --jq '.[] | [.id, .name, .size, .state, .digest] | @tsv'
 }
-# gh_create TAG PRERELEASE(0|1)
+# gh_create TAG PRERELEASE(0|1) NOTES_FILE
 gh_create() {
     if [ "$2" = 1 ]; then
-        gh release create "$1" --draft --verify-tag --generate-notes --title "$1" --prerelease
+        gh release create "$1" --draft --verify-tag --notes-file "$3" --title "$1" --prerelease
     else
-        gh release create "$1" --draft --verify-tag --generate-notes --title "$1"
+        gh release create "$1" --draft --verify-tag --notes-file "$3" --title "$1"
     fi
 }
 # gh_upload TAG FILE...

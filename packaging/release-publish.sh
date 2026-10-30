@@ -151,7 +151,9 @@ if [ "$MODE" = release ]; then
         fi
     fi
     if [ -z "$rel" ]; then
-        gh_create "$TAG" "$PRERELEASE" > /dev/null || die 1 "cannot create the draft release"
+        # The notes are the list of the metainfo's <release> for this version (release-notes.py), not the merged pull requests.
+        python3 -I "$PKG_DIR/release-notes.py" "$PKG_DIR/$APP_ID.metainfo.xml" "$VERSION" --repo "$GH_REPO" > "$TMP/notes.md" || die 2 "cannot write the release notes from the metainfo"
+        gh_create "$TAG" "$PRERELEASE" "$TMP/notes.md" > /dev/null || die 1 "cannot create the draft release"
         gh_wait_release listed "$TAG" > "$TMP/releases2.tsv" || die 5 "the new draft of $TAG is not listed after ${RELEASE_WAIT:-60}s"
         [ "$(wc -l < "$TMP/releases2.tsv")" = 1 ] || die 5 "not exactly one release for $TAG after creating it"
         rel=$(cut -f1 "$TMP/releases2.tsv")

@@ -1,7 +1,7 @@
 #!/bin/sh
 # A stand-in for the GitHub CLI, for packaging/tests/release-sim.sh: the few calls of release-lib.sh (the gh_*
 # wrappers), served from a folder, never from the network.
-#   GH_STUB_DIR     the state: rel/<id>/{tag,draft,prerelease}, rel/<id>/assets/<name> (+ .meta), latest, log
+#   GH_STUB_DIR     the state: rel/<id>/{tag,draft,prerelease,notes}, rel/<id>/assets/<name> (+ .meta), latest, log
 #   GH_STUB_REMOTE  the git remote that tags are looked up in (--verify-tag)
 #   GH_REPO         must be sim/<something>: the stub refuses any other repository
 # A one-shot failure is a line in $GH_STUB_DIR/fail: "upload:N" (the Nth file of an upload stops half way and
@@ -126,18 +126,19 @@ release)
         create)
             tag=$1
             shift
-            draft=0 verify=0 pre=false
+            draft=0 verify=0 pre=false notes=""
             while [ $# -gt 0 ]; do
                 case $1 in
                     --draft) draft=1; shift ;;
                     --verify-tag) verify=1; shift ;;
-                    --generate-notes) shift ;;
+                    --notes-file) notes=$2; shift 2 ;;
                     --title) shift 2 ;;
                     --prerelease) pre=true; shift ;;
                     *) echo "gh stub: unsupported option $1" >&2; exit 1 ;;
                 esac
             done
             [ "$draft" = 1 ] || { echo "gh stub: releases must be created as drafts" >&2; exit 1; }
+            [ -f "$notes" ] || { echo "gh stub: a release needs --notes-file" >&2; exit 1; }
             if [ "$verify" = 1 ]; then
                 out=$(git ls-remote "${GH_STUB_REMOTE:?}" "refs/tags/$tag")
                 [ -n "$out" ] || { echo "gh: tag $tag does not exist on the remote" >&2; exit 1; }
@@ -147,6 +148,7 @@ release)
             echo "$tag" > "$R/$id/tag"
             echo true > "$R/$id/draft"
             echo "$pre" > "$R/$id/prerelease"
+            cp "$notes" "$R/$id/notes"
             if [ -f "$GH_STUB_DIR/lag" ]; then cp "$GH_STUB_DIR/lag" "$R/$id/hide"; fi
             echo "https://example.invalid/sim/$tag" ;;
         upload)

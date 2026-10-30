@@ -46,7 +46,7 @@ The tag must point to a commit that is on `main`. `release-validate.sh` refuses 
    | :--- | :--- |
    | `Cargo.toml` | `[workspace.package] version`. Every crate must use `version.workspace = true`. |
    | `Cargo.lock` | Every `paleto-*` package at the same version (run `cargo build` to update it). |
-   | `packaging/io.github.the_beper.PaletoModkit.metainfo.xml` | A new first `<release version="X.Y.Z" date="YYYY-MM-DD">`. A candidate needs `type="development"`, a stable release must not have it. A stable release replaces the `<release>` entries of its own candidates: AppStream sorts `X.Y.Z-rc.N` above `X.Y.Z`, and CI's `appstreamcli validate` fails with `releases-not-in-order`. |
+   | `packaging/io.github.the_beper.PaletoModkit.metainfo.xml` | A new first `<release version="X.Y.Z" date="YYYY-MM-DD">`. A candidate needs `type="development"`, a stable release must not have it. A stable release replaces the `<release>` entries of its own candidates: AppStream sorts `X.Y.Z-rc.N` above `X.Y.Z`, and CI's `appstreamcli validate` fails with `releases-not-in-order`. The items of its `<ul>` become the notes of the GitHub release (`packaging/release-notes.py`, with a "Full Changelog" link to the next older `<release>`); the `<p>` is only for software centers. |
 
 2. Merge it to `main` through a pull request, with CI green.
 3. Tag and push:

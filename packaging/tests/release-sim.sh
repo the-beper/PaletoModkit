@@ -308,6 +308,8 @@ sc_valid_stable() {
     assert_eq "the release is a draft" false "$(stub_field v1.6.0 draft)"
     assert_eq "the release assets (4 files and SHA256SUMS)" 5 "$(stub_assets v1.6.0)"
     assert_eq "latest release" v1.6.0 "$(cat "$GH_STUB_DIR/latest")"
+    # the notes are the list of the metainfo release, not the merged pull requests
+    assert_eq "release notes" "$(printf '%s\n\n%s\n\n%s' "## What's Changed" "- A change of \`paleto\`." "**Full Changelog**: https://github.com/$GH_REPO/compare/v1.0.0...v1.6.0")" "$(stub_field v1.6.0 notes)"
     assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
     assert_eq "gh-pages version" 1.6.0 "$(kv "$LIVE/site/release.txt" version)"
     assert_eq "gh-pages commits" 1 "$(pages_count)"

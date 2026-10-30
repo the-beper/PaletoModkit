@@ -54,7 +54,8 @@ fx_key() {
     printf '%s\n' "$f"
 }
 
-# fx_metainfo FILE ID VERSION DATE [development]: a minimal metainfo whose first <release> is VERSION.
+# fx_metainfo FILE ID VERSION DATE [development]: a minimal metainfo whose first <release> is VERSION, with one change
+# in its list, followed by an older 1.0.0.
 fx_metainfo() {
     {
         echo '<?xml version="1.0" encoding="UTF-8"?>'
@@ -66,8 +67,9 @@ fx_metainfo() {
         else
             echo "    <release version=\"$3\" date=\"$4\">"
         fi
-        echo '      <description><p>Test.</p></description>'
+        echo '      <description><p>Test.</p><ul><li>A change of <code>paleto</code>.</li></ul></description>'
         echo '    </release>'
+        echo '    <release version="1.0.0" date="2026-01-01"><description><p>Old.</p></description></release>'
         echo '  </releases>'
         echo '</component>'
     } > "$1"
@@ -87,7 +89,7 @@ fx_set_version() {
 # check, with the real scripts of this repository in packaging/ (not the submodule: the caller adds it).
 fx_project() {
     mkdir -p "$1/packaging" "$1/crates"
-    cp "$4"/*.sh "$4"/release.conf "$1/packaging/"
+    cp "$4"/*.sh "$4"/release-notes.py "$4"/release.conf "$1/packaging/"
     cp -r "$4/icons" "$1/packaging/icons"
     mkdir -p "$1/packaging/tests"
     cp "$4/tests/gh" "$1/packaging/tests/gh"
