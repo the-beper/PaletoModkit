@@ -107,7 +107,19 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Result<std::process::Out
             out
         })
     }
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A program that was written a moment ago can be "busy" while a fork of another thread still holds its file
+    // open for writing, until that fork runs its own program: a short wait ends it.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => break result?,
+        }
+    };
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
     let status = loop {
@@ -767,6 +779,35 @@ done
         assert!(start.elapsed() < Duration::from_secs(10));
         let out = output_within(Command::new("sh").args(["-c", "echo out; echo err >&2"]), Duration::from_secs(30)).unwrap();
         assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (&b"out\n"[..], &b"err\n"[..]));
+    }
+
+    #[test]
+    fn a_program_written_a_moment_ago_runs_while_other_threads_fork() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicBool;
+        let dir = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            // Each fork holds the files open for writing at that moment until it runs `true`.
+            for _ in 0..4 {
+                s.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = Command::new("true").status();
+                    }
+                });
+            }
+            for i in 0..300 {
+                let path = dir.path().join(format!("tool{i}"));
+                std::fs::write(&path, "#!/bin/sh\necho ok\n").unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let out = output_within(&mut Command::new(&path), Duration::from_secs(30));
+                if !out.as_ref().is_ok_and(|o| o.stdout == b"ok\n") {
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("run {i}: {out:?}");
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
     }
 
     #[test]

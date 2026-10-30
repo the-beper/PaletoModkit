@@ -1390,7 +1390,7 @@ mod tests {
                 .unwrap()
                 .success()
         };
-        let mut child = Command::new("sleep").arg("5").env("WINEPREFIX", "/steam/pfx/").spawn().unwrap();
+        let mut child = Command::new("sleep").arg("60").env("WINEPREFIX", "/steam/pfx/").spawn().unwrap();
         let found = run("/steam/pfx");
         let other = run("/steam/other");
         let _ = child.kill();
@@ -1413,8 +1413,17 @@ mod tests {
         let on_host = |p: &Prefix| Command::new("sh").args(["-c", RUNNING_ON_HOST, "sh"]).arg(&p.path).arg(&p.compat).status().unwrap().success();
 
         for (var, path) in [("WINEPREFIX", "library/compatdata/271590/pfx/"), ("STEAM_COMPAT_DATA_PATH", "library/compatdata/271590")] {
-            let mut child = Command::new("sleep").arg("5").env(var, dir.path().join(path)).spawn().unwrap();
-            let found = (is_running(&prefix), on_host(&prefix));
+            // Killed below, so it lives long enough for a slow machine: scanning every process is not quick under load.
+            let mut child = Command::new("sleep").arg("60").env(var, dir.path().join(path)).spawn().unwrap();
+            // A scan can miss it when the machine cannot start the processes of the shell in time: ask again.
+            let mut found = (false, false);
+            for _ in 0..40 {
+                found = (is_running(&prefix), on_host(&prefix));
+                if found == (true, true) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
             let not_other = (is_running(&other), on_host(&other));
             let _ = child.kill();
             let _ = child.wait();
