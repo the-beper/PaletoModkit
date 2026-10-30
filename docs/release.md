@@ -140,7 +140,7 @@ There is no rotation. Clients trust the key in the file they added the remote wi
 
 `release-publish.sh` always does the same three steps, in this order. After any failure it reads the remote again and continues, replaces or refuses.
 
-1. **Draft release.** It creates a draft (no draft is public), uploads `SHA256SUMS` first and then the files, and checks name, size and SHA-256 of each asset. A draft with another build's `SHA256SUMS` is deleted and made again (the tag stays).
+1. **Draft release.** It creates a draft (no draft is public), uploads `SHA256SUMS` first and then the files, and checks name, size and SHA-256 of each asset. A draft with another build's `SHA256SUMS` is deleted and made again (the tag stays). The list of releases is a few seconds behind, so the script waits (`RELEASE_WAIT`, 60 s) until the new draft is listed, or the old one is gone, before it goes on.
 2. **gh-pages** (stable tags only, and only if the published version is lower). It makes one new orphan commit with the signed repository, `release.txt` and the two remote files, and pushes it atomically with leases:
 
    ```text

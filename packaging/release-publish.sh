@@ -8,7 +8,8 @@
 #       release          the release (a prerelease for -rc.N: nothing on gh-pages) and, for a stable tag, Pages
 #       publish-flatpak  only Pages, for a release that is already published and is the highest
 # Environment: GH_TOKEN, GH_REPO (the gh CLI; the token is also handed to git by a credential helper that reads
-# it, never in a URL), REMOTE, PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), GITHUB_RUN_ID
+# it, never in a URL), REMOTE, RELEASE_WAIT (seconds to wait for the list of releases to show a change, default 60)
+# and RELEASE_POLL (3), PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), GITHUB_RUN_ID
 # and GITHUB_RUN_ATTEMPT (recorded). Exit codes: see release-lib.sh (5: the remote is not as it was when signing).
 set -eu
 { set +x; } 2> /dev/null
@@ -140,14 +141,15 @@ if [ "$MODE" = release ]; then
         if [ "$sums" != "sha256:$OURS" ]; then
             echo "the draft of $TAG is another build: replacing it"
             gh_delete_release "$rel" > /dev/null || die 1 "cannot delete the draft"
+            gh_wait_release gone "$rel" || die 5 "the old draft of $TAG is still listed after ${RELEASE_WAIT:-60}s"
             rel=""
         fi
     fi
     if [ -z "$rel" ]; then
         gh_create "$TAG" "$PRERELEASE" > /dev/null || die 1 "cannot create the draft release"
-        gh_releases > "$TMP/releases2.tsv" || die 5 "cannot list the releases"
-        [ "$(awk -F '\t' -v t="$TAG" '$2 == t' "$TMP/releases2.tsv" | wc -l)" = 1 ] || die 5 "not exactly one release for $TAG after creating it"
-        rel=$(awk -F '\t' -v t="$TAG" '$2 == t { print $1 }' "$TMP/releases2.tsv")
+        gh_wait_release listed "$TAG" > "$TMP/releases2.tsv" || die 5 "the new draft of $TAG is not listed after ${RELEASE_WAIT:-60}s"
+        [ "$(wc -l < "$TMP/releases2.tsv")" = 1 ] || die 5 "not exactly one release for $TAG after creating it"
+        rel=$(cut -f1 "$TMP/releases2.tsv")
     fi
     # Drop what does not belong or is not complete, then upload what is missing (the sums first).
     gh_assets "$rel" > "$TMP/assets.tsv"
@@ -255,6 +257,6 @@ fi
 if [ "$MODE" = release ]; then
     assets_match "$rel" "$TMP/final" || die 5 "the draft of $TAG changed while publishing"
     gh_publish "$TAG" "$PRERELEASE" || die 1 "cannot publish the release $TAG"
-    gh_releases | awk -F '\t' -v t="$TAG" '$2 == t && $3 == "false" { f = 1 } END { exit !f }' || die 5 "$TAG is not published after the edit"
+    gh_wait_release published "$TAG" > /dev/null || die 5 "$TAG is not published after the edit"
 fi
 echo "published $TAG"
