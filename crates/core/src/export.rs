@@ -173,7 +173,8 @@ impl ChangesCache {
 /// Stops early, with part of the changes, once `stop` says so.
 fn diff_archives(prefix: &str, modded: &Archive, original: &Archive, keys: Option<&Keys>, stop: &dyn Fn() -> bool, out: &mut Vec<Changed>) {
     let files = |a: &Archive| -> HashMap<String, (String, usize)> {
-        a.walk(0).into_iter().filter(|(_, i)| !a.entries[*i].is_dir()).map(|(p, i)| (p.to_ascii_lowercase(), (p, i))).collect()
+        // Names that are not plain relative paths (the parser refuses them) never get into a package.
+        a.walk(0).into_iter().filter(|(p, i)| !a.entries[*i].is_dir() && crate::vfs::is_plain_entry_path(p)).map(|(p, i)| (p.to_ascii_lowercase(), (p, i))).collect()
     };
     let (ours, theirs) = (files(modded), files(original));
     let mut found = Vec::new();
@@ -427,6 +428,29 @@ mod tests {
         let mut out = BTreeMap::new();
         walk(&Archive::open(path, None).unwrap(), "", &mut out);
         out
+    }
+
+    #[test]
+    fn a_diff_never_names_an_entry_that_is_not_a_plain_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ed = ArchiveEditor::new("a.rpf");
+        for name in ["good.ydr", "evil.ydr", "empty.ydr"] {
+            ed.add_file(name, vec![1]).unwrap();
+        }
+        let path = dir.path().join("a.rpf");
+        ed.save(&path).unwrap();
+        // The parser cannot produce these names: make the entry list by hand.
+        let mut modded = Archive::open(&path, None).unwrap();
+        let original = Archive::open(&path, None).unwrap();
+        for (name, odd) in [("evil.ydr", "../evil.ydr"), ("empty.ydr", "")] {
+            modded.entries.iter_mut().find(|e| e.name == name).unwrap().name = odd.into();
+        }
+        let mut out = Vec::new();
+        diff_archives("a.rpf", &modded, &original, None, &|| false, &mut out);
+        let paths: Vec<_> = out.iter().map(|c| c.path.as_str()).collect();
+        // The odd names are left out (not reported as added); what the original has under the plain names shows as deleted.
+        assert_eq!(paths, ["a.rpf/empty.ydr", "a.rpf/evil.ydr"]);
+        assert!(out.iter().all(|c| c.kind == Kind::Deleted), "{out:?}");
     }
 
     #[test]

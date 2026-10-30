@@ -397,6 +397,10 @@ pub fn legacy_in_archive(archive: &Archive, keys: Option<&Keys>) -> Vec<String> 
     while let Some((prefix, child)) = queue.pop() {
         let archive = child.as_ref().unwrap_or(archive);
         for (path, i) in archive.walk(0) {
+            // The parser refuses odd names; the paths found here go on to edit the archive, so check again.
+            if !crate::vfs::is_plain_entry_path(&path) {
+                continue;
+            }
             let entry = &archive.entries[i];
             if entry.is_archive() {
                 if let Ok(c) = archive.open_child(i, keys) {
@@ -666,6 +670,25 @@ done
         assert!(!kept.exists());
         assert!(backups(&game).is_empty());
         assert!(undo(&game, None, "1700000000").is_err());
+    }
+
+    #[test]
+    fn legacy_files_with_names_that_are_not_plain_paths_are_left_out() {
+        let res = |v: u32| [b"RSC7".as_slice(), &v.to_le_bytes(), &((v >> 4) << 28).to_le_bytes(), &((v & 15) << 28).to_le_bytes(), b"payload"].concat();
+        let dir = tempfile::tempdir().unwrap();
+        let mut ed = ArchiveEditor::new("a.rpf");
+        for name in ["car.yft", "evil.yft", "x64/odd.yft"] {
+            ed.add_file(name, res(162)).unwrap();
+        }
+        let path = dir.path().join("a.rpf");
+        ed.save(&path).unwrap();
+        let mut archive = Archive::open(&path, None).unwrap();
+        assert_eq!(legacy_in_archive(&archive, None), ["car.yft", "evil.yft", "x64/odd.yft"]);
+        // The parser cannot produce these names: make the entry list by hand.
+        for (name, odd) in [("evil.yft", "../evil.yft"), ("odd.yft", "../odd.yft")] {
+            archive.entries.iter_mut().find(|e| e.name == name).unwrap().name = odd.into();
+        }
+        assert_eq!(legacy_in_archive(&archive, None), ["car.yft"]);
     }
 
     #[test]
