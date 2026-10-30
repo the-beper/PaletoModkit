@@ -120,4 +120,6 @@ The `.paleto` folder in the game folder holds the lock (`lock`) and the records 
 
 **Steam reports changed files.** Paleto Modkit edits only the mods folder, but other tools (or deleting game files outside `mods/` by hand) may change the game's own files. **Verify integrity of game files** in Steam puts them back; your mods folder is not touched by it.
 
+**A warning says a folder "holds … names that differ only in case".** Windows does not tell `Foo` and `foo` apart, but Linux does, so a game folder may hold both (two mods unpacked into one, a copy made by hand). A package, an add-on pack or an extraction that names one of them in another case (`scripts\FOO\a.asi`) lands in the first in sorted order, which the warning names, and the install log shows the warning. Rename or remove the one you do not want, so that the game and the tool see the same folder. A name that matches exactly never warns.
+
 **An archive opens but cannot be edited: "… is in the archive twice".** Another tool made it with two entries the game cannot tell apart (names differing only in upper and lower case, or a file and a folder of one name). Saving it would lose one of them, so Paleto Modkit only reads it. Rebuild the archive with the tool that made it, or extract it and make a new one.

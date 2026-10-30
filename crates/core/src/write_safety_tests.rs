@@ -1608,3 +1608,78 @@ fn a_snapshot_is_whole_or_not_taken_at_every_fault_point() {
         }
     }
 }
+
+// ---- names that differ only in case ----
+
+/// A game with `scripts/Foo` and `scripts/foo`, which the game's own (case-insensitive) filesystem would not have.
+fn case_game(dir: &Path) -> Game {
+    let game = game_folder(dir, Edition::Enhanced);
+    std::fs::create_dir_all(game.root.join("scripts/Foo")).unwrap();
+    std::fs::create_dir_all(game.root.join("scripts/foo")).unwrap();
+    game
+}
+
+fn warnings(log: &[String]) -> Vec<&String> {
+    log.iter().filter(|l| l.starts_with("warning:")).collect()
+}
+
+#[test]
+fn an_install_into_a_name_with_two_spellings_warns_once_and_uses_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\FOO\a.asi</add><add source="x">scripts\FOO\b.asi</add>"#, &[("content/x", b"new")], false);
+    let log = install(&game, &package).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/Foo/a.asi")).unwrap(), b"new");
+    assert!(!game.root.join("scripts/foo/a.asi").exists());
+    let found = warnings(&log);
+    assert_eq!(found.len(), 1, "{log:?}");
+    assert!(found[0].contains("scripts") && found[0].contains("\"Foo\" and \"foo\"") && found[0].contains("differ only in case") && found[0].contains("\"Foo\" was used"), "{}", found[0]);
+}
+
+#[test]
+fn an_exact_spelling_is_no_guess_and_warns_of_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    for spelling in ["Foo", "foo"] {
+        let package = oiv(dir.path(), "x.oiv", &format!(r#"<add source="x">scripts\{spelling}\a.asi</add>"#), &[("content/x", b"new")], false);
+        let log = install(&game, &package).unwrap();
+        assert!(warnings(&log).is_empty(), "{spelling}: {log:?}");
+        assert!(game.root.join("scripts").join(spelling).join("a.asi").is_file());
+    }
+}
+
+#[test]
+fn a_failed_install_reports_the_names_it_guessed_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    // The second command cannot be applied, after the first resolved a name that has two spellings.
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\FOO\a.asi</add><xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")], false);
+    let before = snapshot(&game.root);
+    let Error::Txn(failure) = install(&game, &package).unwrap_err() else { panic!("not a transaction failure") };
+    assert!(failure.log.iter().any(|l| l.starts_with("warning:") && l.contains("differ only in case")), "{:?}", failure.log);
+    assert_unchanged(&before, &snapshot(&game.root));
+}
+
+#[test]
+fn a_pack_into_a_name_with_two_spellings_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    for name in ["Piccolo", "PICCOLO"] {
+        std::fs::create_dir_all(game.root.join("mods/update/x64/dlcpacks").join(name)).unwrap();
+    }
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
+    let log = install_packs(&game, &packs).unwrap();
+    let found = warnings(&log);
+    assert_eq!(found.len(), 1, "{log:?}");
+    assert!(found[0].contains("dlcpacks") && found[0].contains("\"PICCOLO\" and \"Piccolo\""), "{}", found[0]);
+    assert!(game.root.join("mods/update/x64/dlcpacks/PICCOLO/dlc.rpf").is_file());
+}
+
+#[test]
+fn an_extraction_into_a_name_with_two_spellings_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    let (_, log) = crate::vfs::write_into(&game.root.join("scripts/FOO"), "extracting", |o| o.write("a.txt", b"x").map(drop)).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/Foo/a.txt")).unwrap(), b"x");
+    assert_eq!(warnings(&log).len(), 1, "{log:?}");
+}

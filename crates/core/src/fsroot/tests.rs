@@ -975,3 +975,38 @@ fn an_owned_destination_refuses_a_link_or_a_file_anywhere_on_the_way() {
     assert!(err(roots.owned_dest(Owned::Legacy, &rel("f.bin"))).contains("a link"));
     assert_eq!(std::fs::read(elsewhere.join("sub/f.bin")).unwrap(), b"theirs");
 }
+
+#[test]
+fn find_ci_reports_the_entries_it_passes_over_only_when_it_guesses() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["Foo", "foo", "FOO", "bar", "Baz"] {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    let folder = Dir::open_path(dir.path()).unwrap();
+    let found = |name: &str| find_ci(&folder, name).unwrap();
+    // An exact name is no guess: nothing else is looked at.
+    assert_eq!(found("foo"), Some(Found { name: "foo".into(), kind: Kind::Dir, others: Vec::new() }));
+    // Several spellings: the first in sorted order, and the others are named.
+    assert_eq!(found("fOo"), Some(Found { name: "FOO".into(), kind: Kind::Dir, others: vec!["Foo".into(), "foo".into()] }));
+    // One spelling is not ambiguous.
+    assert_eq!(found("BAR"), Some(Found { name: "bar".into(), kind: Kind::Dir, others: Vec::new() }));
+    assert_eq!(found("nothing"), None);
+    let warning = case_warning(Path::new("/g/scripts"), &found("fOo").unwrap()).unwrap();
+    assert_eq!(warning, "warning: /g/scripts holds \"FOO\", \"Foo\" and \"foo\", names that differ only in case: \"FOO\" was used (first in sorted order); rename or remove one, the game sees only one");
+    assert_eq!(case_warning(Path::new("/g"), &found("BAR").unwrap()), None);
+}
+
+#[test]
+fn a_tool_folder_is_judged_against_every_spelling_of_the_games_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = open(dir.path());
+    let game = dir.path().join("game");
+    std::fs::create_dir(game.join("X64")).unwrap();
+    // `x64` and `X64` both exist: the resolver would take `x64`, but a tool folder that is `X64` under another name is as bad.
+    let shown = game.join("mods_disabled");
+    let as_x64 = roots.game.dir.open_dir("X64").unwrap();
+    assert!(err(roots.check_owned_folder(&as_x64, &shown)).contains("x64 folder under another name"));
+    std::fs::create_dir(game.join("mods_disabled")).unwrap();
+    let own = roots.game.dir.open_dir("mods_disabled").unwrap();
+    roots.check_owned_folder(&own, &shown).unwrap();
+}
