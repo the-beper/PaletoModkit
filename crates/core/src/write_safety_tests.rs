@@ -1180,19 +1180,20 @@ fn the_leftovers_scan_lists_temporary_names_and_never_touches_them() {
     let game = game_folder(dir.path(), Edition::Enhanced);
     std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
     std::fs::create_dir_all(game.root.join("mods_snapshots")).unwrap();
-    for rel in ["mods/x64/.paleto-0123456789abcdef-0.old", "mods_snapshots/.paleto-fedcba9876543210.partial", ".paleto-aaaaaaaaaaaaaaaa.new"] {
+    // `.paleto-save-<6 random characters>` is what a killed `ArchiveEditor::save` leaves beside the archive.
+    for rel in ["mods/x64/.paleto-0123456789abcdef-0.old", "mods/x64/.paleto-save-aB3x9Q", "mods_snapshots/.paleto-fedcba9876543210.partial", ".paleto-aaaaaaaaaaaaaaaa.new"] {
         std::fs::write(game.root.join(rel), b"orphan").unwrap();
     }
     let before = snapshot(&game.root);
     let found: Vec<String> = crate::txn::leftovers(&game).iter().map(|p| p.strip_prefix(&game.root).unwrap().to_string_lossy().into_owned()).collect();
-    assert_eq!(found, [".paleto-aaaaaaaaaaaaaaaa.new", "mods/x64/.paleto-0123456789abcdef-0.old", "mods_snapshots/.paleto-fedcba9876543210.partial"]);
+    assert_eq!(found, [".paleto-aaaaaaaaaaaaaaaa.new", "mods/x64/.paleto-0123456789abcdef-0.old", "mods/x64/.paleto-save-aB3x9Q", "mods_snapshots/.paleto-fedcba9876543210.partial"]);
     assert_unchanged(&before, &snapshot(&game.root));
     // They are not mods: the listings of the mods folder skip them.
     assert!(crate::loader::modded_files(&game, None).is_empty());
     assert!(crate::vfs::local_files(&game.root.join("mods")).unwrap().is_empty());
     let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\a.asi</add>"#, &[("content/x", b"new")], false);
     install(&game, &package).unwrap();
-    assert_eq!(crate::txn::leftovers(&game).len(), 3);
+    assert_eq!(crate::txn::leftovers(&game).len(), 4);
 }
 
 #[test]
