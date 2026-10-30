@@ -5,8 +5,9 @@ name: Release
 # environment, in one step of one job. Everything that parses untrusted data (the build output, gh-pages: tar,
 # ostree, gpg --show-keys, flatpak) runs in jobs without the key, on other virtual machines: `verify`,
 # `prepare-flatpak` and `finish-flatpak`. `sign-flatpak` first checks, without the key, what `prepare-flatpak` handed
-# over against the manifest of `verify` (the content checksums), then signs the commits and the summary in a keyring
-# in memory (nothing is built or generated there, and there are no static deltas) and removes it. `finish-flatpak`
+# over against the manifest of `verify` (the content checksums) and against gh-pages, fetched again (config, parents,
+# commit metadata), then signs the new commits and the summary in a keyring in memory (nothing is built or generated
+# there, and there are no static deltas) and removes it. `finish-flatpak`
 # verifies the signed repository like a client does and makes the bundle, on a machine that never held the key. Only
 # `publish` can write (the draft release, then gh-pages through a credential helper, then the release). The rules are
 # in docs/release.md, the scripts in packaging/release-*.sh and flatpak-sign.sh, simulated by
@@ -166,6 +167,10 @@ jobs:
     if: ${{ !cancelled() && needs.validate.outputs.plan != 'noop' && needs.build-flatpak.result == 'success' && (needs.build-linux.result == 'success' || needs.validate.outputs.build_linux == 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The hash of release-manifest.txt, which the later jobs get as a run artifact (a compromised job can replace those):
+    # job outputs cannot be changed by other jobs, and sign-flatpak, finish-flatpak and publish check the manifest against it.
+    outputs:
+      manifest_sha256: ${{ steps.verify_linux.outputs.manifest_sha256 || steps.verify_flatpak.outputs.manifest_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
@@ -188,9 +193,11 @@ jobs:
           name: flatpak-unsigned-${{ needs.validate.outputs.commit }}
           path: in/fp
       - name: Verify the builds (Linux and Flatpak)
+        id: verify_linux
         if: ${{ needs.validate.outputs.build_linux == 'true' }}
         run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --linux in/linux --flatpak in/fp --out out
       - name: Verify the build (Flatpak only)
+        id: verify_flatpak
         if: ${{ needs.validate.outputs.build_linux != 'true' }}
         run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --flatpak in/fp --out out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -287,9 +294,13 @@ jobs:
     # The key is a secret of this environment only: configure required reviewers and the deployment branches and
     # tags there (docs/release.md).
     environment: flatpak-signing
+    # The hash of flatpak-sign-result.txt, which holds the hashes of what finish-flatpak reads from the artifact of this job.
+    outputs:
+      result_sha256: ${{ steps.sign.outputs.result_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
+      MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -307,12 +318,27 @@ jobs:
         with:
           name: verified-${{ needs.validate.outputs.commit }}
           path: in
-      # Without the key: unpack what prepare-flatpak made, check its refs and compare its content with the manifest
-      # of the verify job; this names the commits the next step may sign.
+      # The published repository again, without credentials: the base of the checks below is not what prepare-flatpak says.
+      - name: Fetch gh-pages
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
+        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages"
+      - name: Fetch gh-pages (first publication)
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
+        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
+      # Without the key: unpack what prepare-flatpak made, check its refs, config and new commits against gh-pages and its
+      # content against the manifest of the verify job; this names the commits the next step may sign.
       - name: Check the prepared repository
-        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --check-remote
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --site "$RUNNER_TEMP/pages" --check-remote
+      - name: Check the prepared repository (first publication)
+        if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --site "$RUNNER_TEMP/pages" --bootstrap --check-remote
+      - name: Check the prepared repository (release candidate, a repository of its own)
+        if: ${{ needs.validate.outputs.prerelease == 'true' }}
+        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/signwork" --fresh
       # The only step with the key: it signs the named commits and the summary, in a keyring in memory.
       - name: Sign
+        id: sign
         env:
           FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
         run: packaging/flatpak-sign.sh --sign --tag "$TAG" --commit "$COMMIT" --work "$RUNNER_TEMP/signwork" --out "$RUNNER_TEMP/signres"
@@ -335,9 +361,14 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    # The hash of flatpak-signed.txt (which holds the hashes of the signed repository and of the bundle), checked by publish.
+    outputs:
+      signed_sha256: ${{ steps.finish.outputs.signed_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
+      MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
+      RESULT_SHA256: ${{ needs.sign-flatpak.outputs.result_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -356,6 +387,7 @@ jobs:
           name: verified-${{ needs.validate.outputs.commit }}
           path: in
       - name: Verify the signed repository and make the bundle
+        id: finish
         run: packaging/flatpak-sign.sh --finish --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in signres --work "$RUNNER_TEMP/finwork" --out "$RUNNER_TEMP/signed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -380,6 +412,8 @@ jobs:
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
+      MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
+      SIGNED_SHA256: ${{ needs.finish-flatpak.outputs.signed_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

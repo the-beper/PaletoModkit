@@ -118,11 +118,12 @@ sign() {
     v=$1 site=$2 out=$3 keyf=${4:-$KEYS/K.sec}
     shift 4
     man=$BASE/m/$v/release-manifest.txt
+    pin=$(sha256sum "$man" | cut -d' ' -f1) # the job output of the verify job
     sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
         --unsigned "$BASE/b/$v/flatpak-unsigned-repo.tar" --site "$site" --work "$out.pwork" --out "$out.prep" "$@" || return $?
-    sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" || return $?
-    FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
-    sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
+    MANIFEST_SHA256=$pin sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" --site "$site" "$@" || return $?
+    FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") GITHUB_OUTPUT="$out.sign.gho" sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
+    MANIFEST_SHA256=$pin RESULT_SHA256=$(sed -n 's/^result_sha256=//p' "$out.sign.gho") sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.work"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.pwork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.fwork"
@@ -157,7 +158,8 @@ legacy_sign() {
     rm -rf "$3" "$3.u"
     mkdir -p "$3" "$3.u"
     tar -C "$3.u" -xf "$BASE/b/$1/flatpak-unsigned-repo.tar"
-    if [ -n "$2" ]; then cp -a "$2/repo" "$3/repo"; else ostree --repo="$3/repo" init --mode=archive-z2; fi
+    # the config of the published repository, byte for byte (the scripts refuse any other)
+    if [ -n "$2" ]; then cp -a "$2/repo" "$3/repo"; else ostree --repo="$3/repo" init --mode=archive-z2 && printf '[core]\nrepo_version=1\nmode=archive-z2\nindexed-deltas=true\n' > "$3/repo/config"; fi
     flatpak build-commit-from --untrusted --src-repo="$3.u/repo" --gpg-sign="$FPR_K" --gpg-homedir="$BASE/ahome" --no-update-summary \
         "$3/repo" "$APP_REF" "runtime/$ID.Debug/x86_64/master" > /dev/null 2>&1
     flatpak build-update-repo --gpg-sign="$FPR_K" --gpg-homedir="$BASE/ahome" --generate-static-deltas --prune --prune-depth=3 "$3/repo" > /dev/null 2>&1
@@ -250,7 +252,7 @@ check "the parent of the new commit is the one the client has" same "$CD1" "$(os
 publish PD "$BASE/P3"
 check "update from the repository with deltas" fp clientd update --noninteractive --no-deps --no-related "$ID//master"
 check "the client has the new commit" same "$CD2" "$(installed clientd)"
-echo "# (the old deltas in the new repository: $(ostree --repo="$BASE/P3/repo" static-delta list | wc -l) lines)"
+check "the old deltas are not carried into the new repository" sh -c "ostree --repo='$BASE/P3/repo' static-delta list | grep -q 'No static deltas'"
 
 echo "# 6: the bundle"
 check "install the bundle (own installation)" fp bundle install --noninteractive --no-deps --no-related --bundle "$BASE/o2/PaletoModkit-x86_64.flatpak"

@@ -91,9 +91,9 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="1.6.0-rc.3" date="2026-10-30" type="development">
+    <release version="1.6.0" date="2026-10-30">
       <description>
-        <p>Release candidate: installs, archive edits and file operations are recoverable changes, and packages are read within limits.</p>
+        <p>Installs, archive edits and file operations are recoverable changes, and packages are read within limits.</p>
         <ul>
           <li>Installing OIV packages and add-on packs, editing archives, converting and the file operations of the browser each run as one journaled change under a lock on the game: a failure undoes what was done, or the error says what is left, and a change cut short by a crash or a power cut is undone or finished at the next change.</li>
           <li>An interrupted change is offered for undo when the game is chosen; paleto recover does the same on the command line.</li>

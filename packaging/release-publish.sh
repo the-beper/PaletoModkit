@@ -10,7 +10,8 @@
 # Environment: GH_TOKEN, GH_REPO (the gh CLI; the token is also handed to git by a credential helper that reads
 # it, never in a URL), REMOTE, RELEASE_WAIT (seconds to wait for the list of releases to show a change, default 60)
 # and RELEASE_POLL (3), PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), GITHUB_RUN_ID
-# and GITHUB_RUN_ATTEMPT (recorded). Exit codes: see release-lib.sh (5: the remote is not as it was when signing).
+# and GITHUB_RUN_ATTEMPT (recorded), MANIFEST_SHA256 and SIGNED_SHA256 (the hashes that the jobs verify and finish-flatpak pinned
+# as job outputs: both are needed, exit 2 otherwise). Exit codes: see release-lib.sh (5: the remote is not as it was when signing).
 set -eu
 { set +x; } 2> /dev/null
 # shellcheck source=/dev/null
@@ -43,6 +44,10 @@ PAGES_POLL=${PAGES_POLL:-10}
 S=$IN/flatpak-signed.txt
 M=$IN/release-manifest.txt
 [ -f "$S" ] && [ -f "$M" ] || die 2 "flatpak-signed.txt or release-manifest.txt is missing in $IN"
+# Both are run artifacts: they are the ones the jobs that made them pinned (job outputs), before anything is read from them.
+# flatpak-signed.txt holds the hashes of the signed repository and of the bundle, so the pin covers those files too.
+check_pinned "$M" "${MANIFEST_SHA256:-}" release-manifest.txt
+check_pinned "$S" "${SIGNED_SHA256:-}" flatpak-signed.txt
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-publish.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 trap 'exit 143' TERM
