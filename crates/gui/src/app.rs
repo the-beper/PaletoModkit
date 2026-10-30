@@ -2095,7 +2095,14 @@ impl App {
                 self.task = Some(Task::spawn("Installing add-on packs", ctx, move || {
                     let log = match paleto_core::addon::install_packs(&game, keys.as_deref(), &dialog.packs, tool.as_deref()) {
                         Ok(log) => log,
-                        Err(e) => return Outcome::Installed(Err(install_failure(&e, Vec::new()))),
+                        Err(e) => {
+                            let (text, log) = install_failure(&e, Vec::new());
+                            let text = match dialog.packs.as_slice() {
+                                [(_, name)] => format!("{name}: {text}"),
+                                _ => text,
+                            };
+                            return Outcome::Installed(Err((text, log)));
+                        }
                     };
                     let converted = log.iter().filter(|l| l.starts_with("converted ")).count();
                     let names: Vec<String> = dialog.packs.iter().map(|(_, n)| n.to_ascii_lowercase()).collect();
@@ -3846,8 +3853,11 @@ impl App {
                 }
                 ui.vertical(|ui| {
                     ui.heading(&d.metadata.name);
-                    if !d.metadata.version.is_empty() {
-                        ui.label(format!("Version {}   ·   by {}", d.metadata.version, d.metadata.author));
+                    let version = (!d.metadata.version.is_empty()).then(|| format!("Version {}", d.metadata.version));
+                    let author = (!d.metadata.author.is_empty()).then(|| format!("by {}", d.metadata.author));
+                    let line: Vec<String> = version.into_iter().chain(author).collect();
+                    if !line.is_empty() {
+                        ui.label(line.join("   ·   "));
                     }
                     if !d.path.as_os_str().is_empty() {
                         ui.label(RichText::new(d.path.display().to_string()).weak().small());
@@ -3928,6 +3938,14 @@ impl App {
                     let log = match result {
                         Ok(log) | Err((_, log)) => log,
                     };
+                    // What is left and how to recover come before the log, so a long log cannot hide them.
+                    let (log, left): (&[String], &[String]) = match log.iter().position(|l| l.starts_with("Left behind")) {
+                        Some(at) => (&log[..at], &log[at..]),
+                        None => (log, &[]),
+                    };
+                    for line in left {
+                        ui.label(RichText::new(line).monospace().small().color(theme::error(ui.visuals().dark_mode)));
+                    }
                     if !log.is_empty() {
                         egui::ScrollArea::vertical().max_height(crate::widgets::dialog_list_height(ui.ctx())).show(ui, |ui| {
                             for line in log {
@@ -5239,9 +5257,6 @@ pub(crate) fn size(bytes: u64) -> String {
     }
 }
 
-/// What an install did, from its log: the files it added, edited, deleted or
-/// converted, and its warnings. "saved" lines only close archives whose edits
-/// are already counted.
 /// What the install dialog shows of a failed install: the error, then the log of what was done and undone
 /// (after the lines of `log`, what ran earlier), and when the undo was not clean, what is left.
 fn install_failure(e: &paleto_core::Error, mut log: Vec<String>) -> (String, Vec<String>) {
@@ -5260,6 +5275,9 @@ fn install_failure(e: &paleto_core::Error, mut log: Vec<String>) -> (String, Vec
     (format!("{}: the changes could not be fully undone", f.cause), log)
 }
 
+/// What an install did, from its log: the files it added, edited, deleted or
+/// converted, and its warnings. "saved" lines only close archives whose edits
+/// are already counted.
 fn install_summary(log: &[String]) -> String {
     let warnings = log.iter().filter(|l| l.starts_with("warning:")).count();
     let changes = log.iter().filter(|l| !l.starts_with("warning:") && !l.starts_with("saved ")).count();

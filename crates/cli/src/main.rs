@@ -1361,7 +1361,6 @@ fn recover_first(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// The game folder: explicit, or found above `near` or the current directory.
 /// The log of an install; when it failed after changing files, the lines of what was done and undone come before the error (which names what is left).
 fn report(result: Result<Vec<String>, paleto_core::Error>) -> Result<Vec<String>> {
     match result {
@@ -1378,6 +1377,7 @@ fn report(result: Result<Vec<String>, paleto_core::Error>) -> Result<Vec<String>
     }
 }
 
+/// The game folder: explicit, or found above `near` or the current directory.
 fn find_game(explicit: Option<&Path>, near: Option<&Path>) -> Result<Game> {
     if let Some(dir) = explicit {
         return Ok(Game::open(dir)?);

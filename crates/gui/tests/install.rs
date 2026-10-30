@@ -101,6 +101,78 @@ fn two_add_on_packs_install_in_one_go() {
     assert!(modded.contains("dlcpacks:/supercar/") && modded.contains("dlcpacks:/minivan/"), "{modded}");
 }
 
+fn addon_game(dir: &std::path::Path) -> std::path::PathBuf {
+    let root = dir.join("Grand Theft Auto V Enhanced");
+    std::fs::create_dir_all(root.join("mods")).unwrap();
+    std::fs::write(root.join("GTA5_Enhanced.exe"), b"").unwrap();
+    let mut update = ArchiveEditor::new("update.rpf");
+    update.add_file("common/data/dlclist.xml", b"<SMandatoryPacksData>\n\t<Paths>\n\t</Paths>\n</SMandatoryPacksData>\n".to_vec()).unwrap();
+    std::fs::create_dir_all(root.join("update")).unwrap();
+    update.save(&root.join("update/update.rpf")).unwrap();
+    root
+}
+
+#[test]
+fn a_failing_add_on_batch_opens_the_failure_dialog_and_installs_no_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = addon_game(dir.path());
+    let download = dir.path().join("Two Cars");
+    for name in ["supercar", "minivan"] {
+        std::fs::create_dir_all(download.join("dlcpacks").join(name)).unwrap();
+    }
+    ArchiveEditor::new("dlc.rpf").save(&download.join("dlcpacks/supercar/dlc.rpf")).unwrap();
+    std::fs::write(download.join("dlcpacks/minivan/dlc.rpf"), b"not an archive at all").unwrap();
+
+    let mut harness = start();
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    harness.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(download)));
+    harness.run_steps(3);
+    harness.get_by_label("Install").click();
+    settle(&mut harness);
+
+    harness.get_by_label("Add-on packs");
+    harness.get_by_label("Close");
+    harness.get_by_label_contains("minivan");
+    for name in ["supercar", "minivan"] {
+        assert!(!root.join("mods/update/x64/dlcpacks").join(name).exists(), "{name}");
+    }
+}
+
+/// Run by the test below in a child process: stages a change and dies without finishing or undoing it.
+#[test]
+fn crash_child() {
+    let Ok(root) = std::env::var("PALETO_INSTALL_CRASH") else { return };
+    let game = paleto_core::Game::open(std::path::Path::new(&root)).unwrap();
+    let roots = game.roots().unwrap();
+    let mut txn = paleto_core::txn::Txn::begin(&roots, "Probe change").unwrap();
+    let mut dest = roots.dest(&paleto_core::relpath::RelPath::parse("common.dat").unwrap()).unwrap();
+    txn.stage(&mut dest, |f| std::io::Write::write_all(f, b"new")).unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn an_unclean_failure_rereads_the_pending_changes_of_the_chosen_game() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = addon_game(dir.path());
+    let mut harness = start();
+    let ctx = harness.ctx.clone();
+    harness.state_mut().select_game_folder(&root, &ctx);
+    settle(&mut harness);
+    assert_eq!(harness.state().interrupted_count(), 0);
+
+    // A change left interrupted by a process that died, as a failed undo leaves it.
+    std::fs::write(root.join("common.dat"), b"old").unwrap();
+    let run = std::process::Command::new(std::env::current_exe().unwrap()).args(["crash_child", "--exact", "--nocapture", "--test-threads=1"]).env("PALETO_INSTALL_CRASH", &root).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+
+    harness.state_mut().offer_install_failure(&failure(false, &["/g/a.asi: gone"], true));
+    harness.run_steps(3);
+    assert_eq!(harness.state().interrupted_count(), 1);
+    harness.get_by_label("Left behind (not undone):");
+}
+
 #[derive(Debug)]
 struct Dropped(std::path::PathBuf);
 
