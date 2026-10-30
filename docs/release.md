@@ -191,11 +191,11 @@ Every release keeps the previous state in the branch `gh-pages-previous`. If `gh
    git push --force-with-lease=gh-pages:<broken-sha> origin origin/gh-pages-previous:gh-pages
    ```
 
-2. Start the workflow by hand from `main`, with the highest published tag and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched. It is the only mode that runs while `gh-pages` is below the highest release.
+2. Start the workflow by hand from `main`, with the highest published tag that has its files and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched. It is the only mode that runs while `gh-pages` is below the highest release.
 
 A refused `repo/config` (exit 2 in `prepare-flatpak` or `sign-flatpak`) means someone changed the unsigned file on `gh-pages`: treat it as an incident, restore from `gh-pages-previous` the same way.
 
-Bootstrap only if both branches are gone. Then run `publish-flatpak` for the highest published tag (it must have its files; any other tag is refused, exit 3) with `bootstrap_pages` ticked. `release` with `bootstrap_pages` is only for the very first release: it is refused (exit 5) while a published stable release with its files exists. It creates `gh-pages` from nothing, with the pinned key, and refuses to run if `gh-pages` exists. Users keep their remote: the files and the key are the same. Their next update starts a new history, which `flatpak update` takes as a plain update.
+Bootstrap only if both branches are gone. Then run `publish-flatpak` for the highest published tag that has its files (any other tag is refused, exit 3) with `bootstrap_pages` ticked. `release` with `bootstrap_pages` is only for the very first release: it is refused (exit 5) while a published stable release with its files exists. It creates `gh-pages` from nothing, with the pinned key, and refuses to run if `gh-pages` exists. Users keep their remote: the files and the key are the same. Their next update starts a new history, which `flatpak update` takes as a plain update.
 
 ## Lost signing key
 

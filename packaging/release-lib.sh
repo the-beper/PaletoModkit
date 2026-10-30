@@ -318,7 +318,8 @@ release_plan() {
         is_rc "$x" && continue
         if [ -z "$highest" ] || [ "$(semver_cmp "$x" "$highest")" = 1 ]; then highest=$x; fi
     done
-    if [ -n "$highest" ] && [ "$(semver_cmp "$t" "$highest")" = -1 ]; then die 3 "$t is older than the published $highest"; fi
+    # (publish-flatpak repairs the highest release that has its files, which may be below one made by hand: see below)
+    if [ "$mode" = release ] && [ -n "$highest" ] && [ "$(semver_cmp "$t" "$highest")" = -1 ]; then die 3 "$t is older than the published $highest"; fi
     pages_cmp=
     if [ -n "$PG_TAG" ]; then
         pages_cmp=$(semver_cmp "$t" "$PG_TAG")
@@ -329,12 +330,10 @@ release_plan() {
     fi
     if [ "$mode" = publish-flatpak ]; then
         [ -n "$pub_id" ] || die 3 "publish-flatpak needs the published release of $t"
-        [ "$highest" = "$t" ] || die 3 "$t is not the highest published release (${highest:-none})"
-        # With no gh-pages at all (bootstrap) it rebuilds it from the highest release that has its files, and from no other.
-        if [ -z "$PG_HEAD" ]; then
-            anchor=$(anchor_release "$d")
-            [ "$anchor" = "$t" ] || die 3 "$t has not all its files: gh-pages is rebuilt only from the highest complete release (${anchor:-none})"
-        fi
+        # It restores gh-pages (also from nothing, with bootstrap) from the highest release that has its files, and from no other: a
+        # release made by hand has no SHA256SUMS to record and is not the one the next version builds on.
+        anchor=$(anchor_release "$d")
+        [ "$anchor" = "$t" ] || die 3 "$t is not the highest published release with all its files (${anchor:-none})"
         if [ "$pages_cmp" = 0 ]; then echo noop; else echo publish; fi
         return 0
     fi

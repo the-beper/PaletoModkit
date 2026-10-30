@@ -1046,6 +1046,13 @@ sc_replay_pages() {
     job_validate 8 v1.6.2 release
     assert_rc "validate of 1.6.2 over a gh-pages with 1.5.1, 1.6.0 published and a release of 1.6.1 without files" 5
     assert_log "$LIVE/runs/8/validate.log" "publish-flatpak for v1.6.0"
+    # the advice works with the release made by hand present: 1.6.0 is the highest with its files, and gh-pages is restored
+    pipeline 9 v1.6.0 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak of 1.6.0 when a release of 1.6.1 has no files" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    job_validate 10 v1.6.2 release
+    assert_rc "validate of 1.6.2 after the repair" 0
 }
 
 sc_sign_fresh_and_verify() {
