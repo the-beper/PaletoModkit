@@ -84,7 +84,10 @@ flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flat
 SDK=org.freedesktop.Sdk//26.08
 RUST=org.freedesktop.Sdk.Extension.rust-stable//26.08
 DOTNET=org.freedesktop.Sdk.Extension.dotnet10//26.08
-flatpak install -y --noninteractive flathub "$SDK" "$RUST" "$DOTNET"
+# The app's runtime: the image had it, this installation must get it too (its commit is recorded, not pinned:
+# nothing of it goes into the app).
+PLATFORM=org.freedesktop.Platform//26.08
+flatpak install -y --noninteractive flathub "$SDK" "$RUST" "$DOTNET" "$PLATFORM"
 # The build tools at the commits in release.conf, checked, not trusted.
 pin() {
     [ -z "$2" ] || flatpak update -y --noninteractive --commit="$2" "$1"
@@ -100,6 +103,7 @@ flatpak build-update-repo --generate-static-deltas --prune --prune-depth=3 /work
     echo "sdk_commit=$(flatpak info --show-commit "$SDK")"
     echo "rust_ext_commit=$(flatpak info --show-commit "$RUST")"
     echo "dotnet_ext_commit=$(flatpak info --show-commit "$DOTNET")"
+    echo "platform_commit=$(flatpak info --show-commit "$PLATFORM")"
     echo "app_commit=$(ostree --repo=/work/repo rev-parse "app/$APP_ID/x86_64/master")"
     echo "debug_commit=$(ostree --repo=/work/repo rev-parse "runtime/$APP_ID.Debug/x86_64/master")"
 } > /work/build-info.txt
