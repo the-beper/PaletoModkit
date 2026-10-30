@@ -3,10 +3,13 @@ name: CI
 # Pull requests and pushes to main. There is no path filter on the triggers: a workflow skipped by one leaves the
 # required checks (`check`, `release-tooling`) pending for ever. Both jobs always run and report; a change that is only
 # documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
+# The weekly run (Monday, on main) is only for `deny`: new advisories appear without any change here.
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -20,7 +23,17 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Licences, advisories and sources of the dependencies (deny.toml).
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
   check:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,6 +77,7 @@ jobs:
 
   # The release scripts and their tests: no secret, no network but the loopback, nothing of GitHub.
   release-tooling:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
