@@ -15,7 +15,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -117,7 +117,7 @@ pub fn create(game: &Game, label: &str) -> Result<Snapshot, Error> {
     // The mods folder as the resolver checked it (it may be a link the user made, to another drive, but not to the
     // game's data or the like); everything below it is entered without following links.
     let built = (|| {
-        let (from, to) = (roots.anchor_root(RootKind::Mods)?.dir.try_clone()?, partial.mkdir("mods")?);
+        let (from, to) = (roots.anchor_root(RootKind::Mods)?.dir.try_clone()?, partial.mkdir_mode("mods", 0o700)?);
         copy_dir(&from, &to, &mods, 0)?;
         let mut file = partial.create_excl(LABEL)?;
         file.write_all(label.as_bytes())?;
@@ -212,18 +212,38 @@ pub fn restore(game: &Game, id: &str) -> Result<(), Error> {
             // something of their own there (the game's `x64`, say), which is not ours to delete.
             let game = &roots.game.dir;
             let ours = made.as_ref().is_some_and(|m| game.names_dir(&incoming, m).unwrap_or(false));
-            let kept = (is_replaced(&e) || !ours) && game.kind(&incoming).ok().flatten().is_some();
+            // (A name that cannot be looked at counts as there: nothing is removed on a guess.)
+            let kept = (is_replaced(&e) || !ours) && !matches!(game.kind(&incoming), Ok(None));
+            let place = roots.game.shown.join(&incoming).display().to_string();
+            if kept && let Err(why) = forget_incoming(&jdir, &jname) {
+                // The journal would still send a later recovery to that name: nothing is recovered now either.
+                return Err(Error::Package(format!("{e}; {place} was left in place, but the restore journal could not be updated ({why}), so nothing was recovered: look at that folder, then run `paleto recover`")));
+            }
             let mut rep = Report::default();
-            recover_restores_keeping(&roots, &jdir, &mut rep, kept.then_some(incoming.as_str()));
+            recover_restores(&roots, &jdir, &mut rep);
+            let undo = if rep.failures.is_empty() { String::new() } else { format!("; the mods folder could not be put back as it was: {}", rep.failures.join("; ")) };
             if kept {
-                Err(Error::Package(format!("{e}; {} was left in place, because it is not only what this restore made. Look at it before removing it", roots.game.shown.join(&incoming).display())))
+                Err(Error::Package(format!("{e}; {place} was left in place, because it is not only what this restore made. Look at it before removing it{undo}")))
             } else if rep.failures.is_empty() {
                 Err(e)
             } else {
-                Err(Error::Package(format!("{e}; the mods folder could not be put back as it was: {}", rep.failures.join("; "))))
+                Err(Error::Package(format!("{e}{undo}")))
             }
         }
     }
+}
+
+/// Takes the `incoming` and `made` records out of a restore journal (its whole lines only), so that no recovery,
+/// now or at a later change, removes what is at the incoming name, which is not only what the restore made.
+fn forget_incoming(jdir: &Dir, jname: &str) -> io::Result<()> {
+    let mut text = String::new();
+    jdir.open_read(jname)?.take(1 << 16).read_to_string(&mut text)?;
+    let whole = text.rfind('\n').map_or("", |end| &text[..=end]);
+    let rest: String = whole.lines().filter(|l| !l.starts_with("incoming ") && !l.starts_with("made ")).map(|l| format!("{l}\n")).collect();
+    let file = jdir.open_rw(jname)?;
+    FileExt::write_all_at(&file, rest.as_bytes(), 0)?;
+    file.set_len(rest.len() as u64)?;
+    file.sync_data()
 }
 
 fn incoming_name(rid: &str) -> String {
@@ -275,7 +295,8 @@ fn is_replaced(e: &Error) -> bool {
 fn swap(roots: &GameRoots, snapshot: &Snapshot, journal: &mut File, incoming: &str, outgoing: &str, made_slot: &mut Option<Dir>) -> Result<Dir, Error> {
     let game = &roots.game.dir;
     note(journal, &format!("incoming {incoming}\n"))?;
-    let made = game.mkdir(incoming)?;
+    // Private while it is filled; each folder gets its source's permissions when it is done (see `copy_dir`).
+    let made = game.mkdir_mode(incoming, 0o700)?;
     *made_slot = made.try_clone().ok();
     // The snapshot's copy of `mods` is entered one folder at a time, never through a link.
     let from = snapshots_folder(roots, false)?.ok_or_else(|| Error::Package(format!("no snapshot {}", snapshot.id)))?.open_dir(&snapshot.id)?.open_dir("mods")?;
@@ -385,24 +406,19 @@ pub(crate) fn pending_restores(roots: &GameRoots, jdir: &Dir) -> Vec<Pending> {
 /// and then the old one is removed; otherwise the old one is put back (renamed, never copied) and the
 /// incoming one removed. What cannot be decided is kept, with its journal, and reported in `rep`.
 pub(crate) fn recover_restores(roots: &GameRoots, jdir: &Dir, rep: &mut Report) {
-    recover_restores_keeping(roots, jdir, rep, None);
-}
-
-/// [`recover_restores`], leaving alone what is at the name `keep` (an incoming folder that is not only what the run made).
-fn recover_restores_keeping(roots: &GameRoots, jdir: &Dir, rep: &mut Report, keep: Option<&str>) {
     for name in restore_journals(jdir) {
         match read_restore(jdir, &name) {
             Ok(None) => {
                 // Nothing was ever recorded in it, so nothing was changed for it.
                 let _ = jdir.unlink(&name);
             }
-            Ok(Some(r)) => recover_restore(roots, jdir, &name, &r, rep, keep),
+            Ok(Some(r)) => recover_restore(roots, jdir, &name, &r, rep),
             Err(why) => rep.failures.push(format!("the restore journal {name} is damaged ({why}); nothing was deleted on its word, its `.paleto-*` folders are listed by `leftovers`")),
         }
     }
 }
 
-fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep: &mut Report, keep: Option<&str>) {
+fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep: &mut Report) {
     let game = &roots.game.dir;
     let shown = |n: &str| roots.game.shown.join(n).display().to_string();
     let label = format!("restoring snapshot {}", r.snapshot);
@@ -417,9 +433,6 @@ fn recover_restore(roots: &GameRoots, jdir: &Dir, jname: &str, r: &Restore, rep:
     // Our own unique names only, and only if they are folders.
     let remove = |n: &Option<String>| -> Result<(), String> {
         let Some(n) = n else { return Ok(()) };
-        if keep == Some(n.as_str()) {
-            return Ok(());
-        }
         match game.kind(n) {
             Ok(None) => Ok(()),
             Ok(Some(Kind::Dir)) => remove_tree(game, n, 0).map_err(|e| format!("{} could not be removed: {e}", shown(n))),
@@ -512,7 +525,7 @@ fn copy_dir(src: &Dir, dst: &Dir, shown: &Path, depth: usize) -> Result<(), Erro
         let io_at = |e: io::Error| Error::Io(io::Error::new(e.kind(), format!("{}: {e}", at.display())));
         match src.kind(&name)? {
             Some(Kind::Dir) => {
-                let to = dst.mkdir(&name)?;
+                let to = dst.mkdir_mode(&name, 0o700)?;
                 #[cfg(test)]
                 DURING_COPY.with(|h| h.borrow_mut().as_mut().map(|hook| hook(&at)));
                 let from = src.open_dir(&name).map_err(io_at)?;

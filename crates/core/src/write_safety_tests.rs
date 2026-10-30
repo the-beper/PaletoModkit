@@ -1768,3 +1768,58 @@ fn a_mods_link_planted_to_the_incoming_folder_does_not_make_recovery_remove_the_
     let _ = crate::txn::recover(&game).unwrap();
     assert_eq!(std::fs::read(game.root.join(&old).join("x64/m.rpf")).unwrap(), b"current", "the old mods folder was removed");
 }
+
+// ---- round 2 of the review of the snapshot copy ----
+
+#[test]
+fn a_kept_folder_is_never_removed_by_a_later_recovery_and_the_failures_are_told() {
+    let (mut told, mut stuck) = (0, 0);
+    for k in 1..400 {
+        let dir = tempfile::tempdir().unwrap();
+        let (game, snap) = restore_setup(dir.path());
+        let originals = snapshot(&game.root.join("x64"));
+        let root = game.root.clone();
+        // The game's own `x64` is moved onto the name of the folder being filled; then a look at a name fails.
+        when_copy_reaches_x64(move |_| {
+            let at = incoming(&root);
+            std::fs::rename(&at, at.with_extension("aside")).unwrap();
+            std::fs::rename(root.join("x64"), &at).unwrap();
+        });
+        faults::arm_at(Point::Stat, k, Fault::Fail(std::io::ErrorKind::Other));
+        let result = crate::snapshots::restore(&game, &snap.id);
+        let fired = faults::disarm();
+        crate::snapshots::DURING_COPY.with(|h| h.take());
+        let left = !crate::txn::pending(&game).is_empty();
+        if left {
+            stuck += 1;
+            let err = result.as_ref().unwrap_err().to_string();
+            assert!(err.contains("journal") && err.contains("left in place"), "k={k}: the failures of the recovery are not told: {err}");
+            told += 1;
+        }
+        // Whatever happened, the next change recovers, and the game's `x64` is still somewhere.
+        let _ = crate::txn::recover(&game);
+        let safe = snapshot(&game.root.join("x64")) == originals || std::fs::read_dir(&game.root).unwrap().flatten().any(|e| e.file_name().to_string_lossy().ends_with("-mods.new") && snapshot(&e.path()) == originals);
+        assert!(safe, "k={k}: the game's x64 was deleted by a recovery");
+        if !fired {
+            break;
+        }
+    }
+    assert!(stuck > 0 && told == stuck, "no look failed during the recovery of a kept folder");
+}
+
+#[test]
+fn the_folders_of_a_copy_are_private_while_it_is_filled() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode_of = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let (root, slot) = (game.root.clone(), seen.clone());
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root);
+        slot.set(Some((mode_of(at.clone()), mode_of(at.join("x64")))));
+    });
+    crate::snapshots::restore(&game, &snap.id).unwrap();
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert_eq!(seen.get(), Some((0o700, 0o700)), "a folder was open to the group and others while it was filled");
+}

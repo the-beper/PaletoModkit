@@ -350,9 +350,14 @@ impl Dir {
     }
 
     pub fn mkdir(&self, name: &str) -> io::Result<Dir> {
+        self.mkdir_mode(name, 0o755)
+    }
+
+    /// [`Dir::mkdir`] with these permission bits (before the umask).
+    pub fn mkdir_mode(&self, name: &str, mode: u32) -> io::Result<Dir> {
         fault!(Mkdir);
         let c = cstr(name)?;
-        retry(|| cvt(unsafe { libc::mkdirat(self.fd(), c.as_ptr(), 0o755) }))?;
+        retry(|| cvt(unsafe { libc::mkdirat(self.fd(), c.as_ptr(), mode as libc::mode_t) }))?;
         // The folder is ours, made just now: if it cannot be opened it is not left behind for nobody to own.
         self.open_dir(name).inspect_err(|_| {
             let _ = unsafe { libc::unlinkat(self.fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
