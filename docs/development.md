@@ -103,6 +103,7 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 | `packaging/release.conf` | The pins of the release: identity of the Flatpak, signing key fingerprint, build image digest, Flathub commits of the SDK, tool downloads with their hashes, the files of a release. |
 | `packaging/release-lib.sh`, `release-validate.sh`, `release-verify.sh`, `release-pages.sh`, `release-publish.sh`, `fetch-pinned.sh` | The release pipeline: checks of the tag and the versions, of the build outputs and of the signed repository; the published Flatpak repository; draft release, gh-pages and publication, safe to run again. Exit codes: 0 ok, 1 usage, 2 validation, 3 refused by policy, 4 signing, 5 conflict on the remote. |
 | `packaging/tests/release-sim.sh` | Simulates the whole pipeline against a throwaway remote, a stub of `gh` and throwaway keys (needs `flatpak`, `ostree`, `gpg`, `jq`; no network). |
+| `packaging/ci-changes.sh` | Says from the list of changed files (stdin) whether CI has code to check or only documentation and repository files; `packaging/tests/ci-changes-test.sh` tests it. |
 | `packaging/install.sh` | Installs into `~/.local` (or `$PREFIX`) from a release tarball or from a source tree; `--uninstall` removes it. |
 | `packaging/build-cwconv.sh` | Builds `paleto-cwconv`, self-contained. |
 | `packaging/flatpak-cargo-sources.sh` | Generates `cargo-sources.json` from `Cargo.lock` with flatpak-cargo-generator, for offline Flatpak builds (`build-flatpak.sh` runs it). |
@@ -117,6 +118,6 @@ flatpak install --user dist/PaletoModkit-x86_64.flatpak
 
 The release workflow (`.github/workflows/release.yml`) builds the tarball and the AppImage (on `ubuntu-22.04`, so the AppImage links an old glibc and carries `libxkbcommon-x11`, which winit loads when there is no Wayland session) and the Flatpak (on the runner itself, after freeing its disk: the build needs more room than a container job has) for each `v*` tag. The builds never see the signing key: it is only in the approved `sign-flatpak` job, and `publish` then makes the release and the `gh-pages` branch (served by GitHub Pages). The one-time setup, cutting a release, recovery and pin bumps are in [release.md](release.md).
 
-Dependabot updates the GitHub Actions weekly; they are pinned to commit SHAs. CI skips pushes and pull requests that only touch documentation, screenshots or other non-code files.
+Dependabot updates the GitHub Actions weekly; they are pinned to commit SHAs. CI has no path filter on its triggers (a skipped workflow leaves the required checks pending): for a pull request that only touches documentation, screenshots or other non-code files, `check` and `release-tooling` still run and report, but skip their steps (`packaging/ci-changes.sh` decides).
 
 Third-party code and data, and their licences, are listed in [THIRD_PARTY.md](../THIRD_PARTY.md).

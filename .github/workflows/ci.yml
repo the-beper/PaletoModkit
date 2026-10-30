@@ -1,27 +1,12 @@
 name: CI
 
+# Pull requests and pushes to main. There is no path filter on the triggers: a workflow skipped by one leaves the
+# required checks (`check`, `release-tooling`) pending for ever. Both jobs always run and report; a change that is only
+# documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "screenshots/**"
-      - "LICENSE"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/dependabot.yml"
-      - ".gitignore"
-      - ".claude/**"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "screenshots/**"
-      - "LICENSE"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/dependabot.yml"
-      - ".gitignore"
-      - ".claude/**"
 
 permissions:
   contents: read
@@ -40,18 +25,36 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Select
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            files=$(git diff --name-only "$BASE_SHA" HEAD)
+            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changes.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - if: steps.changes.outputs.code == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
+        if: steps.changes.outputs.code == 'true'
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
+        if: steps.changes.outputs.code == 'true'
         run: cargo test --locked
       - name: Validate desktop integration files
+        if: steps.changes.outputs.code == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq desktop-file-utils appstream libxml2-utils
@@ -65,15 +68,35 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Select
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            files=$(git diff --name-only "$BASE_SHA" HEAD)
+            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Which changes run CI
+        if: steps.changes.outputs.code == 'true'
+        run: sh packaging/tests/ci-changes-test.sh
       - name: Install the tools
+        if: steps.changes.outputs.code == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq flatpak ostree shellcheck
       - name: shellcheck
+        if: steps.changes.outputs.code == 'true'
         # Warnings and errors fail the job; info and style notes differ between shellcheck versions (the runner's apt one is older).
         run: shellcheck -s sh -S warning packaging/*.sh packaging/tests/*.sh packaging/tests/gh .claude/flatpak-bg.sh
       - name: Simulate the release pipeline
+        if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/release-sim.sh
       - name: Offline test of the signed Flatpak repository
+        if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/flatpak-repo-test.sh
