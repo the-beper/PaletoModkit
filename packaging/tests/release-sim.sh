@@ -414,6 +414,8 @@ sc_prerelease() {
     assert_eq "draft flag" false "$(stub_field v1.7.0-rc.1 draft)"
     assert_eq "assets" 5 "$(stub_assets v1.7.0-rc.1)"
     assert_eq "gh-pages unchanged" "$before" "$(git -C "$LIVE/origin.git" rev-parse gh-pages)"
+    assert_eq "no static delta is recorded for a release candidate" "" "$(kv "$LIVE/runs/1/signed/flatpak-signed.txt" delta_superblock_sha256)"
+    assert_eq "no static delta in the repository of a release candidate" 0 "$(tar -tf "$LIVE/runs/1/signed/flatpak-signed-repo.tar" | grep -c 'delta')"
     assert_eq "latest unchanged" v1.5.1 "$(cat "$GH_STUB_DIR/latest")"
     # an rc cannot go to Pages
     job_validate 2 v1.7.0-rc.1 publish-flatpak
@@ -692,8 +694,6 @@ sc_tampered_signed() {
     [ -f "$f" ] || { fail "the object $f does not exist"; return 0; }
     chmod u+w "$f"
     printf Z | dd of="$f" bs=1 seek=$(($(stat -c %s "$f") - 3)) conv=notrunc 2> /dev/null
-    # a client without the static deltas reads the objects: make it so (the deltas carry the content otherwise)
-    rm -rf "$t/repo/deltas" "$t/repo/delta-indexes"
     tar -C "$t" -cf "$d/signed/flatpak-signed-repo.tar" repo
     snapshot > "$SIM/snap.before"
     job_publish 1 release
@@ -1244,7 +1244,7 @@ sc_sign_secret_env() {
     # the sign step unpacks nothing and makes no commit, no appstream data and no delta: it signs
     if grep -q -e build-commit-from -e 'untrusted' "$rt/calls"; then fail "the sign step made commits from the build output"; fi
     grep 'build-update-repo' "$rt/calls" | grep -q -e '--no-update-appstream' || fail "the sign step generated appstream data"
-    if grep -q -e 'generate-static-deltas' "$rt/calls"; then fail "the sign step generated static deltas"; fi
+    if grep -q -e 'generate-static-deltas' -e 'static-delta' "$rt/calls"; then fail "the sign step made static deltas"; fi
     grep -q 'gpg-sign' "$rt/calls" || fail "the sign step did not sign with ostree gpg-sign"
     for t in flatpak gpg ostree; do
         [ "$(grep -c "^$t " "$rt/calls")" -gt 0 ] || fail "the shim of $t was never called: the check proves nothing"
@@ -1256,6 +1256,9 @@ sc_sign_secret_env() {
     # shellcheck disable=SC2086
     run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/p2.gho" result_sha256)" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
     assert_rc "finish" 0
+    # the delta is made here, by the step without the key, after the signing
+    grep -q 'static-delta generate' "$rt/calls" || fail "the finish step made no static delta"
+    grep -q 'static-delta reindex' "$rt/calls" || fail "the finish step did not index the static delta"
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 
@@ -1645,7 +1648,7 @@ sc_sign_hostile_result() {
             [ ! -f "$1/${x%%:*}" ] || sed -i "s/^${x##*:}=.*/${x##*:}=$(sha256sum "$1/${x%%:*}" | cut -d' ' -f1)/" "$1/flatpak-sign-result.txt"
         done
         [ ! -f "$chk/base.txt" ] || sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$chk/base.txt" | cut -d' ' -f1)/" "$chk/flatpak-check-result.txt"
-        in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(sha256sum "$1/flatpak-sign-result.txt" | cut -d' ' -f1)" CHECKED_SHA256="$(sha256sum "$chk/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$chk/prepared.txt" | cut -d' ' -f1)" \
+        in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="${HR_PATH:-$PATH}" RESULT_SHA256="$(sha256sum "$1/flatpak-sign-result.txt" | cut -d' ' -f1)" CHECKED_SHA256="$(sha256sum "$chk/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$chk/prepared.txt" | cut -d' ' -f1)" \
             sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --checked "$chk" --work "$rt/fw" --out "$rt/out"
     }
     # shellcheck disable=SC2329
@@ -1665,6 +1668,13 @@ sc_sign_hostile_result() {
     [ ! -e "$d/signres/flatpak-base.txt" ] || fail "the signing job hands over a record of the base"
     assert_eq "mode in the signed record" site "$(kv "$rt/out/flatpak-signed.txt" mode)"
     assert_eq "the base commit in the signed record" "$(ostree --repo="$LIVE/site/repo" rev-parse "$APP_REF")" "$(kv "$rt/out/flatpak-signed.txt" base_app_commit)"
+    # the finished repository: the signed one plus the one delta and its index; the signed summary files are the same bytes
+    assert_eq "the superblock hash is recorded" 64 "$(kv "$rt/out/flatpak-signed.txt" delta_superblock_sha256 | wc -c | awk '{ print $1 - 1 }')"
+    assert_eq "one superblock in the finished repository" 1 "$(tar -tf "$rt/out/flatpak-signed-repo.tar" | grep -c '^repo/deltas/.*/superblock$')"
+    assert_eq "one index in the finished repository" 1 "$(tar -tf "$rt/out/flatpak-signed-repo.tar" | grep -c '^repo/delta-indexes/.*\.index$')"
+    for f in summary summary.sig summary.idx summary.idx.sig; do
+        assert_eq "$f of the finished repository is the signed one" "$(tar -xOf "$d/signres/flatpak-sign-result-repo.tar" "repo/$f" | sha256sum)" "$(tar -xOf "$rt/out/flatpak-signed-repo.tar" "repo/$f" | sha256sum)"
+    done
     # without the record of the base
     hr_chk nobase
     rm -f "$d/hc.nobase/base.txt"
@@ -1714,7 +1724,121 @@ sc_sign_hostile_result() {
     run "$d/r6.log" hr_finish "$d/hr.deltas"
     assert_rc "finish with deltas in the signed repository" 2
     assert_log "$d/r6.log" "top of repo/"
+    hr_copy index
+    hr_unpack index
+    mkdir -p "$rt/hr.index/repo/delta-indexes/ab"
+    echo x > "$rt/hr.index/repo/delta-indexes/ab/cdef.index"
+    hr_retar index
+    run "$d/r6b.log" hr_finish "$d/hr.index"
+    assert_rc "finish with an index in the signed repository" 2
+    assert_log "$d/r6b.log" "top of repo/"
+    # the delta that finish makes itself, spoiled (stand-ins for ostree that pass everything else on): a corrupted part, and a delta
+    # made before the signing, which has no signature in its superblock; neither may leave a finished repository
+    fx_delta_shim "$SIM/shim.corrupt" corrupt
+    fx_delta_shim "$SIM/shim.unsigned" unsigned
+    for spoil in corrupt unsigned; do
+        rm -rf "$rt/out"
+        HR_PATH=$SIM/shim.$spoil:$PATH
+        run "$d/r7.$spoil.log" hr_finish "$d/signres"
+        HR_PATH=""
+        assert_rc "finish with a delta that is $spoil" 4
+        assert_log "$d/r7.$spoil.log" "does not take a client"
+        [ ! -e "$rt/out/flatpak-signed-repo.tar" ] || fail "a finished repository was handed over with a delta that is $spoil"
+    done
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+
+# the finished repository, which publish accepts: the one static delta of a release on a published base and its index, with the
+# superblock hash that flatpak-signed.txt records, and nothing else; none for a release candidate. The files are the pinned ones, so
+# a forger changes the tar, its hash in the record and the pin (a job output) together, and only the checks of the delta stop him.
+sc_signed_deltas() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    base_app=$(kv "$d/signed/flatpak-signed.txt" base_app_commit)
+    app=$(kv "$d/signed/flatpak-signed.txt" app_commit)
+    sha=$(kv "$d/signed/flatpak-signed.txt" delta_superblock_sha256)
+    t=$SIM/sd
+    rm -rf "$t"
+    mkdir -p "$t"
+    tar -C "$t" -xf "$d/signed/flatpak-signed-repo.tar"
+    assert_eq "one superblock" 1 "$(find "$t/repo/deltas" -name superblock | wc -l)"
+    assert_eq "one index" 1 "$(find "$t/repo/delta-indexes" -type f | wc -l)"
+    assert_eq "the recorded hash is the one of the superblock" "$sha" "$(sha256sum "$(find "$t/repo/deltas" -name superblock)" | cut -d' ' -f1)"
+    assert_eq "the delta leads from the published app commit to the new one" "$base_app-$app" "$(ostree --repo="$t/repo" static-delta list)"
+    cp -a "$d/signed" "$d/signed.good"
+    # sd_try NAME MUTATOR PATTERN: MUTATOR REPO RECORD changes the repository (or the record), then the hashes are put right
+    # shellcheck disable=SC2329
+    sd_try() {
+        rm -rf "$d/signed" "$SIM/sd.$1"
+        cp -a "$d/signed.good" "$d/signed"
+        mkdir -p "$SIM/sd.$1"
+        tar -C "$SIM/sd.$1" -xf "$d/signed/flatpak-signed-repo.tar"
+        "$2" "$SIM/sd.$1/repo" "$d/signed/flatpak-signed.txt"
+        tar -C "$SIM/sd.$1" --owner=0 --group=0 --numeric-owner -cf "$d/signed/flatpak-signed-repo.tar" repo
+        sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$d/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$d/signed/flatpak-signed.txt"
+        sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
+        snapshot > "$SIM/snap.before"
+        job_publish 1 release
+        assert_rc "publish with $1" 2
+        assert_log "$d/publish.log" "$3"
+        snapshot > "$SIM/snap.after"
+        cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "$1: the remote changed"
+    }
+    # shellcheck disable=SC2329
+    m_second() { mkdir -p "$1/deltas/ab/cdef"; echo x > "$1/deltas/ab/cdef/superblock"; }
+    # shellcheck disable=SC2329
+    m_index() { mkdir -p "$1/delta-indexes/ab"; echo x > "$1/delta-indexes/ab/cdef.index"; }
+    # shellcheck disable=SC2329
+    m_file() { echo x > "$(dirname "$(find "$1/deltas" -name superblock)")/evil"; }
+    # shellcheck disable=SC2329
+    m_dir() { mkdir "$(dirname "$(find "$1/deltas" -name superblock)")/7"; }
+    # shellcheck disable=SC2329
+    m_gone() { rm -rf "$1/deltas" "$1/delta-indexes"; }
+    # shellcheck disable=SC2329
+    m_noindex() { rm -rf "$1/delta-indexes"; }
+    # shellcheck disable=SC2329
+    m_hash() { sed -i "s/^delta_superblock_sha256=.*/delta_superblock_sha256=$(printf 'a%.0s' $(seq 64))/" "$2"; }
+    # shellcheck disable=SC2329
+    m_unrecorded() { sed -i 's/^delta_superblock_sha256=.*/delta_superblock_sha256=/' "$2"; }
+    # shellcheck disable=SC2329
+    m_superblock() { printf Z >> "$(find "$1/deltas" -name superblock)"; }
+    sd_try second m_second "not the one from"
+    sd_try index m_index "not the one from"
+    sd_try file m_file "not the one from"
+    sd_try dir m_dir "not the one from"
+    sd_try gone m_gone "index of the static delta"
+    sd_try noindex m_noindex "index of the static delta"
+    sd_try hash m_hash "not the recorded one"
+    sd_try unrecorded m_unrecorded "no delta_superblock_sha256"
+    sd_try superblock m_superblock "not the recorded one"
+    # the honest files go through, and gh-pages then has exactly that delta and its index
+    rm -rf "$d/signed"
+    cp -a "$d/signed.good" "$d/signed"
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
+    job_publish 1 release
+    assert_rc "publish of the honest files" 0
+    assert_eq "one superblock on gh-pages" 1 "$(find "$LIVE/site/repo/deltas" -name superblock | wc -l)"
+    assert_eq "one index on gh-pages" 1 "$(find "$LIVE/site/repo/delta-indexes" -type f | wc -l)"
+    assert_eq "the delta on gh-pages leads from the old head to the new" "$base_app-$app" "$(ostree --repo="$LIVE/site/repo" static-delta list)"
+    # a release candidate has none, and a planted one is refused
+    commit_release 1.7.0-rc.1
+    tag_release v1.7.0-rc.1
+    pipeline 2 v1.7.0-rc.1 release push sign
+    assert_eq "failed job (rc)" "" "$PIPE_FAIL"
+    e=$LIVE/runs/2
+    rm -rf "$SIM/sd.rc"
+    mkdir -p "$SIM/sd.rc"
+    tar -C "$SIM/sd.rc" -xf "$e/signed/flatpak-signed-repo.tar"
+    m_second "$SIM/sd.rc/repo"
+    tar -C "$SIM/sd.rc" --owner=0 --group=0 --numeric-owner -cf "$e/signed/flatpak-signed-repo.tar" repo
+    sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$e/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$e/signed/flatpak-signed.txt"
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$e/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$e/finish.gho"
+    job_publish 2 release
+    assert_rc "publish of a release candidate with a planted delta" 2
+    assert_log "$e/publish.log" "that has none"
 }
 
 # the manifest and the signed result go from job to job as run artifacts, which a compromised job can replace; the hashes are job
@@ -2060,6 +2184,11 @@ sc_check_compromised() {
     cc_oddname() { mkdir -p "$1/objects/ab"; echo x > "$1/objects/ab/short.filez"; }
     # shellcheck disable=SC2329
     cc_meta() { echo x > "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta"; }
+    # the signing job makes and reads no static delta: a delta or an index in the checked repository is refused
+    # shellcheck disable=SC2329
+    cc_delta() { mkdir -p "$1/deltas/ab/cdef"; echo x > "$1/deltas/ab/cdef/superblock"; }
+    # shellcheck disable=SC2329
+    cc_deltaindex() { mkdir -p "$1/delta-indexes/ab"; echo x > "$1/delta-indexes/ab/cdef.index"; }
 
     # the detached metadata, which flatpak build-update-repo parses with the key: the published commits' (signatures) and flatpak's (.commitmeta2)
     # shellcheck disable=SC2329
@@ -2090,6 +2219,8 @@ sc_check_compromised() {
     cc_refuse tmp cc_tmp "does not accept"
     cc_refuse oddobj cc_oddobj "does not accept"
     cc_refuse oddname cc_oddname "does not accept"
+    cc_refuse delta cc_delta "does not accept"
+    cc_refuse deltaindex cc_deltaindex "does not accept"
     cc_refuse meta cc_meta "detached metadata"
     cc_refuse meta2 cc_meta2 "detached metadata files"
     cc_refuse metapub cc_metapub "detached metadata files"
@@ -2230,7 +2361,7 @@ empty_pin identity_change prerelease main_moved tag_not_on_main build_failure co
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
 pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
-pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins check_split check_compromised forged_skip replay_pages"
+pages_hostile_config sign_hostile_prepared sign_hostile_result signed_deltas sign_pins check_split check_compromised forged_skip replay_pages"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 
 FAILFILE=$SIM/fails
