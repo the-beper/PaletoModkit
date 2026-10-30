@@ -14,6 +14,7 @@ name: Release
 #
 #   validate -> build-linux  \
 #            -> build-flatpak -> verify -> prepare-flatpak -> sign-flatpak -> finish-flatpak -> publish
+#            -> check-signing-env -----^ (also needed by sign-flatpak)
 #            (-> build-windows: slot for M2, below)
 #
 # Jobs that may have a skipped ancestor (build-linux is skipped in publish-flatpak mode) say so with an explicit
@@ -199,11 +200,36 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # A job that names an environment which does not exist makes GitHub create it, without reviewers. So before anything
+  # is prepared or signed, this job (no environment, read-only token, runs in parallel with the builds) fails unless
+  # `flatpak-signing` exists with a required reviewer and restricted deployment refs (packaging/release-check-env.sh).
+  check-signing-env:
+    needs: validate
+    if: ${{ needs.validate.outputs.publish == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Check the checkout is the validated commit
+        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+      - name: Check the environment flatpak-signing is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: packaging/release-check-env.sh
+
   # Reads the build output and gh-pages, makes the new commits (unsigned) and the summary. No secret, no
   # environment, read-only token: this is where untrusted data is parsed, on a machine that never sees the key.
   prepare-flatpak:
-    needs: [validate, verify]
-    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' }}
+    needs: [validate, check-signing-env, verify]
+    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.check-signing-env.result == 'success' && needs.verify.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -252,8 +278,8 @@ jobs:
           retention-days: 14
 
   sign-flatpak:
-    needs: [validate, verify, prepare-flatpak]
-    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.verify.result == 'success' && needs.prepare-flatpak.result == 'success' }}
+    needs: [validate, check-signing-env, verify, prepare-flatpak]
+    if: ${{ !cancelled() && needs.validate.outputs.publish == 'true' && needs.check-signing-env.result == 'success' && needs.verify.result == 'success' && needs.prepare-flatpak.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # The key is a secret of this environment only: configure required reviewers and the deployment branches and

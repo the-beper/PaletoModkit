@@ -153,6 +153,9 @@ jobs:
       - name: Reproducible tarball
         if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/tarball-test.sh
+      - name: Pre-flight check of the signing environment
+        if: steps.changes.outputs.code == 'true'
+        run: sh packaging/tests/check-env-test.sh
       - name: Install the tools
         if: steps.changes.outputs.code == 'true'
         run: |
