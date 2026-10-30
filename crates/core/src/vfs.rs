@@ -303,8 +303,11 @@ pub fn extract_path(dest: &Path, rel: &str) -> Result<PathBuf, Error> {
 pub struct Output<'r> {
     /// The folder as the user named it, for what is returned and said.
     shown: PathBuf,
-    /// The folder as it really is (links resolved, a part that does not exist yet appended): what is written.
-    dest: PathBuf,
+    /// The nearest folder of it that exists, as it really is (links resolved), and the names below it that do not exist yet.
+    anchor: PathBuf,
+    missing: Vec<std::ffi::OsString>,
+    /// Folders already judged not to be in a game (device and inode), so that a long extraction asks once for each.
+    judged: std::collections::HashSet<(u64, u64)>,
     inside: Option<Inside<'r>>,
 }
 
@@ -346,15 +349,14 @@ fn real_anchor(dest: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>), Error>
 pub fn write_into<T>(dest: &Path, label: &str, body: impl FnOnce(&mut Output<'_>) -> Result<T, Error>) -> Result<(T, Vec<String>), Error> {
     let shown = std::path::absolute(dest)?;
     let (anchor, rest) = real_anchor(&shown)?;
-    let real = anchor.join(rest.iter().collect::<PathBuf>());
     let Some(game) = owner_of(&anchor) else {
-        return body(&mut Output { shown, dest: real, inside: None }).map(|t| (t, Vec::new()));
+        return body(&mut Output { shown, anchor, missing: rest, judged: Default::default(), inside: None }).map(|t| (t, Vec::new()));
     };
     let not_in_game = || Error::UnsafePath { path: shown.display().to_string(), why: format!("is not in the game folder {}", game.root.display()) };
     let base = in_game(&anchor, &game).ok_or_else(not_in_game)?.join(rest.iter().collect::<PathBuf>());
     let roots = game.roots()?;
     let txn = Txn::begin(&roots, label)?;
-    let mut out = Output { shown, dest: real, inside: Some(Inside { roots: &roots, txn, base }) };
+    let mut out = Output { shown, anchor, missing: Vec::new(), judged: Default::default(), inside: Some(Inside { roots: &roots, txn, base }) };
     match body(&mut out) {
         Ok(done) => {
             let Some(Inside { txn, .. }) = out.inside.take() else { return Err(Error::Io(io::Error::other("the output was already finished"))) };
@@ -415,32 +417,41 @@ impl Output<'_> {
         local_dest(inside.roots, &rel).map(drop)
     }
 
-    /// Outside every game: the folder `rel` below the output folder, opened (and made) one name at a time. A link
-    /// on the way is followed as it always was, but only if the folder it leads to is not in a game folder; that is
-    /// judged on the folder as opened, not on a name that could be changed in between.
-    fn plain_folder(&self, rel: &str) -> io::Result<Dir> {
-        let not_in_a_game = |dir: &Dir| -> io::Result<()> {
-            match owner_of(&dir.real_path()?) {
-                Some(game) => Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("that is in the game folder {}, where files are written only as the other changes to a game are: pick a folder in it that takes them", game.root.display()))),
-                None => Ok(()),
-            }
-        };
-        std::fs::create_dir_all(&self.dest)?;
-        let mut dir = Dir::open_path(&self.dest)?;
-        not_in_a_game(&dir)?;
-        for name in rel.split('/').filter(|n| !n.is_empty()) {
+    /// Outside every game: the folder `rel` below the output folder, opened (and made) one name at a time from the
+    /// nearest folder that exists. Every folder opened on the way (a link followed, an ordinary folder, one just made)
+    /// is judged as opened, not by a name that could be changed in between: a game folder, or anything in one, is
+    /// refused, so a name that leads into a game from outside it (`Grand Theft Auto V/x64/a.rpf` below `steamapps/common`)
+    /// writes nothing. A link is followed as it always was.
+    fn plain_folder(&mut self, rel: &str) -> io::Result<Dir> {
+        let mut dir = Dir::open_path(&self.anchor)?;
+        self.judge(&dir)?;
+        let below = self.missing.iter().map(|n| n.to_str().map(str::to_owned).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a name that is not text"))).collect::<io::Result<Vec<_>>>()?;
+        for name in below.iter().map(String::as_str).chain(rel.split('/').filter(|n| !n.is_empty())) {
             dir = match dir.kind(name)? {
                 None => dir.mkdir(name)?,
                 Some(Kind::Dir) => dir.open_dir(name)?,
-                Some(Kind::Link) => {
-                    let linked = dir.open_dir_following(name)?;
-                    not_in_a_game(&linked)?;
-                    linked
-                }
+                Some(Kind::Link) => dir.open_dir_following(name)?,
                 Some(_) => return Err(io::Error::new(io::ErrorKind::NotADirectory, format!("{name} is not a folder"))),
             };
+            self.judge(&dir)?;
         }
         Ok(dir)
+    }
+
+    /// Refuses a folder, as opened, that is a game folder or in one (its game folder or its mods folder, also by their real places).
+    fn judge(&mut self, dir: &Dir) -> io::Result<()> {
+        let id = dir.identity()?;
+        if self.judged.contains(&id) {
+            return Ok(());
+        }
+        let real = dir.real_path()?;
+        match owner_of(&real) {
+            Some(game) => Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is in the game folder {}, where files are written only as the other changes to a game are: pick a folder in it that takes them", real.display(), game.root.display()))),
+            None => {
+                self.judged.insert(id);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1165,6 +1176,42 @@ mod tests {
         symlink(&elsewhere, out.join("ok")).unwrap();
         put(&out, &[("ok/f.txt", b"f")]).unwrap();
         assert_eq!(std::fs::read(elsewhere.join("f.txt")).unwrap(), b"f");
+    }
+
+    /// A name inside the archive that walks from an ordinary folder into a game folder, or from a home-like folder
+    /// down to a Steam library: refused before anything below the game is written, folders made included.
+    #[test]
+    fn output_names_that_enter_a_game_from_outside_are_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let common = dir.path().join("home/.local/share/Steam/steamapps/common");
+        let root = common.join("Grand Theft Auto V");
+        std::fs::create_dir_all(root.join("x64")).unwrap();
+        std::fs::write(root.join("GTA5.exe"), b"exe").unwrap();
+        std::fs::write(root.join("x64/a.rpf"), b"original").unwrap();
+        let ids = || ["GTA5.exe", "x64/a.rpf"].map(|f| (std::fs::read(root.join(f)).unwrap(), std::fs::metadata(root.join(f)).unwrap().ino()));
+        let before = (ids(), crate::fixtures::snapshot(&root));
+        let home = dir.path().join("home");
+        for (dest, name) in [
+            (&common, "Grand Theft Auto V/x64/a.rpf"),
+            (&common, "Grand Theft Auto V/GTA5.exe"),
+            (&common, "Grand Theft Auto V/scripts/new.asi"),
+            (&home, ".local/share/Steam/steamapps/common/Grand Theft Auto V/x64/a.rpf"),
+            (&home, ".local/share/Steam/steamapps/common/Grand Theft Auto V/mods/x.txt"),
+        ] {
+            let e = put(dest, &[("fine.txt", b"fine"), (name, b"new")]).unwrap_err();
+            assert!(!matches!(e, Error::Txn(_)), "{name}: {e}");
+            assert_eq!((ids(), crate::fixtures::snapshot(&root)), before, "{name}");
+        }
+        // The same by a folder made on its own.
+        let e = write_into(&common, "test", |out| out.mkdir("Grand Theft Auto V/x64/new")).unwrap_err();
+        assert!(e.to_string().contains("game folder"), "{e}");
+        assert_eq!((ids(), crate::fixtures::snapshot(&root)), before);
+        // An ordinary nested export is fine, with the folders made one name at a time below the nearest one that exists.
+        put(&home.join("out/a/b"), &[("x/y/z.txt", b"z")]).unwrap();
+        assert_eq!(std::fs::read(home.join("out/a/b/x/y/z.txt")).unwrap(), b"z");
+        put(&common, &[("Other Game/x64/a.rpf", b"mine")]).unwrap();
+        assert_eq!(std::fs::read(common.join("Other Game/x64/a.rpf")).unwrap(), b"mine");
     }
 
     #[test]
