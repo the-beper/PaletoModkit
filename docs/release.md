@@ -174,7 +174,7 @@ The release is refused with exit 3, in `validate` and again in `publish`, when:
 - the tag is already on `gh-pages` for another commit, or is published with other files than this build;
 - the Flatpak id, branch or remote files would change.
 
-A new stable version is refused with exit 5 when `gh-pages` has a lower version than the highest published stable release: a release is published only after its Pages, so `gh-pages` was rolled back (a signed but older state) or not updated. Restore it first ([Broken gh-pages](#broken-gh-pages)). A release without the files (made by hand) does not count, and candidates have no Pages.
+A new stable version is refused with exit 5 when `gh-pages` has a lower version than the highest published stable release that has its files: a release is published only after its Pages, so `gh-pages` was rolled back (a signed but older state) or not updated. Restore it first ([Broken gh-pages](#broken-gh-pages)). It is refused the same way when `gh-pages` is gone and such a release exists (a new chain would not continue it). A release without the files (made by hand) does not count: whoever can make one can also push `gh-pages`. Candidates have no Pages.
 
 The Flatpak history is a chain: each commit has the published one as parent, and an older commit on top would be refused by clients. The answer to a bad release is always a new, higher version. There is no rollback mode. A user can go back locally with `flatpak update --commit`.
 
@@ -195,7 +195,7 @@ Every release keeps the previous state in the branch `gh-pages-previous`. If `gh
 
 A refused `repo/config` (exit 2 in `prepare-flatpak` or `sign-flatpak`) means someone changed the unsigned file on `gh-pages`: treat it as an incident, restore from `gh-pages-previous` the same way.
 
-Bootstrap only if both branches are gone. Then run `publish-flatpak` (or, for the very first release, `release`) with `bootstrap_pages` ticked. It creates `gh-pages` from nothing, with the pinned key, and refuses to run if `gh-pages` exists. Users keep their remote: the files and the key are the same. Their next update starts a new history, which `flatpak update` takes as a plain update.
+Bootstrap only if both branches are gone. Then run `publish-flatpak` for the highest published tag (it must have its files; any other tag is refused, exit 3) with `bootstrap_pages` ticked. `release` with `bootstrap_pages` is only for the very first release: it is refused (exit 5) while a published stable release with its files exists. It creates `gh-pages` from nothing, with the pinned key, and refuses to run if `gh-pages` exists. Users keep their remote: the files and the key are the same. Their next update starts a new history, which `flatpak update` takes as a plain update.
 
 ## Lost signing key
 

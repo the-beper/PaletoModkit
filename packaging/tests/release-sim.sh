@@ -837,6 +837,8 @@ sc_concurrent() {
 sc_gh_pages_missing() {
     git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages
     git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    # the very first publication: no release yet
+    rm -rf "$GH_STUB_DIR/rel"
     commit_release 1.6.0
     tag_release v1.6.0
     pipeline 1 v1.6.0 release
@@ -856,6 +858,20 @@ sc_gh_pages_missing() {
     pipeline 3 v1.6.1 release
     BOOTSTRAP=false
     assert_rc "bootstrap on an existing gh-pages" 5
+    # both branches gone with a release published: a new version does not start a new chain, the highest release rebuilds gh-pages
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    BOOTSTRAP=true
+    pipeline 4 v1.6.1 release
+    assert_rc "bootstrap of a new version when 1.6.0 is published" 5
+    assert_eq "failed job" validate "$PIPE_FAIL"
+    assert_log "$LIVE/runs/4/validate.log" "v1.6.0 is published"
+    pipeline 5 v1.6.0 publish-flatpak workflow_dispatch
+    BOOTSTRAP=false
+    assert_rc "bootstrap by publish-flatpak of the highest release" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
 }
 
 sc_another_writer() {
@@ -1015,8 +1031,7 @@ sc_replay_pages() {
     assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
     job_validate 6 v1.6.1 release
     assert_rc "validate of 1.6.1 after the repair" 0
-    # a release made by hand (published, without the files) was never on Pages: it is no reason to refuse the next version
-    rollback_pages
+    # a release made by hand (published, without the files) was never on Pages: it is no reason to refuse the next version...
     d=$GH_STUB_DIR/rel/9001
     mkdir -p "$d"
     echo v1.6.1 > "$d/tag"
@@ -1025,7 +1040,12 @@ sc_replay_pages() {
     commit_release 1.6.2
     tag_release v1.6.2
     job_validate 7 v1.6.2 release
-    assert_rc "validate of 1.6.2 when the highest release has no files" 0
+    assert_rc "validate of 1.6.2 when the highest release has no files and gh-pages has 1.6.0" 0
+    # ...and no way to lift the check: the anchor is the highest release that has them (1.6.0), not the highest
+    rollback_pages
+    job_validate 8 v1.6.2 release
+    assert_rc "validate of 1.6.2 over a gh-pages with 1.5.1, 1.6.0 published and a release of 1.6.1 without files" 5
+    assert_log "$LIVE/runs/8/validate.log" "publish-flatpak for v1.6.0"
 }
 
 sc_sign_fresh_and_verify() {
@@ -1347,7 +1367,7 @@ sc_sign_hostile_prepared() {
         mkdir -p "$rt/hx.$1"
         tar -C "$rt/hx.$1" -xf "$d/prepared/flatpak-prepared-repo.tar"
         "$2" "$rt/hx.$1/repo"
-        tar -C "$rt/hx.$1" --owner=0 --group=0 --numeric-owner -cf "$d/hx.$1/flatpak-prepared-repo.tar" repo
+        tar -C "$rt/hx.$1" --owner=0 --group=0 --numeric-owner ${HX_TRANSFORM:+"--transform=$HX_TRANSFORM"} -cf "$d/hx.$1/flatpak-prepared-repo.tar" repo
         sed -i -e "s/^prepared_tar_sha256=.*/prepared_tar_sha256=$(sha256sum "$d/hx.$1/flatpak-prepared-repo.tar" | cut -d' ' -f1)/" \
             -e "s/^prepared_app_commit=.*/prepared_app_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse "$APP_REF")/" "$d/hx.$1/flatpak-prepared.txt"
     }
@@ -1491,6 +1511,12 @@ xa.metadata=x"; }
     hx_refuse tarmirrors mut_tarmirrors "files in refs/"
     hx_refuse tartop mut_tartop "top of repo/"
     hx_refuse tarname mut_tarname "characters"
+    # a member "repo//evil" has an empty component: it matches no check on the names, and tar unpacks it as repo/evil
+    HX_TRANSFORM='s|^repo/evil$|repo//evil|'
+    hx_refuse tartopslash mut_tartop "unsafe path"
+    HX_TRANSFORM='s|^repo/refs/mirrors/x$|repo//refs/mirrors/x|'
+    hx_refuse tarmirrorslash mut_tarmirrors "unsafe path"
+    HX_TRANSFORM=""
 
     # the mode and the base: the flags say what the preparation had to be, the description is no proof
     run "$d/hx.fresh1.log" hx_check "$d/preparedf" --site "$rt/pages2"

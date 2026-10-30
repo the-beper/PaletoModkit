@@ -330,6 +330,11 @@ release_plan() {
     if [ "$mode" = publish-flatpak ]; then
         [ -n "$pub_id" ] || die 3 "publish-flatpak needs the published release of $t"
         [ "$highest" = "$t" ] || die 3 "$t is not the highest published release (${highest:-none})"
+        # With no gh-pages at all (bootstrap) it rebuilds it from the highest release that has its files, and from no other.
+        if [ -z "$PG_HEAD" ]; then
+            anchor=$(anchor_release "$d")
+            [ "$anchor" = "$t" ] || die 3 "$t has not all its files: gh-pages is rebuilt only from the highest complete release (${anchor:-none})"
+        fi
         if [ "$pages_cmp" = 0 ]; then echo noop; else echo publish; fi
         return 0
     fi
@@ -338,17 +343,38 @@ release_plan() {
         [ "$pages_cmp" = 0 ] || die 3 "$t is published but not matched by gh-pages: use publish-flatpak"
         echo noop
     else
-        # A gh-pages below the highest published stable release is one that was rolled back (a release is published only after
-        # its Pages): signed and valid, but old. A new version must not be built on it. A release without the files (made by hand)
-        # is no proof: it was never on Pages. The repair is publish-flatpak (above), which has no such release to build.
-        if [ -n "$PG_TAG" ] && [ -n "$highest" ] && [ "$(semver_cmp "$PG_TAG" "$highest")" = -1 ]; then
-            hid=$(awk -F '\t' -v t="$highest" '$2 == t && $3 == "false" { print $1 }' "$d/releases.tsv")
-            if assets_complete "$hid"; then
-                die 5 "gh-pages has $PG_TAG, but $highest is published: gh-pages was rolled back or not updated. Restore it first: publish-flatpak for $highest (docs/release.md, Broken gh-pages)"
-            fi
+        # A gh-pages below the highest published stable release with its files is one that was rolled back (a release is published
+        # only after its Pages): signed and valid, but old. A new version must not be built on it, nor on a new chain when gh-pages
+        # is gone (a first publication has no such release). A release without the files (made by hand) is no proof: it was never
+        # on Pages, and whoever can make one can also push gh-pages, so it must not lift the check. The repair is publish-flatpak
+        # (above), which has no such release to build.
+        anchor=$(anchor_release "$d")
+        if [ -n "$anchor" ]; then
+            [ -n "$PG_HEAD" ] || die 5 "gh-pages does not exist, but $anchor is published: a new repository would not continue it. Restore gh-pages, or publish-flatpak for $anchor with bootstrap (docs/release.md, Broken gh-pages)"
+            [ "$(semver_cmp "$PG_TAG" "$anchor")" != -1 ] || die 5 "gh-pages has $PG_TAG, but $anchor is published: gh-pages was rolled back or not updated. Restore it first: publish-flatpak for $anchor (docs/release.md, Broken gh-pages)"
         fi
         echo publish
     fi
+}
+
+# anchor_release DIR: the highest published stable release that has all its files (the ones the workflow makes), empty if none.
+anchor_release() {
+    ar_left=$(awk -F '\t' '$3 == "false" && $4 == "false" && $2 ~ /^v[0-9A-Za-z.+-]+$/ { print $1 ":" $2 }' "$1/releases.tsv")
+    while [ -n "$ar_left" ]; do
+        ar_best=""
+        for ar_x in $ar_left; do
+            ar_t=${ar_x#*:}
+            semver_valid "$ar_t" || continue
+            ! is_rc "$ar_t" || continue
+            if [ -z "$ar_best" ] || [ "$(semver_cmp "$ar_t" "${ar_best#*:}")" = 1 ]; then ar_best=$ar_x; fi
+        done
+        [ -n "$ar_best" ] || return 0
+        if assets_complete "${ar_best%%:*}"; then
+            echo "${ar_best#*:}"
+            return 0
+        fi
+        ar_left=$(printf '%s\n' $ar_left | grep -vxF "$ar_best" || true)
+    done
 }
 
 # assets_complete RELEASE_ID: the release has exactly SHA256SUMS and RELEASE_FILES, all uploaded.
@@ -371,13 +397,13 @@ reproducible_tar() {
 }
 
 # tar_safe TAR PREFIX: exit 2 unless every member of the archive is a regular file or a
-# directory inside PREFIX/ (no absolute path, no .., no link or device).
+# directory inside PREFIX/ (no absolute path, no empty, . or .. component, no link or device).
 tar_safe() {
     ts=$(mktemp -d "${TMPDIR:-/tmp}/tar-safe.XXXXXX")
     tar -tf "$1" > "$ts/names" 2> /dev/null || { rm -rf "$ts"; die 2 "$1 is not a readable archive"; }
     tar -tvf "$1" 2> /dev/null | cut -c1 > "$ts/types"
     bad=$(grep -Ev "^$2(/|\$)" "$ts/names" | head -n1 || true)
-    badpath=$(grep -E '(^|/)\.\.(/|$)|^/' "$ts/names" | head -n1 || true)
+    badpath=$(grep -E '(^|/)\.\.(/|$)|^/|//|(^|/)\.(/|$)' "$ts/names" | head -n1 || true)
     badtype=$(grep -v '^[-d]$' "$ts/types" | head -n1 || true)
     lines=$(wc -l < "$ts/names")
     lines2=$(wc -l < "$ts/types")
