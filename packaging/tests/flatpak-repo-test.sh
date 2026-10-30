@@ -251,7 +251,7 @@ check "the parent of the new commit is the one the client has" same "$CD1" "$(os
 publish PD "$BASE/P3"
 check "update from the repository with deltas" fp clientd update --noninteractive --no-deps --no-related "$ID//master"
 check "the client has the new commit" same "$CD2" "$(installed clientd)"
-echo "# (the old deltas in the new repository: $(ostree --repo="$BASE/P3/repo" static-delta list | wc -l) lines)"
+check "the old deltas are not carried into the new repository" sh -c "ostree --repo='$BASE/P3/repo' static-delta list | grep -q 'No static deltas'"
 
 echo "# 6: the bundle"
 check "install the bundle (own installation)" fp bundle install --noninteractive --no-deps --no-related --bundle "$BASE/o2/PaletoModkit-x86_64.flatpak"

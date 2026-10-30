@@ -111,6 +111,8 @@ builds)
         echo "flatpak_debug_commit=$(ostree --repo="$SCRATCH/u/repo" rev-parse "$DEBUG_REF")"
         echo "flatpak_app_content=$(content_sum "$SCRATCH/u/repo" "$APP_REF")"
         echo "flatpak_debug_content=$(content_sum "$SCRATCH/u/repo" "$DEBUG_REF")"
+        echo "flatpak_app_xa=$(xa_sum "$SCRATCH/u/repo" "$APP_REF")"
+        echo "flatpak_debug_xa=$(xa_sum "$SCRATCH/u/repo" "$DEBUG_REF")"
     } > "$OUT/release-manifest.txt"
     echo "verified the builds of $TAG"
     ;;

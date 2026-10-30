@@ -1247,17 +1247,31 @@ sc_sign_hostile_prepared() {
         sed -i -e "s/^prepared_tar_sha256=.*/prepared_tar_sha256=$(sha256sum "$d/hx.$1/flatpak-prepared-repo.tar" | cut -d' ' -f1)/" \
             -e "s/^prepared_app_commit=.*/prepared_app_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse "$APP_REF")/" "$d/hx.$1/flatpak-prepared.txt"
     }
-    # a new app commit on the published one (the check of its parent is not what these commits are for), with what the mutator adds
+    # shellcheck disable=SC2329
+    hx_u64() { # N: the text of a uint64 that ostree prints as N (it byte-swaps what it prints)
+        printf 'uint64 0x%s' "$(printf '%016x' "$1" | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\8\7\6\5\4\3\2\1/')"
+    }
+    # a new app commit on the published one, with the metadata of the prepared one (the keys named in $HX_DROP are left out)
+    # and what the mutator adds
+    HX_DROP=""
     # shellcheck disable=SC2329
     hx_commit() { # REPO OPTION...
         r=$1
         shift
+        h=$(ostree --repo="$r" rev-parse "$APP_REF")
+        for k in xa.ref xa.metadata xa.from_commit xa.download-size xa.installed-size; do
+            case " $HX_DROP " in *" $k "*) continue ;; esac
+            v=$(ostree --repo="$r" show --print-metadata-key="$k" "$h")
+            case $v in "uint64 "*) v=$(hx_u64 "${v#uint64 }") ;; esac
+            set -- "$@" "--add-metadata=$k=$v"
+        done
+        case " $HX_DROP " in *" ostree.collection-binding "*) ;; *) set -- "$@" "--add-metadata=ostree.collection-binding=''" ;; esac
         ostree --repo="$r" commit -b "$APP_REF" --tree=ref="$APP_REF" --parent="$base_app" -s hostile "$@" > /dev/null
     }
     # shellcheck disable=SC2329
     hx_refuse() { # NAME MUTATOR PATTERN [CODE]: the check exits with CODE (2) and names the reason
         hx_make "$1" "$2"
-        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || [ "$1" = config ] || [ "$1" = appstreamkey ] || fail "$1: the mutation did not change the app commit"
+        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | tamper) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
         run "$d/hx.$1.log" hx_check "$d/hx.$1" --site "$rt/pages2"
         assert_rc "check of a prepared repository with $1" "${4:-2}"
         assert_log "$d/hx.$1.log" "$3"
@@ -1273,7 +1287,27 @@ sc_sign_hostile_prepared() {
     # shellcheck disable=SC2329
     mut_badbinding() { hx_commit "$1" --no-bindings --add-metadata="ostree.ref-binding=['app/org.example.Other/x86_64/master']"; }
     # shellcheck disable=SC2329
-    mut_collection() { hx_commit "$1" --add-metadata='ostree.collection-binding="org.example.X"'; }
+    mut_collection() { HX_DROP=ostree.collection-binding; hx_commit "$1" --add-metadata='ostree.collection-binding="org.example.X"'; HX_DROP=""; }
+    # shellcheck disable=SC2329
+    mut_nosize() { HX_DROP=xa.installed-size; hx_commit "$1"; HX_DROP=""; }
+    # a key with a newline in it is two lines of the list, and the second one is there twice
+    # shellcheck disable=SC2329
+    mut_newlinekey() { hx_commit "$1" --add-metadata-string="xa.ref
+xa.metadata=x"; }
+    # shellcheck disable=SC2329
+    mut_badxaref() { HX_DROP=xa.ref; hx_commit "$1" --add-metadata="xa.ref='app/org.example.Other/x86_64/master'"; HX_DROP=""; }
+    # shellcheck disable=SC2329
+    mut_badmeta() { HX_DROP=xa.metadata; hx_commit "$1" --add-metadata='xa.metadata="[Application]\nname=org.example.Evil\ncommand=evil\n"'; HX_DROP=""; }
+    # shellcheck disable=SC2329
+    mut_badsize() { HX_DROP=xa.download-size; hx_commit "$1" "--add-metadata=xa.download-size=$(hx_u64 1)"; HX_DROP=""; }
+    # shellcheck disable=SC2329
+    mut_badfrom() { HX_DROP=xa.from_commit; hx_commit "$1" "--add-metadata=xa.from_commit='$(printf 'f%.0s' $(seq 64))'"; HX_DROP=""; }
+    # a delta planted in the prepared repository, which the summary would list: deleted, not refused
+    # shellcheck disable=SC2329
+    mut_deltas() { mkdir -p "$1/deltas/ab" "$1/delta-indexes/ab"; echo x > "$1/deltas/ab/cdef"; echo x > "$1/delta-indexes/ab/idx"; }
+    # a published head (it is signed already, and not on the sign list) whose commit file is not the published one
+    # shellcheck disable=SC2329
+    mut_tamper() { f="$1/objects/$(hx_obj "$(ostree --repo="$1" rev-parse appstream2/x86_64)").commit"; chmod u+w "$f"; printf Z >> "$f"; }
     # shellcheck disable=SC2329
     mut_extrakey() { hx_commit "$1" --add-metadata-string=ostree.endoflife-rebase=org.example.Evil; }
     # shellcheck disable=SC2329
@@ -1286,7 +1320,7 @@ sc_sign_hostile_prepared() {
     mut_honest() { hx_commit "$1"; }
     # a new appstream commit on the published one, like build-update-repo makes it when the app data changed
     # shellcheck disable=SC2329
-    mut_appstream() { ostree --repo="$1" commit -b appstream2/x86_64 --tree=ref=appstream2/x86_64 --parent="$(ostree --repo="$rt/pages/repo" rev-parse appstream2/x86_64)" -s Update "$@" > /dev/null; }
+    mut_appstream() { ostree --repo="$1" commit -b appstream2/x86_64 --tree=ref=appstream2/x86_64 --parent="$(ostree --repo="$rt/pages/repo" rev-parse appstream2/x86_64)" -s Update --add-metadata="ostree.collection-binding=''" "$@" > /dev/null; }
     # shellcheck disable=SC2329
     mut_appstream_key() { mut_appstream "$1" --add-metadata-string=xa.title=Evil; }
 
@@ -1295,7 +1329,7 @@ sc_sign_hostile_prepared() {
     tar -tf "$d/prepared/flatpak-prepared-repo.tar" | grep -qx 'repo/summary' || fail "the prepared repository has no summary: the test proves nothing"
     run "$d/hx.ok.log" hx_check "$d/prepared" --site "$rt/pages2"
     assert_rc "check of the honest prepared repository" 0
-    for f in summary summary.sig summary.idx summary.idx.sig summaries; do [ ! -e "$rt/w/repo/$f" ] || fail "$f of the prepared repository is still there after the check"; done
+    for f in summary summary.sig summary.idx summary.idx.sig summaries deltas delta-indexes; do [ ! -e "$rt/w/repo/$f" ] || fail "$f of the prepared repository is still there after the check"; done
     rm -rf "$rt/w"
     hx_make honest mut_honest
     run "$d/hx.honest.log" hx_check "$d/hx.honest" --site "$rt/pages2"
@@ -1308,6 +1342,12 @@ sc_sign_hostile_prepared() {
     assert_rc "check of a new appstream commit" 0
     grep -q '^appstream2/x86_64 ' "$rt/w/signlist" || fail "the new appstream commit is not on the sign list"
     rm -rf "$rt/w"
+    hx_make deltas mut_deltas
+    run "$d/hx.deltas.log" hx_check "$d/hx.deltas" --site "$rt/pages2"
+    assert_rc "check of a prepared repository with planted deltas" 0
+    for f in deltas delta-indexes; do [ ! -e "$rt/w/repo/$f" ] || fail "the planted $f are still there after the check"; done
+    [ -d "$rt/w/repo/tmp" ] || fail "the checked repository has no tmp folder"
+    rm -rf "$rt/w"
     hx_refuse config mut_config "config"
     hx_refuse appstreamkey mut_appstream_key "metadata key"
     hx_refuse parent mut_parent "does not continue"
@@ -1315,6 +1355,13 @@ sc_sign_hostile_prepared() {
     hx_refuse badbinding mut_badbinding "ref-binding"
     hx_refuse collection mut_collection "collection-binding"
     hx_refuse extrakey mut_extrakey "metadata key"
+    hx_refuse nosize mut_nosize "metadata key"
+    hx_refuse newlinekey mut_newlinekey "metadata key"
+    hx_refuse badxaref mut_badxaref "xa.ref"
+    hx_refuse badmeta mut_badmeta "xa.metadata"
+    hx_refuse badsize mut_badsize "sizes"
+    hx_refuse badfrom mut_badfrom "xa.from_commit"
+    hx_refuse tamper mut_tamper "differs"
     hx_refuse commitmeta mut_commitmeta "commitmeta"
     hx_refuse future mut_future "in the future"
     hx_refuse past mut_past "older than"
@@ -1324,7 +1371,8 @@ sc_sign_hostile_prepared() {
     assert_rc "check of a repository prepared without a base, when gh-pages has one" 2
     assert_log "$d/hx.fresh1.log" "mode"
     run "$d/hx.fresh2.log" hx_check "$d/prepared" --fresh
-    assert_rc "check of a repository prepared on gh-pages, as a fresh one" 2
+    assert_rc "check of a stable release as a fresh repository" 3
+    assert_log "$d/hx.fresh2.log" "release candidates"
     rm -rf "$d/hx.lie1" "$d/hx.lie2"
     cp -a "$d/preparedf" "$d/hx.lie1"
     sed -i 's/^mode=.*/mode=bootstrap/' "$d/hx.lie1/flatpak-prepared.txt"
@@ -1337,7 +1385,7 @@ sc_sign_hostile_prepared() {
     assert_log "$d/hx.lie2.log" "does not continue"
     # the honest fresh one is fine as a fresh one
     run "$d/hx.fresh3.log" hx_check "$d/preparedf" --fresh
-    assert_rc "check of a fresh repository" 0
+    assert_rc "check of a stable release prepared as a fresh repository" 3
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 

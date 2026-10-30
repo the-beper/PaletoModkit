@@ -419,21 +419,37 @@ repo_config() { printf '[core]\nrepo_version=1\nmode=archive-z2\nindexed-deltas=
 # check_repo_config REPO: succeeds if the config of REPO is a plain file with exactly the bytes of repo_config.
 check_repo_config() { [ -f "$1/config" ] && [ ! -L "$1/config" ] && repo_config | cmp -s - "$1/config"; }
 
-# The metadata keys of an honest run (flatpak 1.14.6, ostree 2024.5): the app, Debug and appstream commits of
-# build-commit-from and build-update-repo, and the summary of build-update-repo with static deltas and the sparse cache.
-# New versions of flatpak add keys (xa.title, xa.redirect-url, xa.gpg-keys, ...): an allowlist fails closed.
+# The metadata keys of an honest run (flatpak 1.14.6, ostree 2024.5): exactly these on the new app and Debug commits of
+# build-commit-from and on the appstream commits of build-update-repo; for the summary of build-update-repo the allowed
+# ones (static deltas are listed only when there are some). New versions of flatpak add keys (xa.title, xa.redirect-url,
+# xa.gpg-keys, ...): a fixed list fails closed.
 # shellcheck disable=SC2034
-COMMIT_KEYS="ostree.ref-binding ostree.collection-binding xa.ref xa.from_commit xa.metadata xa.download-size xa.installed-size"
+APP_KEYS="ostree.collection-binding ostree.ref-binding xa.download-size xa.from_commit xa.installed-size xa.metadata xa.ref"
+# shellcheck disable=SC2034
+APPSTREAM_KEYS="ostree.collection-binding ostree.ref-binding"
 # shellcheck disable=SC2034
 SUMMARY_KEYS="ostree.summary.mode ostree.summary.tombstone-commits ostree.summary.indexed-deltas ostree.summary.last-modified ostree.static-deltas xa.cache-version xa.cache xa.sparse-cache"
 
 # commit_keys REPO COMMIT, summary_keys REPO: the metadata keys, one per line (a key with a newline in it is listed as two
-# lines, and neither is in a list of known keys).
+# lines, which no list below allows).
 commit_keys() { ostree --repo="$1" show --list-metadata-keys "$2"; }
 summary_keys() { ostree --repo="$1" summary --list-metadata-keys; }
 
 # unknown_keys "KEY..." < LIST: the lines of LIST that are not one of the KEYs.
 unknown_keys() { awk -v ok="$1" 'BEGIN { n = split(ok, a, " "); for (i = 1; i <= n; i++) known[a[i]] = 1 } !($0 in known)'; }
+
+# keys_are "KEY..." < LIST: the lines of LIST, sorted, are exactly the KEYs (duplicates count).
+keys_are() { [ "$(LC_ALL=C sort)" = "$(printf '%s\n' "$1" | tr ' ' '\n' | LC_ALL=C sort)" ]; }
+
+# xa_sum REPO REF: SHA-256 of the printed xa.ref, xa.metadata and sizes of the head commit of a ref. flatpak build-commit-from
+# keeps these four as the build made them (it adds xa.from_commit, the commit of the build), so the sum of the new commit is
+# the one of the unsigned build.
+xa_sum() {
+    for xs_k in xa.ref xa.metadata xa.download-size xa.installed-size; do
+        printf '%s=' "$xs_k"
+        ostree --repo="$1" show --print-metadata-key="$xs_k" "$2" 2> /dev/null || echo none
+    done | sha256sum | cut -d' ' -f1
+}
 
 # commit_time REPO COMMIT: the date of a commit, in seconds since 1970; fails if there is none.
 commit_time() {

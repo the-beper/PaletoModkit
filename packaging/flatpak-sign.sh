@@ -21,9 +21,11 @@
 #       either. Checks the hash of the tar against its description, that it is for this tag and commit, that its mode is
 #       the one of the flags, and (--check-remote) that gh-pages is still at the base the preparation had; verifies the
 #       published repository like --prepare does; unpacks the tar; checks its refs and its config (exactly the expected
-#       one, see repo_config); deletes the old summary files; compares the content checksums of the app and Debug commits
+#       one, see repo_config); deletes the old summary files and static deltas; compares the content checksums of the app and Debug commits
 #       with release-manifest.txt, which the verify job made from the build output on its own; and checks every head that is
-#       not the published one (the new commits): parent, ref binding, metadata keys, no detached metadata, date. Writes
+#       not the published one (the new commits): parent, ref binding, exactly the metadata keys of an honest run, xa.ref,
+#       xa.metadata and the sizes as the verified build had them, no detached metadata, date; and that the other heads are
+#       byte for byte the published ones. A release candidate goes with --fresh and a stable release never does. Writes
 #       DIR of --work with the repository, the list of refs and commits that --sign may sign (the new heads, as they are
 #       now) and base.txt (the mode, gh-pages and the published heads that were checked).
 #   flatpak-sign.sh --sign --tag vX.Y.Z --commit SHA --work DIR --out DIR     job sign-flatpak, the secret, and only it
@@ -34,7 +36,7 @@
 #       is unpacked, made or generated here: no commit, no appstream data, no static delta. The residual surface, with the
 #       key at hand: ostree reading the commit objects to sign them and flatpak build-update-repo reading the commit
 #       metadata of the refs to write the summary: no file of the app is read, parsed or interpreted, and what it does read
-#       was checked by --check-prepared (config, commit metadata) or deleted (the old summary files) before.
+#       was checked by --check-prepared (config, commit metadata) or deleted (the old summary files, deltas) before.
 #       NO STATIC DELTAS: a delta embeds the signature of its commit, so it can only be made after the commit is
 #       signed, and the signed summary has to list it, so the summary would have to be signed again afterwards (tried:
 #       deltas made after the signature, without the key, are not in the signed summary and clients never use them;
@@ -272,9 +274,12 @@ prepared_state() {
 # manifest of the verify job (which parsed the build output on its own) and with gh-pages as this job fetched it, and the
 # refs and commits to sign are named. Everything the key will sign is checked here, so --sign parses nothing of the data.
 
-# check_new_commit REF COMMIT BASE: a commit the key is about to sign (REPO is $WORK/repo, the published one $SITE/repo): it
-# continues the published head of its ref, says it belongs to it, has the metadata keys of an honest run and no detached
-# metadata (the signature of --sign goes there), and is dated between the published head and a little after now.
+# check_new_commit REF COMMIT BASE [XA_SUM FROM_COMMIT]: a commit the key is about to sign (REPO is $WORK/repo, the published
+# one $SITE/repo): it continues the published head of its ref, says it belongs to it, has exactly the metadata keys of an
+# honest run and no detached metadata (the signature of --sign goes there), and is dated between the published head and a
+# little after now. With XA_SUM and FROM_COMMIT (app and Debug, from the manifest of the verify job): xa.ref is the ref,
+# xa.metadata and the sizes are the build's (xa_sum) and xa.from_commit is the build's commit. Not compared: the appstream
+# commits (their data is made by build-update-repo here) and the subject and body of the commit.
 check_new_commit() {
     chain_ok "$WORK/repo" "$2" "$3" || die 2 "$1: the new commit $2 does not continue the published head ${3:-(there is none)}"
     [ "$(ostree --repo="$WORK/repo" show --print-metadata-key=ostree.ref-binding "$2" 2> /dev/null)" = "['$1']" ] || die 2 "$1: the new commit $2 is not bound to its own ref (ostree.ref-binding)"
@@ -282,8 +287,13 @@ check_new_commit() {
     [ -z "$nc_col" ] || [ "$nc_col" = "''" ] || die 2 "$1: the new commit $2 is bound to a collection (ostree.collection-binding $nc_col)"
     [ ! -e "$WORK/repo/objects/$(printf '%s' "$2" | cut -c1-2)/$(printf '%s' "$2" | cut -c3-).commitmeta" ] || die 2 "$1: the new commit $2 has a detached metadata file (.commitmeta) already"
     nc_keys=$(commit_keys "$WORK/repo" "$2") || die 2 "$1: cannot read the metadata of $2"
-    nc_bad=$(printf '%s\n' "$nc_keys" | unknown_keys "$COMMIT_KEYS" | tr '\n' ' ')
-    [ -z "$nc_bad" ] || die 2 "$1: the new commit $2 has a metadata key that is not expected: $nc_bad"
+    case $1 in appstream*) nc_want=$APPSTREAM_KEYS ;; *) nc_want=$APP_KEYS ;; esac
+    printf '%s\n' "$nc_keys" | keys_are "$nc_want" || die 2 "$1: the new commit $2 has other metadata keys than $nc_want: $(printf '%s' "$nc_keys" | tr '\n' ' ')"
+    if [ -n "${4:-}" ]; then
+        [ "$(ostree --repo="$WORK/repo" show --print-metadata-key=xa.ref "$2" 2> /dev/null)" = "'$1'" ] || die 2 "$1: the new commit $2 has another xa.ref than its ref"
+        [ "$(xa_sum "$WORK/repo" "$1")" = "$4" ] || die 2 "$1: xa.metadata or the sizes of the new commit $2 are not the verified build's"
+        [ "$(ostree --repo="$WORK/repo" show --print-metadata-key=xa.from_commit "$2" 2> /dev/null)" = "'$5'" ] || die 2 "$1: xa.from_commit of the new commit $2 is not the verified build's commit"
+    fi
     nc_time=$(commit_time "$WORK/repo" "$2") || die 2 "$1: cannot read the date of $2"
     [ "$nc_time" -le $((NOW + COMMIT_FUTURE_MARGIN)) ] || die 2 "$1: the new commit $2 is dated in the future"
     if [ -n "$3" ]; then
@@ -297,6 +307,9 @@ check_prepared() {
     check_site_flags
     semver_valid "$TAG" || die 2 "$TAG is not a release tag"
     is_hex "$COMMIT" 40 || die 2 "$COMMIT is not a commit"
+    # A release candidate has a repository of its own and a stable release never does (the sign job does not take the
+    # validate job's word for which one this is).
+    if is_rc "$TAG"; then [ "$FRESH" = 1 ] || die 3 "$TAG is a release candidate: it is checked with --fresh only"; else [ "$FRESH" = 0 ] || die 3 "$TAG is a stable release: --fresh is for release candidates"; fi
     prepared_state "$IN/flatpak-prepared.txt"
     rm -rf "$WORK"
     mkdir -p "$WORK"
@@ -325,8 +338,12 @@ check_prepared() {
     rm -rf "$WORK/x"
     check_refs "$WORK/repo"
     check_repo_config "$WORK/repo" || die 2 "the config of the prepared repository is not the expected one"
-    # The signed summary is built from checked inputs only: not from the summary and the subsummaries of the preparation.
-    rm -rf "$WORK/repo/summary" "$WORK/repo/summary.sig" "$WORK/repo/summary.idx" "$WORK/repo/summary.idx.sig" "$WORK/repo/summaries"
+    # The signed summary is built from checked inputs only: not from the summary and the subsummaries of the preparation, and
+    # not from static deltas (the summary would list a delta that leads to a commit with no signature in it, which clients
+    # cannot use; those of the base lead to commits older than the heads, so nothing is lost).
+    rm -rf "$WORK/repo/summary" "$WORK/repo/summary.sig" "$WORK/repo/summary.idx" "$WORK/repo/summary.idx.sig" "$WORK/repo/summaries" \
+        "$WORK/repo/deltas" "$WORK/repo/delta-indexes" "$WORK/repo/tmp"
+    mkdir "$WORK/repo/tmp"
     # The content, against the manifest of the verify job: independent of the job that prepared it.
     [ "$(content_sum "$WORK/repo" "$APP_REF")" = "$(kv_get "$MANIFEST" flatpak_app_content)" ] || die 2 "the prepared app content is not the verified build"
     [ "$(content_sum "$WORK/repo" "$DEBUG_REF")" = "$(kv_get "$MANIFEST" flatpak_debug_content)" ] || die 2 "the prepared Debug content is not the verified build"
@@ -342,8 +359,23 @@ check_prepared() {
             continue
         fi
         new=$(ostree --repo="$WORK/repo" rev-parse "$ref")
-        [ "$new" != "$base" ] || continue
-        check_new_commit "$ref" "$new" "$base"
+        if [ "$new" = "$base" ]; then
+            # The published head is signed already and stays so, but build-update-repo reads it with the key at hand.
+            nc_obj=objects/$(printf '%s' "$new" | cut -c1-2)/$(printf '%s' "$new" | cut -c3-)
+            for nc_ext in commit commitmeta; do
+                if [ -e "$SITE/repo/$nc_obj.$nc_ext" ] || [ -e "$WORK/repo/$nc_obj.$nc_ext" ]; then
+                    cmp -s "$SITE/repo/$nc_obj.$nc_ext" "$WORK/repo/$nc_obj.$nc_ext" || die 2 "$ref: the published head $new differs from gh-pages in the prepared repository (.$nc_ext)"
+                fi
+            done
+            continue
+        fi
+        nc_xa="" nc_from=""
+        case $ref in
+            "$APP_REF") nc_xa=$(kv_get "$MANIFEST" flatpak_app_xa) nc_from=$(kv_get "$MANIFEST" flatpak_app_commit) ;;
+            "$DEBUG_REF") nc_xa=$(kv_get "$MANIFEST" flatpak_debug_xa) nc_from=$(kv_get "$MANIFEST" flatpak_debug_commit) ;;
+        esac
+        case $ref in appstream*) ;; *) [ -n "$nc_xa" ] && [ -n "$nc_from" ] || die 2 "the manifest has no xa sum or commit of $ref" ;; esac
+        check_new_commit "$ref" "$new" "$base" "$nc_xa" "$nc_from"
         echo "$ref $new" >> "$WORK/signlist.new"
     done
     [ "$(wc -l < "$WORK/signlist.new")" -ge 2 ] || die 2 "nothing to sign"
