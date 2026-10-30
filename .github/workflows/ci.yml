@@ -1,27 +1,15 @@
 name: CI
 
+# Pull requests and pushes to main. There is no path filter on the triggers: a workflow skipped by one leaves the
+# required checks (`check`, `release-tooling`) pending for ever. Both jobs always run and report; a pull request that is
+# only documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
+# The weekly run (Monday, on main) is only for `deny`: new advisories appear without any change here.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "screenshots/**"
-      - "LICENSE"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/dependabot.yml"
-      - ".gitignore"
-      - ".claude/**"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "screenshots/**"
-      - "LICENSE"
-      - ".github/ISSUE_TEMPLATE/**"
-      - ".github/dependabot.yml"
-      - ".gitignore"
-      - ".claude/**"
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -35,23 +23,54 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  check:
+  # Licences, advisories and sources of the dependencies (deny.toml).
+  deny:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  check:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    # A generous bound for a build without cache; with the cache a run is far shorter.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
+            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changes.outputs.code == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - if: steps.changes.outputs.code == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
+        if: steps.changes.outputs.code == 'true'
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
+        if: steps.changes.outputs.code == 'true'
         run: cargo test --locked
       - name: Validate desktop integration files
+        if: steps.changes.outputs.code == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq desktop-file-utils appstream libxml2-utils
@@ -61,19 +80,72 @@ jobs:
 
   # The release scripts and their tests: no secret, no network but the loopback, nothing of GitHub.
   release-tooling:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Select
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
+            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Which changes run CI
+        if: steps.changes.outputs.code == 'true'
+        run: sh packaging/tests/ci-changes-test.sh
       - name: Install the tools
+        if: steps.changes.outputs.code == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq flatpak ostree shellcheck
       - name: shellcheck
+        if: steps.changes.outputs.code == 'true'
         # Warnings and errors fail the job; info and style notes differ between shellcheck versions (the runner's apt one is older).
         run: shellcheck -s sh -S warning packaging/*.sh packaging/tests/*.sh packaging/tests/gh .claude/flatpak-bg.sh
+      - name: Install actionlint and zizmor
+        if: steps.changes.outputs.code == 'true'
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          # From the release's own checksums file (actionlint_1.7.12_checksums.txt), linux amd64 tarball.
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ZIZMOR_VERSION: "1.31.1"
+          # The digest GitHub shows for the release asset zizmor-x86_64-unknown-linux-gnu.tar.gz.
+          ZIZMOR_SHA256: d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+        run: |
+          dir="$RUNNER_TEMP/lint-tools"
+          mkdir -p "$dir"
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$dir/$tarball" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$tarball"
+          echo "$ACTIONLINT_SHA256  $dir/$tarball" | sha256sum -c -
+          tar -xzf "$dir/$tarball" -C "$dir" actionlint
+          tarball="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$dir/$tarball" "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/$tarball"
+          echo "$ZIZMOR_SHA256  $dir/$tarball" | sha256sum -c -
+          tar -xzf "$dir/$tarball" -C "$dir" zizmor
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: actionlint
+        if: steps.changes.outputs.code == 'true'
+        # actionlint runs the runner's older shellcheck on every run: block; as above, only warnings and errors count.
+        env:
+          SHELLCHECK_OPTS: -S warning
+        run: actionlint -color
+      - name: zizmor
+        if: steps.changes.outputs.code == 'true'
+        # No network and no token: the checks that need GitHub's API are skipped.
+        run: zizmor --offline .github/workflows
       - name: Simulate the release pipeline
+        if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/release-sim.sh
       - name: Offline test of the signed Flatpak repository
+        if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/flatpak-repo-test.sh

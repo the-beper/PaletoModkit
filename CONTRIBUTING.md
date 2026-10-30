@@ -4,7 +4,7 @@ Thank you for looking. Paleto Modkit is a personal project, mostly written with 
 
 ## The most useful thing: tell me what fails
 
-[Open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose). The form asks for the edition, how you installed the app and your distribution, what you did and what happened. The output of `paleto check` and, after a crash, `paleto crash`, usually saves a round of questions. [docs/faq.md](docs/faq.md#what-has-not-been-tried-in-game) lists what has not been tried in game: a report on one of those is especially welcome.
+[Open an issue](https://github.com/the-beper/PaletoModkit/issues/new/choose). The form asks for the edition, how you installed the app and your distribution, what you did and what happened. The output of `paleto check` and, after a crash, `paleto crash`, usually saves a round of questions. A security problem is not for a public issue: see [SECURITY.md](SECURITY.md). [docs/faq.md](docs/faq.md#what-has-not-been-tried-in-game) lists what has not been tried in game: a report on one of those is especially welcome.
 
 ## Code and documentation
 

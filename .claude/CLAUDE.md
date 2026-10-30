@@ -32,4 +32,3 @@ The screenshot tests read the installed game read-only through links in a tempor
 - Never edit or write inside an original game folder, and do not put game files or keys in the repository. Modified archives go to the `mods/` copy. A symlinked copy of a game once let an original get edited: test write paths on a fake first.
 - `TODO.md` is the user's local to-do list: add each new request there first, remove it when done, and do not commit changes to it.
 - There is no Flathub submission and none is planned. The Flathub remote and image are only where the Flatpak runtime and builder come from; keep them.
-- Commit messages and docs in English; the user speaks Italian in the chat.
