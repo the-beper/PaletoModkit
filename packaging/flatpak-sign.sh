@@ -19,8 +19,10 @@
 #       DIR is the --out of --prepare, which is no proof of anything (another job made it), and the --site is gh-pages
 #       fetched again by this job (packaging/release-pages.sh fetch), so the base does not come from the preparation
 #       either. Checks the hash of the tar against its description, that it is for this tag and commit, that its mode is
-#       the one of the flags, and (--check-remote) that gh-pages is still at the base the preparation had; verifies the
-#       published repository like --prepare does; unpacks the tar; checks its refs and its config (exactly the expected
+#       the one of the flags, and (--check-remote) that gh-pages is still at the base the preparation had; a skip=1 in the
+#       description is believed only if this gh-pages has this tag and commit (exit 5), else it ends here; verifies the
+#       published repository like --prepare does; unpacks the tar (member names, top-level entries and files of refs/ as
+#       an honest repository has them, see check_repo_tar); checks its refs and its config (exactly the expected
 #       one, see repo_config); deletes the old summary files and static deltas; compares the content checksums of the app and Debug commits
 #       with release-manifest.txt, which the verify job made from the build output on its own; and checks every head that is
 #       not the published one (the new commits): parent, ref binding, exactly the metadata keys of an honest run, xa.ref,
@@ -193,7 +195,7 @@ prepare() {
     [ "$(kv_get "$MANIFEST" tag)" = "$TAG" ] && [ "$(kv_get "$MANIFEST" commit)" = "$COMMIT" ] || die 2 "the manifest is not for $TAG at $COMMIT"
     UNSIGNED_SHA=$(sha256_of "$UNSIGNED")
     [ "$UNSIGNED_SHA" = "$(kv_get "$MANIFEST" flatpak_unsigned_tar_sha256)" ] || die 2 "the unsigned repository is not the verified one"
-    extract_repo_tar "$UNSIGNED" "$WORK/u"
+    extract_repo_tar "$UNSIGNED" "$WORK/u" deltas
     check_unsigned_repo "$WORK/u/repo" "$VERSION"
 
     # The published state.
@@ -351,7 +353,7 @@ check_prepared() {
     fi
     : > "$WORK/base.heads"
     if [ "$MODE" = site ]; then site_verify; fi
-    extract_repo_tar "$IN/flatpak-prepared-repo.tar" "$WORK/x"
+    extract_repo_tar "$IN/flatpak-prepared-repo.tar" "$WORK/x" deltas
     mv "$WORK/x/repo" "$WORK/repo"
     rm -rf "$WORK/x"
     check_refs "$WORK/repo"

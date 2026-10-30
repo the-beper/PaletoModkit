@@ -1328,7 +1328,7 @@ sc_sign_hostile_prepared() {
     # shellcheck disable=SC2329
     hx_refuse() { # NAME MUTATOR PATTERN [CODE]: the check exits with CODE (2) and names the reason
         hx_make "$1" "$2"
-        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | appstreamsubject | tamper) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
+        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | appstreamsubject | tamper | tar*) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
         run "$d/hx.$1.log" hx_check "$d/hx.$1" --site "$rt/pages2"
         assert_rc "check of a prepared repository with $1" "${4:-2}"
         assert_log "$d/hx.$1.log" "$3"
@@ -1431,6 +1431,19 @@ xa.metadata=x"; }
     hx_refuse commitmeta mut_commitmeta "commitmeta"
     hx_refuse future mut_future "in the future"
     hx_refuse past mut_past "older than"
+    # what is in the archive and not in the repository: files that no honest run has, in places ostree ignores
+    # shellcheck disable=SC2329
+    mut_tarremotes() { mkdir -p "$1/refs/remotes/evil"; printf '%s\n' "$base_app" > "$1/refs/remotes/evil/x"; }
+    # shellcheck disable=SC2329
+    mut_tarmirrors() { printf '%s\n' "$base_app" > "$1/refs/mirrors/x"; }
+    # shellcheck disable=SC2329
+    mut_tartop() { echo x > "$1/evil"; }
+    # shellcheck disable=SC2329
+    mut_tarname() { echo x > "$1/objects/odd name"; }
+    hx_refuse tarremotes mut_tarremotes "files in refs/"
+    hx_refuse tarmirrors mut_tarmirrors "files in refs/"
+    hx_refuse tartop mut_tartop "top of repo/"
+    hx_refuse tarname mut_tarname "characters"
 
     # the mode and the base: the flags say what the preparation had to be, the description is no proof
     run "$d/hx.fresh1.log" hx_check "$d/preparedf" --site "$rt/pages2"
@@ -1530,6 +1543,15 @@ sc_sign_hostile_result() {
     run "$d/r5.log" hr_finish "$d/hr.summary"
     assert_rc "finish with a summary that redirects" 4
     assert_log "$d/r5.log" "summary"
+    # static deltas in the signed repository: the signing job makes none, and --check-prepared deleted those of the preparation
+    hr_copy deltas
+    hr_unpack deltas
+    mkdir -p "$rt/hr.deltas/repo/deltas/ab"
+    echo x > "$rt/hr.deltas/repo/deltas/ab/cdef"
+    hr_retar deltas
+    run "$d/r6.log" hr_finish "$d/hr.deltas"
+    assert_rc "finish with deltas in the signed repository" 2
+    assert_log "$d/r6.log" "top of repo/"
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 

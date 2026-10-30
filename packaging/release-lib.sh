@@ -379,9 +379,27 @@ tar_safe() {
     [ "$lines" = "$lines2" ] || die 2 "$1: unreadable listing"
 }
 
-# extract_repo_tar TAR DIR: unpacks a repo/ archive after tar_safe.
+# check_repo_tar TAR [deltas]: the member names of a repo/ archive are those of an honest OSTree repository (flatpak 1.14.6, ostree
+# 2024.5): only the characters of hex object names, ref names and base64 delta names; only these entries at the top of repo/
+# (deltas and delta-indexes only with "deltas": the unsigned build and the prepared repository may have them, the signed one has
+# none); and no file in refs/ but the heads of the four refs (none under refs/mirrors or refs/remotes). Exit 2 otherwise. Not for
+# the Linux tarball, whose file names are the app's.
+check_repo_tar() {
+    crt=$(tar -tf "$1" 2> /dev/null) || die 2 "$1 is not a readable archive"
+    crt_bad=$(printf '%s\n' "$crt" | LC_ALL=C grep -v '^[A-Za-z0-9._+/-]*$' | head -n1 | tr -c 'A-Za-z0-9._+/\n-' '?' || true)
+    [ -z "$crt_bad" ] || die 2 "$1: a member name has characters that an OSTree repository does not use: $crt_bad"
+    crt_ok="config objects refs state tmp extensions .lock summary summary.sig summary.idx summary.idx.sig summaries"
+    if [ "${2:-}" = deltas ]; then crt_ok="$crt_ok deltas delta-indexes"; fi
+    crt_extra=$(printf '%s\n' "$crt" | awk -F/ '$2 != "" { print $2 }' | LC_ALL=C sort -u | unknown_keys "$crt_ok" | tr '\n' ' ')
+    [ -z "$crt_extra" ] || die 2 "$1: entries at the top of repo/ that an OSTree repository of this release does not have: $crt_extra"
+    crt_extra=$(printf '%s\n' "$crt" | awk '/^repo\/refs\// && !/\/$/' | unknown_keys "repo/refs/heads/$APP_REF repo/refs/heads/$DEBUG_REF repo/refs/heads/appstream/x86_64 repo/refs/heads/appstream2/x86_64" | tr '\n' ' ')
+    [ -z "$crt_extra" ] || die 2 "$1: files in refs/ that are not the heads of the four refs: $crt_extra"
+}
+
+# extract_repo_tar TAR DIR [deltas]: unpacks a repo/ archive after tar_safe and check_repo_tar.
 extract_repo_tar() {
     tar_safe "$1" repo
+    check_repo_tar "$1" "${3:-}"
     mkdir -p "$2"
     tar -C "$2" --no-same-owner --no-same-permissions -xf "$1" || die 2 "cannot unpack $1"
     [ -d "$2/repo/objects" ] || die 2 "$1 holds no OSTree repository"

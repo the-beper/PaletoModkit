@@ -91,7 +91,7 @@ builds)
     if [ -n "$LINUX" ]; then check_linux "$LINUX"; fi
     only_files "$FLATPAK" flatpak-unsigned-repo.tar flatpak-build.txt
     check_buildfile "$FLATPAK/flatpak-build.txt"
-    extract_repo_tar "$FLATPAK/flatpak-unsigned-repo.tar" "$SCRATCH/u"
+    extract_repo_tar "$FLATPAK/flatpak-unsigned-repo.tar" "$SCRATCH/u" deltas
     check_unsigned_repo "$SCRATCH/u/repo" "$VERSION"
     [ "$(ostree --repo="$SCRATCH/u/repo" rev-parse "$APP_REF")" = "$(kv_get "$FLATPAK/flatpak-build.txt" app_commit)" ] || die 2 "flatpak-build.txt: another app commit than the repository"
     mkdir -p "$OUT"
