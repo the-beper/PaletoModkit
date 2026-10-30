@@ -981,6 +981,53 @@ sc_forged_skip() {
     assert_log "$d/sign.log" "gh-pages has"
 }
 
+# gh-pages rolled back to an older state, signed and valid: a new version is not built on it. The release list says which
+# version gh-pages must at least have; the repair is publish-flatpak for the highest published tag.
+sc_replay_pages() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    commit_release 1.6.1
+    tag_release v1.6.1
+    pipeline 1 v1.6.0 release
+    assert_rc "release 1.6.0" 0
+    pipeline 2 v1.6.1 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    rollback_pages
+    assert_eq "gh-pages tag" v1.5.1 "$(kv "$LIVE/site/release.txt" tag)"
+    job_validate 3 v1.6.1 release
+    assert_rc "validate of 1.6.1 over a gh-pages with 1.5.1 when 1.6.0 is published" 5
+    assert_log "$LIVE/runs/3/validate.log" "publish-flatpak for v1.6.0"
+    snapshot > "$SIM/snap.before"
+    job_publish 2 release
+    assert_rc "publish of 1.6.1 over a gh-pages with 1.5.1" 5
+    assert_log "$LIVE/runs/2/publish.log" "publish-flatpak for v1.6.0"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "something was written"
+    # a release candidate has no Pages
+    commit_release 1.7.0-rc.1
+    tag_release v1.7.0-rc.1
+    job_validate 4 v1.7.0-rc.1 release
+    assert_rc "validate of a release candidate" 0
+    # the repair, then the release goes on
+    pipeline 5 v1.6.0 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak of 1.6.0" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    job_validate 6 v1.6.1 release
+    assert_rc "validate of 1.6.1 after the repair" 0
+    # a release made by hand (published, without the files) was never on Pages: it is no reason to refuse the next version
+    rollback_pages
+    d=$GH_STUB_DIR/rel/9001
+    mkdir -p "$d"
+    echo v1.6.1 > "$d/tag"
+    echo false > "$d/draft"
+    echo false > "$d/prerelease"
+    commit_release 1.6.2
+    tag_release v1.6.2
+    job_validate 7 v1.6.2 release
+    assert_rc "validate of 1.6.2 when the highest release has no files" 0
+}
+
 sc_sign_fresh_and_verify() {
     # the signing script on its own: a fresh repository, then the bundle
     commit_release 1.6.0
@@ -1806,7 +1853,7 @@ empty_pin identity_change prerelease main_moved tag_not_on_main build_failure co
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
 pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
-pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins forged_skip"
+pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins forged_skip replay_pages"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 
 FAILFILE=$SIM/fails

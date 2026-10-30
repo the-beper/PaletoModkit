@@ -338,6 +338,15 @@ release_plan() {
         [ "$pages_cmp" = 0 ] || die 3 "$t is published but not matched by gh-pages: use publish-flatpak"
         echo noop
     else
+        # A gh-pages below the highest published stable release is one that was rolled back (a release is published only after
+        # its Pages): signed and valid, but old. A new version must not be built on it. A release without the files (made by hand)
+        # is no proof: it was never on Pages. The repair is publish-flatpak (above), which has no such release to build.
+        if [ -n "$PG_TAG" ] && [ -n "$highest" ] && [ "$(semver_cmp "$PG_TAG" "$highest")" = -1 ]; then
+            hid=$(awk -F '\t' -v t="$highest" '$2 == t && $3 == "false" { print $1 }' "$d/releases.tsv")
+            if assets_complete "$hid"; then
+                die 5 "gh-pages has $PG_TAG, but $highest is published: gh-pages was rolled back or not updated. Restore it first: publish-flatpak for $highest (docs/release.md, Broken gh-pages)"
+            fi
+        fi
         echo publish
     fi
 }
