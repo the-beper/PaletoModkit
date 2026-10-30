@@ -117,6 +117,8 @@ The run also keeps workflow artifacts for 14 days (30 for the Linux build). The 
 | `flatpak-sign-result-<commit>` | `sign-flatpak` | The signed repository, the exported public key and `flatpak-base.txt` (the mode and published heads that `sign-flatpak` checked). `finish-flatpak` verifies it. |
 | `flatpak-signed-<commit>` | `finish-flatpak` | The verified repository and the bundle. `publish` uploads from it. |
 
+A run artifact can be replaced by a compromised job of the same run (it can read the run's token), while a job output cannot be changed by another job. So `verify` publishes the SHA-256 of `release-manifest.txt` and `finish-flatpak` the SHA-256 of `flatpak-signed.txt` (which holds the hashes of the signed repository and of the bundle) as job outputs. `sign-flatpak`, `finish-flatpak` and `publish` get them in `MANIFEST_SHA256` and `SIGNED_SHA256` and exit 2 before reading the files if a hash is empty or differs. `prepare-flatpak` needs nothing: its result is only trusted after `sign-flatpak` has checked it against the pinned manifest. The Linux files are checked by `publish` against the pinned manifest.
+
 A user checks them like this:
 
 ```bash

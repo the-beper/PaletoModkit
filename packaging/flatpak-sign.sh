@@ -54,6 +54,9 @@
 #       flatpak-signed.txt (with skip=1 only that file, when --prepare found the tag published).
 #   flatpak-sign.sh --cleanup [--work DIR]   stops gpg agents and removes the temporary keyrings and the work
 #                                            folder (run it in an "if: always()" step)
+# MANIFEST_SHA256 (environment): the hash of release-manifest.txt that the verify job pinned as a job output; --check-prepared
+# and --finish refuse (exit 2) a manifest with another hash, or without a hash, before they read it. --finish writes
+# signed_sha256 (the hash of flatpak-signed.txt) to GITHUB_OUTPUT for the publish job.
 # The key must be the one of FLATPAK_KEY_FPR in release.conf and, with --site, the published one: no rotation.
 # Temporary files go to $RUNNER_TEMP (else $TMPDIR, else /tmp). Exit codes: see release-lib.sh (4: signing).
 set -eu
@@ -312,6 +315,8 @@ check_new_commit() {
 
 check_prepared() {
     [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$IN" ] && [ -n "$MANIFEST" ] || die 1 "usage: see the header of $0"
+    [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
+    check_pinned "$MANIFEST" "${MANIFEST_SHA256:-}" "$MANIFEST"
     check_site_flags
     semver_valid "$TAG" || die 2 "$TAG is not a release tag"
     is_hex "$COMMIT" 40 || die 2 "$COMMIT is not a commit"
@@ -473,6 +478,8 @@ sign() {
 # ---- finish -----------------------------------------------------------------------------------------------------
 finish() {
     [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$MANIFEST" ] && [ -n "$IN" ] && [ -n "$OUT" ] || die 1 "usage: see the header of $0"
+    [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
+    check_pinned "$MANIFEST" "${MANIFEST_SHA256:-}" "$MANIFEST"
     prepared_state "$IN/flatpak-prepared.txt"
     P=$IN/flatpak-prepared.txt
     mkdir -p "$OUT"
@@ -484,6 +491,7 @@ finish() {
             echo "commit=$COMMIT"
             echo "skip=1"
         } > "$OUT/flatpak-signed.txt"
+        job_output signed_sha256 "$(sha256_of "$OUT/flatpak-signed.txt")"
         echo "$TAG is already published for this commit: nothing was signed"
         return 0
     fi
@@ -566,6 +574,7 @@ finish() {
         echo "unsigned_tar_sha256=$(kv_get "$P" unsigned_tar_sha256)"
         echo "key_fpr=$FPR"
     } > "$OUT/flatpak-signed.txt"
+    job_output signed_sha256 "$(sha256_of "$OUT/flatpak-signed.txt")"
     echo "signed $TAG: app commit $APP_COMMIT"
 }
 

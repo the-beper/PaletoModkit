@@ -118,11 +118,12 @@ sign() {
     v=$1 site=$2 out=$3 keyf=${4:-$KEYS/K.sec}
     shift 4
     man=$BASE/m/$v/release-manifest.txt
+    pin=$(sha256sum "$man" | cut -d' ' -f1) # the job output of the verify job
     sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
         --unsigned "$BASE/b/$v/flatpak-unsigned-repo.tar" --site "$site" --work "$out.pwork" --out "$out.prep" "$@" || return $?
-    sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" --site "$site" "$@" || return $?
+    MANIFEST_SHA256=$pin sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" --site "$site" "$@" || return $?
     FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
-    sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
+    MANIFEST_SHA256=$pin sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.work"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.pwork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.fwork"

@@ -167,6 +167,10 @@ jobs:
     if: ${{ !cancelled() && needs.validate.outputs.plan != 'noop' && needs.build-flatpak.result == 'success' && (needs.build-linux.result == 'success' || needs.validate.outputs.build_linux == 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The hash of release-manifest.txt, which the later jobs get as a run artifact (a compromised job can replace those):
+    # job outputs cannot be changed by other jobs, and sign-flatpak, finish-flatpak and publish check the manifest against it.
+    outputs:
+      manifest_sha256: ${{ steps.verify_linux.outputs.manifest_sha256 || steps.verify_flatpak.outputs.manifest_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
@@ -189,9 +193,11 @@ jobs:
           name: flatpak-unsigned-${{ needs.validate.outputs.commit }}
           path: in/fp
       - name: Verify the builds (Linux and Flatpak)
+        id: verify_linux
         if: ${{ needs.validate.outputs.build_linux == 'true' }}
         run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --linux in/linux --flatpak in/fp --out out
       - name: Verify the build (Flatpak only)
+        id: verify_flatpak
         if: ${{ needs.validate.outputs.build_linux != 'true' }}
         run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --flatpak in/fp --out out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -291,6 +297,7 @@ jobs:
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
+      MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -350,9 +357,13 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    # The hash of flatpak-signed.txt (which holds the hashes of the signed repository and of the bundle), checked by publish.
+    outputs:
+      signed_sha256: ${{ steps.finish.outputs.signed_sha256 }}
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
+      MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -371,6 +382,7 @@ jobs:
           name: verified-${{ needs.validate.outputs.commit }}
           path: in
       - name: Verify the signed repository and make the bundle
+        id: finish
         run: packaging/flatpak-sign.sh --finish --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in signres --work "$RUNNER_TEMP/finwork" --out "$RUNNER_TEMP/signed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -395,6 +407,8 @@ jobs:
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
       VERSION: ${{ needs.validate.outputs.version }}
+      MANIFEST_SHA256: ${{ needs.verify.outputs.manifest_sha256 }}
+      SIGNED_SHA256: ${{ needs.finish-flatpak.outputs.signed_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -11,6 +11,8 @@
 #       PaletoModkit-x86_64.flatpak and the Linux files. The signed repository is pulled like a client does,
 #       with the public key only. Writes OUT with exactly the RELEASE_FILES and SHA256SUMS (only the bundle
 #       when the manifest has no Linux files).
+# With GITHUB_OUTPUT set, "builds" writes manifest_sha256 (the hash of release-manifest.txt) to it: the later jobs get the
+# manifest as a run artifact, which a compromised job could replace, and check it against this job output.
 # Needs ostree, gpg (the public key only), tar. Exit codes: see release-lib.sh.
 set -eu
 # shellcheck source=/dev/null
@@ -114,6 +116,7 @@ builds)
         echo "flatpak_app_xa=$(xa_sum "$SCRATCH/u/repo" "$APP_REF")"
         echo "flatpak_debug_xa=$(xa_sum "$SCRATCH/u/repo" "$DEBUG_REF")"
     } > "$OUT/release-manifest.txt"
+    job_output manifest_sha256 "$(sha256_of "$OUT/release-manifest.txt")"
     echo "verified the builds of $TAG"
     ;;
 final)

@@ -114,6 +114,18 @@ semver_cmp() {
         NR == 2 { for (i = 1; i <= 5; i++) { c = cmp(a[i], $i ""); if (c != 0) { print c; exit } } print 0 }'
 }
 
+# ---- artifacts of a workflow run -------------------------------------------------------------------------------
+# A file that goes from one job to another is a run artifact, which a compromised job can replace (it can read the token of the
+# run). The hash of the file is a job output of the job that made it, which no other job can change; the job that uses the file
+# gets the hash in the environment (MANIFEST_SHA256, SIGNED_SHA256) and checks it before it reads anything.
+# job_output NAME VALUE: sets a job output when run by GitHub Actions, else nothing.
+job_output() { [ -z "${GITHUB_OUTPUT:-}" ] || echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+# check_pinned FILE SHA256 WHAT: exit 2 unless SHA256 is a hash (an empty one is a job that pinned nothing) and FILE has it.
+check_pinned() {
+    is_hex "$2" 64 || die 2 "$3: the job that made it pinned no SHA-256 (it is empty or not a hash): nothing is trusted"
+    [ "$(sha256_of "$1")" = "$(printf '%s' "$2" | tr 'A-F' 'a-f')" ] || die 2 "$3 is not the file the job that made it pinned"
+}
+
 # ---- small files ----------------------------------------------------------------------------------------------
 
 # kv_get FILE KEY

@@ -172,8 +172,12 @@ job_verify() { # RUN
     d=$LIVE/runs/$1
     linux=""
     [ ! -d "$d/linux" ] || linux=$d/linux
-    run "$d/verify.log" in_dir "$d/build" sh packaging/release-verify.sh builds --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" \
+    : > "$d/verify.gho"
+    run "$d/verify.log" in_dir "$d/build" env GITHUB_OUTPUT="$d/verify.gho" sh packaging/release-verify.sh builds --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" \
         ${linux:+--linux "$linux"} --flatpak "$d/fp" --out "$d/verified"
+    # the job output: the later jobs check the manifest they download against it
+    MANIFEST_SHA256=$(kv "$d/verify.gho" manifest_sha256)
+    export MANIFEST_SHA256
 }
 
 # job_sign RUN: fetch Pages (stable) and sign; SECRET_FILE says which key.
@@ -202,8 +206,11 @@ job_sign() {
     # The steps of the jobs: prepare (no secret), check-prepared (none), sign (the secret, nothing else), finish (none).
     sign_args="--tag $tag --commit $commit"
     m=$d/verified/release-manifest.txt
+    MANIFEST_SHA256=$(kv "$d/verify.gho" manifest_sha256)
+    export MANIFEST_SHA256
     rm -f "$d/sign-prepare.log" "$d/sign-check.log" "$d/sign-sign.log" "$d/sign-finish.log"
     rm -rf "$d/prepared" "$d/signres"
+    : > "$d/finish.gho"
     # shellcheck disable=SC2086
     run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --work "$rt/prepwork" --out "$d/prepared"
@@ -220,7 +227,7 @@ job_sign() {
     fi
     if [ "$rc" = 0 ]; then
         # shellcheck disable=SC2086
-        run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --work "$rt/finwork" --out "$d/signed"
+        run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/finish.gho" sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --work "$rt/finwork" --out "$d/signed"
         rc=$RC
     fi
     cat "$d"/sign-prepare.log "$d"/sign-check.log "$d"/sign-sign.log "$d"/sign-finish.log > "$d/sign.log" 2> /dev/null || true
@@ -238,7 +245,7 @@ job_publish() { # RUN MODE
     cp "$d"/signed/* "$d/in/"
     boot=""
     [ "$BOOTSTRAP" != true ] || boot=--bootstrap
-    run "$d/publish.log" in_dir "$d/build" env RUNNER_TEMP="$SIM/rt/$1" PAGES_WAIT=3 PAGES_POLL=1 RELEASE_WAIT=6 RELEASE_POLL=1 GITHUB_RUN_ID="$1" GITHUB_RUN_ATTEMPT=1 \
+    run "$d/publish.log" in_dir "$d/build" env RUNNER_TEMP="$SIM/rt/$1" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" SIGNED_SHA256="$(kv "$d/finish.gho" signed_sha256)" PAGES_WAIT=3 PAGES_POLL=1 RELEASE_WAIT=6 RELEASE_POLL=1 GITHUB_RUN_ID="$1" GITHUB_RUN_ATTEMPT=1 \
         sh packaging/release-publish.sh --mode "$mode" --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" --in "$d/in" $boot
 }
 
@@ -645,8 +652,13 @@ sc_tampered_signed() {
     job_publish 1 release
     assert_rc "publish with a changed signed tar" 2
     assert_log "$d/publish.log" "recorded hash"
-    # an attacker who also fixes the recorded hash is stopped by the pull
+    # an attacker who also fixes the recorded hash is stopped by the pin of flatpak-signed.txt (a job output)
     sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$d/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$d/signed/flatpak-signed.txt"
+    job_publish 1 release
+    assert_rc "publish with the recorded hash fixed in the file" 2
+    assert_log "$d/publish.log" "pinned"
+    # and, if he could change the pin as well, by the pull
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
     job_publish 1 release
     assert_rc "publish with the hash fixed" 2
     assert_log "$d/publish.log" "does not verify"
@@ -1471,6 +1483,104 @@ sc_sign_hostile_result() {
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 
+# the manifest and the signed result go from job to job as run artifacts, which a compromised job can replace; the hashes are job
+# outputs, which it cannot (the emulation: verify.gho and finish.gho). Forged files that tell a consistent story are refused.
+sc_sign_pins() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push verify
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    tag=v1.6.0
+    commit=$(kv "$d/validate.out" commit)
+    rt=$SIM/rt/pin
+    mkdir -p "$rt"
+    m=$d/verified/release-manifest.txt
+    good=$(kv "$d/verify.gho" manifest_sha256)
+    assert_eq "the pin is the hash of the manifest" "$(sha256sum "$m" | cut -d' ' -f1)" "$good"
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    assert_rc "fetch" 0
+    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages2"
+    assert_rc "fetch again" 0
+    run "$d/n1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
+        --unsigned "$d/fp/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw" --out "$d/prepared"
+    assert_rc "prepare" 0
+    # a forged manifest with a prepared repository that fits it: another build of the same commit, verified and prepared consistently
+    fx_flatpak "$d/build" "$d/fp2"
+    run "$d/n2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-verify.sh builds --tag "$tag" --commit "$commit" --flatpak "$d/fp2" --out "$d/verified2"
+    assert_rc "verify the other build" 0
+    m2=$d/verified2/release-manifest.txt
+    run "$d/n3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m2" \
+        --unsigned "$d/fp2/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw2" --out "$d/prepared2"
+    assert_rc "prepare the other build" 0
+    # shellcheck disable=SC2329
+    pin_check() { # PIN MANIFEST PREPARED
+        in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" \
+            --manifest "$2" --in "$3" --work "$rt/w" --site "$rt/pages2" --check-remote
+    }
+    run "$d/n4.log" pin_check "$(sha256sum "$m2" | cut -d' ' -f1)" "$m2" "$d/prepared2"
+    assert_rc "check of the forged pair with the hash of the forged manifest (the control: only the pin can stop it)" 0
+    run "$d/n5.log" pin_check "$good" "$m2" "$d/prepared2"
+    assert_rc "check of a forged manifest and its prepared repository" 2
+    assert_log "$d/n5.log" "pinned"
+    run "$d/n6.log" pin_check "" "$m" "$d/prepared"
+    assert_rc "check with an empty pin" 2
+    assert_log "$d/n6.log" "pinned"
+    run "$d/n7.log" pin_check "not-a-hash" "$m" "$d/prepared"
+    assert_rc "check with a pin that is not a hash" 2
+    run "$d/n8.log" pin_check "$good" "$m" "$d/prepared"
+    assert_rc "check of the honest pair" 0
+
+    # the result of the signing job and the publish job
+    pipeline 2 v1.6.0 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    e=$LIVE/runs/2
+    m=$e/verified/release-manifest.txt
+    # shellcheck disable=SC2329
+    fin() { # PIN
+        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" GITHUB_OUTPUT="$rt/fin.gho" sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$(kv "$e/validate.out" commit)" \
+            --manifest "$m" --in "$e/signres" --work "$rt/fw" --out "$rt/out"
+    }
+    run "$e/f1.log" fin ""
+    assert_rc "finish with an empty pin" 2
+    run "$e/f2.log" fin "$(printf 'a%.0s' $(seq 64))"
+    assert_rc "finish with another hash" 2
+    assert_log "$e/f2.log" "pinned"
+    run "$e/f3.log" fin "$(kv "$e/verify.gho" manifest_sha256)"
+    assert_rc "finish with the pin" 0
+    assert_eq "finish pinned flatpak-signed.txt" "$(sha256sum "$rt/out/flatpak-signed.txt" | cut -d' ' -f1)" "$(kv "$rt/fin.gho" signed_sha256)"
+    snapshot > "$SIM/snap.before"
+    # the bundle replaced, and flatpak-signed.txt fitted to it: the files tell a consistent story, the pin does not
+    cp -a "$e/signed" "$e/signed.good"
+    printf 'not the bundle' >> "$e/signed/PaletoModkit-x86_64.flatpak"
+    sed -i -e "s/^bundle_sha256=.*/bundle_sha256=$(sha256sum "$e/signed/PaletoModkit-x86_64.flatpak" | cut -d' ' -f1)/" \
+        -e "s/^bundle_size=.*/bundle_size=$(stat -c %s "$e/signed/PaletoModkit-x86_64.flatpak")/" "$e/signed/flatpak-signed.txt"
+    job_publish 2 release
+    assert_rc "publish with a swapped bundle" 2
+    assert_log "$e/publish.log" "pinned"
+    rm -rf "$e/signed"
+    mv "$e/signed.good" "$e/signed"
+    # the manifest replaced
+    cp "$e/verified/release-manifest.txt" "$e/manifest.good"
+    echo "flatpak_extra=forged" >> "$e/verified/release-manifest.txt"
+    job_publish 2 release
+    assert_rc "publish with a swapped manifest" 2
+    assert_log "$e/publish.log" "pinned"
+    cp "$e/manifest.good" "$e/verified/release-manifest.txt"
+    # no pin
+    cp "$e/finish.gho" "$e/finish.good"
+    : > "$e/finish.gho"
+    job_publish 2 release
+    assert_rc "publish with no pin for the signed result" 2
+    assert_log "$e/publish.log" "pinned"
+    cp "$e/finish.good" "$e/finish.gho"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "the remote changed"
+    # the control: the real files and the real pins publish
+    job_publish 2 release
+    assert_rc "publish with the real files and pins" 0
+}
+
 # the checks of the library, on their own
 lib_run() { sh -c ". \"\$0\"; $1" "$PKG/release-lib.sh"; }
 # shellcheck disable=SC2016
@@ -1578,7 +1688,7 @@ empty_pin identity_change prerelease main_moved tag_not_on_main build_failure co
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
 pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
-pages_hostile_config sign_hostile_prepared sign_hostile_result"
+pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 
 FAILFILE=$SIM/fails
