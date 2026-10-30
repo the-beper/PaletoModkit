@@ -6,11 +6,12 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 fail=0
 
-# expect <true|false> <file>... : the verdict for a change of exactly these files ("-" for none)
+# expect <true|false> <file>... : the verdict for a change of exactly these files ("-" for none); the verdict goes to
+# stdout even inside GitHub Actions, which sets GITHUB_OUTPUT for every step
 expect() {
     want=$1
     shift
-    got=$(for f in "$@"; do [ "$f" = - ] || printf '%s\n' "$f"; done | sh "$HERE/../ci-changes.sh")
+    got=$(for f in "$@"; do [ "$f" = - ] || printf '%s\n' "$f"; done | GITHUB_OUTPUT=/dev/stdout sh "$HERE/../ci-changes.sh")
     if [ "$got" = "code=$want" ]; then
         echo "ok   $want: $*"
     else

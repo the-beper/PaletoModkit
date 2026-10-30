@@ -1,8 +1,8 @@
 name: CI
 
 # Pull requests and pushes to main. There is no path filter on the triggers: a workflow skipped by one leaves the
-# required checks (`check`, `release-tooling`) pending for ever. Both jobs always run and report; a change that is only
-# documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
+# required checks (`check`, `release-tooling`) pending for ever. Both jobs always run and report; a pull request that is
+# only documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
 # The weekly run (Monday, on main) is only for `deny`: new advisories appear without any change here.
 on:
   push:
@@ -50,7 +50,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
-            files=$(git diff --name-only "$BASE_SHA" HEAD)
+            files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
             printf '%s\n' "$files" | sh packaging/ci-changes.sh
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
@@ -95,7 +95,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
-            files=$(git diff --name-only "$BASE_SHA" HEAD)
+            files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
             printf '%s\n' "$files" | sh packaging/ci-changes.sh
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
@@ -135,6 +135,9 @@ jobs:
           echo "$dir" >> "$GITHUB_PATH"
       - name: actionlint
         if: steps.changes.outputs.code == 'true'
+        # actionlint runs the runner's older shellcheck on every run: block; as above, only warnings and errors count.
+        env:
+          SHELLCHECK_OPTS: -S warning
         run: actionlint -color
       - name: zizmor
         if: steps.changes.outputs.code == 'true'

@@ -9,6 +9,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 # Vulnerabilities and yanked crates fail. "Unmaintained" is reported only for the crates the workspace names itself:
 # the ones found today (zbus_names, zvariant, ttf-parser, paste, ...) come in through egui and zbus, not ours to replace.
 unmaintained = "workspace"
+yanked = "deny"
 
 [licenses]
 allow = [
