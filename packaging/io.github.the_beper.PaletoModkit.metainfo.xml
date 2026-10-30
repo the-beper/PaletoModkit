@@ -91,7 +91,7 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="1.6.0-rc.2" date="2026-10-30" type="development">
+    <release version="1.6.0-rc.3" date="2026-10-30" type="development">
       <description>
         <p>Release candidate: installs, archive edits and file operations are recoverable changes, and packages are read within limits.</p>
         <ul>
