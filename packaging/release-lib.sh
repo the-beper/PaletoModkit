@@ -396,7 +396,8 @@ reproducible_tar() {
 }
 
 # tar_safe TAR PREFIX: exit 2 unless every member of the archive is a regular file or a
-# directory inside PREFIX/ (no absolute path, no empty, . or .. component, no link or device).
+# directory inside PREFIX/ (no absolute path, no empty, . or .. component, no link or device) and no name occurs twice (tar -x keeps
+# the last copy, tar -xO prints all of them, so a hash of the second would not be the file that is unpacked).
 tar_safe() {
     ts=$(mktemp -d "${TMPDIR:-/tmp}/tar-safe.XXXXXX")
     tar -tf "$1" > "$ts/names" 2> /dev/null || { rm -rf "$ts"; die 2 "$1 is not a readable archive"; }
@@ -404,12 +405,14 @@ tar_safe() {
     bad=$(grep -Ev "^$2(/|\$)" "$ts/names" | head -n1 || true)
     badpath=$(grep -E '(^|/)\.\.(/|$)|^/|//|(^|/)\.(/|$)' "$ts/names" | head -n1 || true)
     badtype=$(grep -v '^[-d]$' "$ts/types" | head -n1 || true)
+    dup=$(sed -e 's|^\./||' -e 's|/$||' "$ts/names" | LC_ALL=C sort | uniq -d | head -n1)
     lines=$(wc -l < "$ts/names")
     lines2=$(wc -l < "$ts/types")
     rm -rf "$ts"
     [ -z "$bad" ] || die 2 "$1: member outside $2/: $bad"
     [ -z "$badpath" ] || die 2 "$1: unsafe path: $badpath"
     [ -z "$badtype" ] || die 2 "$1: a member is not a regular file or a directory"
+    [ -z "$dup" ] || die 2 "$1: the member $dup is in the archive twice"
     [ "$lines" = "$lines2" ] || die 2 "$1: unreadable listing"
 }
 

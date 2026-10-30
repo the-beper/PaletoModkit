@@ -2096,6 +2096,26 @@ sc_check_compromised() {
     cc_refuse metagone cc_metagone "detached metadata files"
     cc_refuse metaplant cc_metaplant "detached metadata files"
     cc_refuse unlisted cc_unlisted "did not describe"
+    # a commit object stored twice, A then B with A+B the real commit: tar -xO prints both and the hash fits, tar -x keeps B
+    cc_make dup :
+    rm -rf "$rt/dup"
+    mkdir -p "$rt/dup"
+    tar -C "$rt/dup" -xf "$d/checked/flatpak-checked-repo.tar"
+    dup_id=$(kv "$d/checked/prepared.txt" prepared_app_commit)
+    dup_f=repo/objects/$(printf '%s' "$dup_id" | cut -c1-2)/$(printf '%s' "$dup_id" | cut -c3-).commit
+    dup_n=$(stat -c %s "$rt/dup/$dup_f")
+    cp "$rt/dup/$dup_f" "$rt/dup/full"
+    chmod u+w "$rt/dup/$dup_f"
+    head -c $((dup_n / 2)) "$rt/dup/full" > "$rt/dup/$dup_f"
+    tar -C "$rt/dup" --owner=0 --group=0 --numeric-owner -cf "$d/cc.dup/flatpak-checked-repo.tar" repo
+    tail -c +$((dup_n / 2 + 1)) "$rt/dup/full" > "$rt/dup/$dup_f"
+    tar -C "$rt/dup" --owner=0 --group=0 --numeric-owner -rf "$d/cc.dup/flatpak-checked-repo.tar" "$dup_f"
+    assert_eq "tar -xO prints the real commit object" "$dup_id" "$(tar -xOf "$d/cc.dup/flatpak-checked-repo.tar" "$dup_f" | sha256sum | cut -d' ' -f1)"
+    sed -i "s/^checked_tar_sha256=.*/checked_tar_sha256=$(sha256sum "$d/cc.dup/flatpak-checked-repo.tar" | cut -d' ' -f1)/" "$d/cc.dup/flatpak-check-result.txt"
+    run "$d/cc.dup.log" cc_unpack dup
+    assert_rc "unpack with a commit object stored twice" 2
+    assert_log "$d/cc.dup.log" "twice"
+    [ ! -e "$rt/sw.dup/repo" ] || fail "dup: a repository was unpacked"
     # the preparation's pin, empty or foreign
     run "$d/cc.pin1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="" sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/checked" --work "$rt/sw.pin1"
     assert_rc "unpack with no pin of the preparation" 2
