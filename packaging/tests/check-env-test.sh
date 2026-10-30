@@ -25,7 +25,6 @@ expect() {
         echo "FAIL $name: exit $got, wanted $want"
         sed 's/^/     /' "$T/out"
         fail=1
-        return 1
     fi
 }
 
@@ -52,6 +51,8 @@ expect 3 "any ref may deploy" --json "$T/anyref.json"
 
 echo '{"name":"flatpak-signing","protection_rules":[{"id":1,"type":"required_reviewers","reviewers":[{"type":"User"}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":false}}' > "$T/allrefs.json"
 expect 3 "policy object that restricts nothing" --json "$T/allrefs.json"
+sed 's/"protected_branches":false,"custom_branch_policies":true/"protected_branches":true,"custom_branch_policies":false/' "$T/good.json" > "$T/protected.json"
+expect 3 "protected branches only, which admit no tag" --json "$T/protected.json"
 
 sed 's/"flatpak-signing"/"github-pages"/' "$T/good.json" > "$T/other.json"
 expect 3 "answer for another environment" --json "$T/other.json"

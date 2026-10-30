@@ -43,8 +43,9 @@ jq -e 'type == "object"' "$TMP/env.json" > /dev/null 2>&1 || die 5 "the answer f
 reviewers=$(jq -r '[.protection_rules[]? | select(.type == "required_reviewers") | (.reviewers // []) | length] | add // 0' "$TMP/env.json")
 [ "$reviewers" -ge 1 ] 2> /dev/null || die 3 "environment $NAME has no required reviewer"
 
-# Deployment branches and tags: "selected" (custom policies) or "protected branches"; neither means any ref may deploy.
-jq -e '.deployment_branch_policy | type == "object" and (.custom_branch_policies == true or .protected_branches == true)' "$TMP/env.json" > /dev/null 2>&1 \
-    || die 3 "environment $NAME lets any branch or tag deploy to it"
+# Deployment branches and tags must be "selected" (custom policies): "protected branches" admits no tag, so a release
+# would pass here and stop at sign-flatpak, and no policy at all lets any ref deploy. The patterns are not read.
+jq -e '.deployment_branch_policy | type == "object" and .custom_branch_policies == true' "$TMP/env.json" > /dev/null 2>&1 \
+    || die 3 "environment $NAME does not limit deployments to selected branches and tags"
 
 echo "environment $NAME: $reviewers required reviewer(s), deployment refs restricted"

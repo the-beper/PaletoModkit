@@ -4,7 +4,8 @@
 # Exit codes of every release script: 0 ok or nothing to do; 1 usage or internal error; 2 validation (format,
 # mismatch, missing file, checksum, structure); 3 policy refusal (downgrade, same tag with another commit or
 # content, Flatpak identity change); 4 signing (secret missing, wrong key, gpg or ostree failure); 5 remote
-# conflict (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead of the release).
+# conflict or unreadable remote (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead
+# of the release, GitHub answer missing or malformed).
 #   RELEASE_CONF  the pins file (default: release.conf next to the scripts)
 #   REMOTE        git URL of the repository (default: https://github.com/$GITHUB_REPOSITORY.git)
 #   GH_REPO, GH_TOKEN  for the gh wrappers; the token never goes in a URL, a git config or a command line

@@ -210,6 +210,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # GitHub Apps (GITHUB_TOKEN is one) read environments with actions: read; a 403 here would stop the tag for good.
+      actions: read
     env:
       COMMIT: ${{ needs.validate.outputs.commit }}
     steps:

@@ -5,6 +5,8 @@
 #   sh packaging/tests/tarball-test.sh
 set -eu
 
+tar --version 2> /dev/null | grep -q "GNU tar" || { echo "SKIP: GNU tar is needed"; exit 77; }
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=/dev/null
 . "$HERE/../release-lib.sh"
