@@ -418,8 +418,8 @@ tar_safe() {
 
 # check_repo_tar TAR [deltas]: the member names of a repo/ archive are those of an honest OSTree repository (flatpak 1.14.6, ostree
 # 2024.5): only the characters of hex object names, ref names and base64 delta names; only these entries at the top of repo/
-# (deltas and delta-indexes only with "deltas": the unsigned build and the prepared repository may have them, the signed one has
-# none); and no file in refs/ but the heads of the four refs (none under refs/mirrors or refs/remotes). Exit 2 otherwise. Not for
+# (deltas and delta-indexes only with "deltas": the unsigned build and the prepared repository may have them, the signed one only
+# once --finish has made its delta, see check_signed_deltas); and no file in refs/ but the heads of the four refs (none under refs/mirrors or refs/remotes). Exit 2 otherwise. Not for
 # the Linux tarball, whose file names are the app's.
 check_repo_tar() {
     crt=$(tar -tf "$1" 2> /dev/null) || die 2 "$1 is not a readable archive"
@@ -440,6 +440,47 @@ extract_repo_tar() {
     mkdir -p "$2"
     tar -C "$2" --no-same-owner --no-same-permissions -xf "$1" || die 2 "cannot unpack $1"
     [ -d "$2/repo/objects" ] || die 2 "$1 holds no OSTree repository"
+}
+
+# delta_b64 HEX: a commit as OSTree writes it in the path of a static delta (base64, no padding, "/" as "_").
+delta_b64() { python3 -I -c 'import base64, sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode().rstrip("=").replace("/", "_"))' "$1"; }
+
+# delta_dir FROM TO, delta_index TO: where a repository keeps the static delta between two commits, and the index of the deltas to TO.
+delta_dir() { dd_f=$(delta_b64 "$1") && dd_t=$(delta_b64 "$2") && printf 'deltas/%s/%s-%s\n' "$(printf '%s' "$dd_f" | cut -c1-2)" "$(printf '%s' "$dd_f" | cut -c3-)" "$dd_t"; }
+delta_index() { di_t=$(delta_b64 "$1") && printf 'delta-indexes/%s/%s.index\n' "$(printf '%s' "$di_t" | cut -c1-2)" "$(printf '%s' "$di_t" | cut -c3-)"; }
+
+# check_deltas REPO [FROM TO SHA]: the static deltas of REPO are none (no FROM) or exactly one, FROM to TO, with its one index and no
+# other file or folder under deltas/ and delta-indexes/: the folder holds the superblock, whose SHA-256 is SHA, and numbered parts.
+# Reads names and one hash; it parses nothing (--finish tries the delta with ostree).
+check_deltas() {
+    cd_have=$(cd "$1" && find deltas delta-indexes -printf '%y %p\n' 2> /dev/null | LC_ALL=C sort)
+    if [ -z "${2:-}" ]; then
+        [ -z "$cd_have" ] || die 2 "$1: static deltas in a repository that has none"
+        return 0
+    fi
+    is_hex "$2" 64 && is_hex "$3" 64 && is_hex "$4" 64 || die 2 "check_deltas: not a commit or a hash"
+    cd_dir=$(delta_dir "$2" "$3") && cd_idx=$(delta_index "$3") || die 2 "$1: cannot name the static delta"
+    cd_extra=$(printf '%s\n' "$cd_have" | awk -v d="$cd_dir" -v i="$cd_idx" '
+        function up(p) { sub(/\/[^\/]*$/, "", p); return p }
+        BEGIN { ok["d deltas"] = ok["d delta-indexes"] = ok["d " up(d)] = ok["d " d] = ok["d " up(i)] = ok["f " i] = 1 }
+        !($0 in ok) && !(index($0, "f " d "/") == 1 && substr($0, length(d) + 4) ~ /^(superblock|[0-9]+)$/) { print; exit }')
+    [ -z "$cd_extra" ] || die 2 "$1: a static delta file or folder that is not the one from $2 to $3: ${cd_extra#* }"
+    printf '%s\n' "$cd_have" | grep -qxF "f $cd_idx" || die 2 "$1: the index of the static delta to $3 is missing"
+    [ -f "$1/$cd_dir/superblock" ] && [ ! -L "$1/$cd_dir/superblock" ] || die 2 "$1: the static delta from $2 to $3 has no superblock"
+    [ "$(sha256_of "$1/$cd_dir/superblock")" = "$4" ] || die 2 "$1: the superblock of the static delta is not the recorded one"
+}
+
+# check_signed_deltas REPO RECORD: REPO has the static deltas that RECORD (flatpak-signed.txt of --finish) says: for a site, the one
+# from the published app commit to the new one, with the recorded SHA-256 of its superblock; for any other mode, none.
+check_signed_deltas() {
+    csd_sha=$(kv_get "$2" delta_superblock_sha256)
+    if [ "$(kv_get "$2" mode)" = site ]; then
+        is_hex "$csd_sha" 64 || die 2 "$2: a release for gh-pages has no delta_superblock_sha256"
+        check_deltas "$1" "$(kv_get "$2" base_app_commit)" "$(kv_get "$2" app_commit)" "$csd_sha"
+    else
+        [ -z "$csd_sha" ] || die 2 "$2: only a release for gh-pages has a static delta"
+        check_deltas "$1"
+    fi
 }
 
 # repo_refs REPO: the refs of an OSTree repository, one per line, sorted.

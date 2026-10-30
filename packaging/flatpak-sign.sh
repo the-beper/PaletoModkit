@@ -54,22 +54,23 @@
 #       build-update-repo reading the commit metadata of the refs to write the summary: no file of the app is read, parsed or
 #       interpreted, and what it does read was checked by --check-prepared (config, commit metadata) or deleted (the old
 #       summary files, deltas) before, on another machine.
-#       NO STATIC DELTAS: a delta embeds the signature of its commit, so it can only be made after the commit is
-#       signed, and the signed summary has to list it, so the summary would have to be signed again afterwards (tried:
-#       deltas made after the signature, without the key, are not in the signed summary and clients never use them;
-#       a regenerated summary has no signature and clients refuse it). Making them with the key present would read
-#       every content object of the build with the key at hand, so there are none: an update downloads the changed
-#       objects (the compressed files that differ) instead of a delta. To bring deltas back: a keyless job that
-#       makes them from the signed repository, then a second signing step that only signs the summary and its index.
+#       NO STATIC DELTAS here: a delta embeds the signature of its commit, so it can only be made after the signing, and
+#       making it with the key present would read every content object of the build with the key at hand. --finish makes it,
+#       without the key (the signed summary says indexed-deltas, so it needs no change and no second signature).
 #   flatpak-sign.sh --finish --tag vX.Y.Z --commit SHA --manifest release-manifest.txt --in DIR --checked DIR --work DIR --out DIR
 #                                                              job finish-flatpak, NO secret, another machine
 #       DIR of --in is the --out of --sign, DIR of --checked the --out of --check-prepared. Verifies the signed repository with
 #       the public key only (the one exported from the signing keyring), that its config is the expected one and its summary has
 #       only the expected keys, that it is the prepared one plus signatures, that every ref continues the published head of
 #       base.txt (the record of the check job, not the description of the preparation or anything the signing job says), and
-#       that its content is the verified build's; makes the bundle and writes to --out: flatpak-signed-repo.tar,
-#       PaletoModkit-x86_64.flatpak, flatpak-pubkey.gpg, flatpak-signed.txt (with skip=1 only that file, when --prepare found
-#       the tag published).
+#       that its content is the verified build's. With a published head (site mode) it then makes the static delta from the
+#       published app commit to the new one (app ref only; ostree static-delta generate and reindex) and tries it like a
+#       client with only the public key: in a scratch repository it pulls the published commit, then the new one with static
+#       deltas required, and the result must be fsck-clean and the verified build; the summary files and every other name of the
+#       repository must be unchanged and the one delta and its one index the only ones (check_deltas). A first publication
+#       and a repository of its own have none. Makes the bundle and writes to --out: flatpak-signed-repo.tar,
+#       PaletoModkit-x86_64.flatpak, flatpak-pubkey.gpg, flatpak-signed.txt (with delta_superblock_sha256, empty without a delta;
+#       with skip=1 only that file, when --prepare found the tag published).
 #   flatpak-sign.sh --cleanup [--work DIR]   stops gpg agents and removes the temporary keyrings and the work
 #                                            folder (run it in an "if: always()" step)
 # Every file that goes from one job to the next is a run artifact, which a compromised job can replace, so each hop has a pin, the
@@ -673,6 +674,48 @@ sign() {
 }
 
 # ---- finish -----------------------------------------------------------------------------------------------------
+
+# repo_state REPO: what a static delta must not change: every name in REPO but the deltas, their indexes, tmp and the lock, and the
+# hashes of the summary files.
+repo_state() {
+    (cd "$1" && find . \( -path ./deltas -o -path ./delta-indexes -o -path ./tmp -o -path ./.lock \) -prune -o -print | LC_ALL=C sort
+        find summary summary.sig summary.idx summary.idx.sig summaries -type f -exec sha256sum {} + 2> /dev/null | LC_ALL=C sort -k2)
+}
+
+# make_delta: the static delta from the published app commit (BASE_APP) to the new one (APP_COMMIT) in the signed repository $WORK/repo,
+# app ref only, and its index; sets DELTA_SHA to the SHA-256 of its superblock. The signed summary is not touched: it says
+# indexed-deltas, so a client reads the index, which is not signed, and the commit and its signature in the superblock. Then the
+# delta is tried like a client does with the public key only: in a scratch repository, the published commit is pulled and the new one
+# is pulled with static deltas required, and it must be the verified build.
+make_delta() {
+    md_state=$(repo_state "$WORK/repo")
+    ostree --repo="$WORK/repo" static-delta generate --from="$BASE_APP" --to="$APP_COMMIT" > "$WORK/delta.log" 2>&1 &&
+        ostree --repo="$WORK/repo" static-delta reindex >> "$WORK/delta.log" 2>&1 || {
+        sed 's/^/    /' "$WORK/delta.log" >&2
+        die 4 "ostree static-delta generate or reindex failed"
+    }
+    rm -rf "$WORK/repo/tmp"
+    mkdir "$WORK/repo/tmp"
+    DELTA_SHA=$(sha256_of "$WORK/repo/$(delta_dir "$BASE_APP" "$APP_COMMIT")/superblock") || die 4 "the static delta has no superblock"
+    check_deltas "$WORK/repo" "$BASE_APP" "$APP_COMMIT" "$DELTA_SHA"
+    [ "$(repo_state "$WORK/repo")" = "$md_state" ] || die 4 "making the static delta changed the repository, summary files included"
+    md_dt=$WORK/deltatest
+    rm -rf "$md_dt"
+    # (a bare-user repository: an archive one cannot take a delta)
+    ostree --repo="$md_dt" init --mode=bare-user || die 4 "cannot create a scratch repository"
+    ostree --repo="$md_dt" remote add --set=gpg-verify=true --set=gpg-verify-summary=true --gpg-import="$IN/flatpak-pubkey.gpg" chk "file://$WORK/repo" ||
+        die 4 "cannot import the public key"
+    ostree --repo="$md_dt" pull --untrusted chk "$APP_REF@$BASE_APP" > "$WORK/deltatest.log" 2>&1 &&
+        ostree --repo="$md_dt" pull --untrusted --require-static-deltas chk "$APP_REF" >> "$WORK/deltatest.log" 2>&1 || {
+        sed 's/^/    /' "$WORK/deltatest.log" >&2
+        die 4 "the static delta does not take a client on the published commit to the new one"
+    }
+    [ "$(ostree --repo="$md_dt" rev-parse "$APP_REF")" = "$APP_COMMIT" ] || die 4 "the static delta leads to another commit"
+    ostree --repo="$md_dt" fsck > /dev/null 2>&1 || die 4 "ostree fsck failed after the static delta"
+    [ "$(content_sum "$md_dt" "$APP_REF")" = "$(kv_get "$MANIFEST" flatpak_app_content)" ] || die 4 "the content after the static delta is not the verified build"
+    rm -rf "$md_dt"
+}
+
 finish() {
     [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$MANIFEST" ] && [ -n "$IN" ] && [ -n "$CHK" ] && [ -n "$OUT" ] || die 1 "usage: see the header of $0"
     [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
@@ -761,6 +804,9 @@ finish() {
     done
     [ "$(content_sum "$WORK/repo" "$APP_REF")" = "$(kv_get "$MANIFEST" flatpak_app_content)" ] || die 4 "the signed app content is not the verified build"
     [ "$(content_sum "$WORK/repo" "$DEBUG_REF")" = "$(kv_get "$MANIFEST" flatpak_debug_content)" ] || die 4 "the signed Debug content is not the verified build"
+    # With a published head to continue (site) a client on it updates by a delta; the first publication and a repository of its own have none.
+    DELTA_SHA=""
+    if [ "$MODE" = site ]; then make_delta; fi
 
     flatpak build-bundle --gpg-keys="$IN/flatpak-pubkey.gpg" "$WORK/repo" "$OUT/PaletoModkit-x86_64.flatpak" "$APP_ID" "$BRANCH" \
         --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo > "$WORK/bundle.log" 2>&1 || {
@@ -783,6 +829,7 @@ finish() {
         echo "app_commit=$APP_COMMIT"
         echo "debug_commit=$DEBUG_COMMIT"
         echo "summary_sha256=$(sha256_of "$WORK/repo/summary")"
+        echo "delta_superblock_sha256=$DELTA_SHA"
         echo "bundle_sha256=$(sha256_of "$OUT/PaletoModkit-x86_64.flatpak")"
         echo "bundle_size=$(stat -c %s "$OUT/PaletoModkit-x86_64.flatpak")"
         echo "repo_tar_sha256=$(sha256_of "$OUT/flatpak-signed-repo.tar")"

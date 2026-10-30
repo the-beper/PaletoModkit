@@ -197,7 +197,8 @@ push_pages() {
     else
         git init -q --initial-branch=paleto-new "$g"
     fi
-    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$TMP/ex"
+    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$TMP/ex" deltas
+    check_signed_deltas "$TMP/ex/repo" "$S"
     mv "$TMP/ex/repo" "$g/repo"
     rm -rf "$g/repo/tmp"
     # The key in the files users added the remote with is the PUBLISHED one, byte for byte (a fresh export of the same

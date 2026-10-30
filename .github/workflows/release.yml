@@ -9,8 +9,8 @@ name: Release
 # commit metadata), and hands the cleaned and checked repository over as a tar of its own making. `sign-flatpak` waits for
 # the approval after that: it only unpacks the tar (the pin of the job output, the names of the members, no ostree, gpg,
 # flatpak, git or network), then signs the new commits and the summary in a keyring in memory (nothing is built or generated
-# there, and there are no static deltas) and removes it. `finish-flatpak`
-# verifies the signed repository like a client does and makes the bundle, on a machine that never held the key. Only
+# there, and no static deltas) and removes it. `finish-flatpak` verifies the signed repository like a client does, makes the
+# static delta from the published head and tries it, and makes the bundle, on a machine that never held the key. Only
 # `publish` can write (the draft release, then gh-pages through a credential helper, then the release). The rules are
 # in docs/release.md, the scripts in packaging/release-*.sh and flatpak-sign.sh, simulated by
 # packaging/tests/release-sim.sh.

@@ -141,7 +141,8 @@ final)
     want=$(conf_hex FLATPAK_KEY_FPR 40 | tr 'a-f' 'A-F')
     [ "$fpr" = "$want" ] || die 2 "flatpak-pubkey.gpg is the key ${fpr:-unknown}, not $want"
     [ "$(kv_get "$S" key_fpr)" = "$want" ] || die 2 "flatpak-signed.txt names another key than $want"
-    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$SCRATCH/s"
+    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$SCRATCH/s" deltas
+    check_signed_deltas "$SCRATCH/s/repo" "$S"
     verify_signed_repo "$SCRATCH/s/repo" "$IN/flatpak-pubkey.gpg" "$SCRATCH" "$VERSION"
     R=$SCRATCH/s/repo
     [ "$(ostree --repo="$R" rev-parse "$APP_REF")" = "$(kv_get "$S" app_commit)" ] || die 2 "the app commit is not the recorded one"
