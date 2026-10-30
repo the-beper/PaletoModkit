@@ -1453,6 +1453,7 @@ sc_sign_hostile_result() {
     rm -f "$d/hr.nobase/flatpak-base.txt"
     run "$d/r1.log" hr_finish "$d/hr.nobase"
     assert_rc "finish without the record of the base" 2
+    assert_log "$d/r1.log" "flatpak-base.txt is missing"
     # a record that names another parent than the one the signed commit has
     hr_copy parent
     sed -i "s|^\(head $APP_REF \).*|\1$(printf 'e%.0s' $(seq 64))|" "$d/hr.parent/flatpak-base.txt"
