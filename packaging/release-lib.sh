@@ -339,6 +339,15 @@ assets_complete() {
 
 # ---- archives and OSTree repositories ------------------------------------------------------------------------
 
+# reproducible_tar PARENT NAME OUT EPOCH: OUT.tar.gz holding PARENT/NAME, the same bytes for the same contents
+# whatever the file times, owners, umask or directory order of the machine: sorted names, every mtime EPOCH,
+# owner 0:0, modes normalised (644/755, no group or other write), no gzip name or time. Needs GNU tar (--sort).
+reproducible_tar() {
+    LC_ALL=C tar --sort=name --format=gnu --mtime="@$4" --owner=0 --group=0 --numeric-owner --mode='u+rw,go+rX,go-w' -C "$1" -cf "$3.tmp" "$2" || return 1
+    gzip -n -9 -c "$3.tmp" > "$3" || return 1
+    rm -f "$3.tmp"
+}
+
 # tar_safe TAR PREFIX: exit 2 unless every member of the archive is a regular file or a
 # directory inside PREFIX/ (no absolute path, no .., no link or device).
 tar_safe() {

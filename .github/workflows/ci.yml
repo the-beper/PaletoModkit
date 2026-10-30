@@ -103,6 +103,9 @@ jobs:
       - name: Which changes run CI
         if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/ci-changes-test.sh
+      - name: Reproducible tarball
+        if: steps.changes.outputs.code == 'true'
+        run: sh packaging/tests/tarball-test.sh
       - name: Install the tools
         if: steps.changes.outputs.code == 'true'
         run: |

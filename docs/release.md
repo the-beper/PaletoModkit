@@ -105,7 +105,7 @@ A release has five files:
 | `PaletoModkit-x86_64.flatpak` | The Flatpak bundle, signed with the repository key. |
 | `SHA256SUMS` | The SHA-256 of the four files above, sorted. |
 
-The files are built on GitHub's runners and are not byte-reproducible: a rebuild of the same tag is a new build, not the same one.
+The files are built on GitHub's runners and are not byte-reproducible: a rebuild of the same tag is a new build, not the same one. Only the packing of the tarball is deterministic (sorted names, owner 0:0, mtime = commit time of the tag, `gzip -n`); the binaries inside it are not.
 
 The run also keeps workflow artifacts for 14 days (30 for the Linux build). The ones to know when you debug a run:
 
@@ -267,9 +267,10 @@ An empty or malformed hash or commit makes `release-validate.sh` stop with exit 
 
 ## Testing the pipeline locally
 
-Both tests need `flatpak`, `ostree` and `gpg` (and `git`, `jq`, `tar`, `curl` for the first); they print `SKIP` and exit 77 when something is missing. They use throwaway keys and folders, no network and no GitHub, and never touch your real Flatpak installation or home. In the simulation `RELEASE_SIM=1` makes the scripts refuse a remote, repository or site on GitHub.
+The first test below needs only GNU tar and gzip; the other two need `flatpak`, `ostree` and `gpg` (and `git`, `jq`, `tar`, `curl` for the first of them) and print `SKIP` and exit 77 when something is missing. They use throwaway keys and folders, no network and no GitHub, and never touch your real Flatpak installation or home. In the simulation `RELEASE_SIM=1` makes the scripts refuse a remote, repository or site on GitHub.
 
 ```bash
+sh packaging/tests/tarball-test.sh           # the tarball packing is deterministic
 sh packaging/tests/release-sim.sh            # the whole pipeline against a local remote and a stub of gh
 sh packaging/tests/release-sim.sh -l         # list the scenarios
 sh packaging/tests/release-sim.sh <name>     # one scenario
