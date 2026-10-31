@@ -156,6 +156,9 @@ jobs:
       - name: Cleaning of dist/ by the release build
         if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/clean-dist-test.sh
+      - name: Version bump
+        if: steps.changes.outputs.code == 'true'
+        run: sh packaging/tests/version-bump-test.sh
       - name: Pre-flight check of the signing environment
         if: steps.changes.outputs.code == 'true'
         run: sh packaging/tests/check-env-test.sh

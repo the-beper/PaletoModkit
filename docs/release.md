@@ -40,12 +40,12 @@ These are GitHub settings. Only the maintainer can change them, from the web pag
 
 The tag must point to a commit that is on `main`. `release-validate.sh` refuses anything else.
 
-1. Bump the version to `X.Y.Z` (or `X.Y.Z-rc.N` for a candidate) in all three places. The check compares every one with the tag:
+1. Bump the version to `X.Y.Z` (or `X.Y.Z-rc.N` for a candidate) with `packaging/version-bump.sh X.Y.Z NOTES`, on a branch with no other uncommitted change to these files. `NOTES` is a plain text file (no markup): the first line is the summary, every other line an item `- text`. The script refuses a version that is not above the current one and the newest release tag of this clone (run `git fetch --tags` first), and a new `<release>` without notes; a version that follows candidates of the same `X.Y.Z` replaces their entries and, when `NOTES` is left out, keeps their notes (a stable version drops the "Release candidate: " opening of the summary). It changes the three places the check compares with the tag, and never commits:
 
    | File | What |
    | :--- | :--- |
    | `Cargo.toml` | `[workspace.package] version`. Every crate must use `version.workspace = true`. |
-   | `Cargo.lock` | Every `paleto-*` package at the same version (run `cargo build` to update it). |
+   | `Cargo.lock` | Every `paleto-*` package at the same version. |
    | `packaging/io.github.the_beper.PaletoModkit.metainfo.xml` | A new first `<release version="X.Y.Z" date="YYYY-MM-DD">`. A candidate needs `type="development"`, a stable release must not have it. A stable release replaces the `<release>` entries of its own candidates: AppStream sorts `X.Y.Z-rc.N` above `X.Y.Z`, and CI's `appstreamcli validate` fails with `releases-not-in-order`. The items of its `<ul>` become the notes of the GitHub release (`packaging/release-notes.py`, with a "Full Changelog" link to the next older `<release>`); the `<p>` is only for software centers. |
 
 2. Merge it to `main` through a pull request, with CI green.
