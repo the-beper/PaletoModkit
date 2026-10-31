@@ -172,10 +172,17 @@ impl ChangesCache {
 
 /// Stops early, with part of the changes, once `stop` says so.
 fn diff_archives(prefix: &str, modded: &Archive, original: &Archive, keys: Option<&Keys>, stop: &dyn Fn() -> bool, out: &mut Vec<Changed>) {
-    let files = |a: &Archive| -> HashMap<String, (String, usize)> {
-        a.walk(0).into_iter().filter(|(_, i)| !a.entries[*i].is_dir()).map(|(p, i)| (p.to_ascii_lowercase(), (p, i))).collect()
+    let (ours, theirs) = (modded.walk(0), original.walk(0));
+    // The parser refuses names that are not plain relative paths. If one gets here anyway, nothing of this archive is
+    // reported (no half diff: a file that looks missing would become a deletion in the package), and without a message,
+    // as there is no channel for one.
+    if ours.iter().chain(&theirs).any(|(p, _)| !crate::vfs::is_plain_entry_path(p)) {
+        return;
+    }
+    let files = |a: &Archive, walk: Vec<(String, usize)>| -> HashMap<String, (String, usize)> {
+        walk.into_iter().filter(|(_, i)| !a.entries[*i].is_dir()).map(|(p, i)| (p.to_ascii_lowercase(), (p, i))).collect()
     };
-    let (ours, theirs) = (files(modded), files(original));
+    let (ours, theirs) = (files(modded, ours), files(original, theirs));
     let mut found = Vec::new();
     for (lower, (path, i)) in &ours {
         if stop() {
@@ -427,6 +434,32 @@ mod tests {
         let mut out = BTreeMap::new();
         walk(&Archive::open(path, None).unwrap(), "", &mut out);
         out
+    }
+
+    #[test]
+    fn a_diff_never_names_an_entry_that_is_not_a_plain_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ed = ArchiveEditor::new("a.rpf");
+        for name in ["good.ydr", "evil.ydr", "empty.ydr"] {
+            ed.add_file(name, vec![1]).unwrap();
+        }
+        let path = dir.path().join("a.rpf");
+        ed.save(&path).unwrap();
+        // The parser cannot produce these names: make the entry list by hand.
+        let mut modded = Archive::open(&path, None).unwrap();
+        let original = Archive::open(&path, None).unwrap();
+        for (name, odd) in [("evil.ydr", "../evil.ydr"), ("empty.ydr", "")] {
+            modded.entries.iter_mut().find(|e| e.name == name).unwrap().name = odd.into();
+        }
+        let mut out = Vec::new();
+        diff_archives("a.rpf", &modded, &original, None, &|| false, &mut out);
+        // Nothing at all: no addition under the odd name, and no deletion of the plain twin in the original.
+        assert!(out.is_empty(), "{out:?}");
+        // Plain names in the same archives give a diff, so the empty result is the check's doing.
+        let mut plain = Archive::open(&path, None).unwrap();
+        plain.entries.iter_mut().find(|e| e.name == "good.ydr").unwrap().name = "other.ydr".into();
+        diff_archives("a.rpf", &plain, &original, None, &|| false, &mut out);
+        assert_eq!(out.len(), 2, "{out:?}");
     }
 
     #[test]

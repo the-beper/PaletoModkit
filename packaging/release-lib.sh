@@ -5,7 +5,7 @@
 # mismatch, missing file, checksum, structure); 3 policy refusal (downgrade, same tag with another commit or
 # content, Flatpak identity change); 4 signing (secret missing, wrong key, gpg or ostree failure); 5 remote
 # conflict or unreadable remote (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead
-# of the release, GitHub answer missing or malformed).
+# of the release, gh-pages below the published release, GitHub answer missing or malformed).
 #   RELEASE_CONF  the pins file (default: release.conf next to the scripts)
 #   REMOTE        git URL of the repository (default: https://github.com/$GITHUB_REPOSITORY.git)
 #   GH_REPO, GH_TOKEN  for the gh wrappers; the token never goes in a URL, a git config or a command line
@@ -318,7 +318,8 @@ release_plan() {
         is_rc "$x" && continue
         if [ -z "$highest" ] || [ "$(semver_cmp "$x" "$highest")" = 1 ]; then highest=$x; fi
     done
-    if [ -n "$highest" ] && [ "$(semver_cmp "$t" "$highest")" = -1 ]; then die 3 "$t is older than the published $highest"; fi
+    # (publish-flatpak repairs the highest release that has its files, which may be below one made by hand: see below)
+    if [ "$mode" = release ] && [ -n "$highest" ] && [ "$(semver_cmp "$t" "$highest")" = -1 ]; then die 3 "$t is older than the published $highest"; fi
     pages_cmp=
     if [ -n "$PG_TAG" ]; then
         pages_cmp=$(semver_cmp "$t" "$PG_TAG")
@@ -329,7 +330,10 @@ release_plan() {
     fi
     if [ "$mode" = publish-flatpak ]; then
         [ -n "$pub_id" ] || die 3 "publish-flatpak needs the published release of $t"
-        [ "$highest" = "$t" ] || die 3 "$t is not the highest published release (${highest:-none})"
+        # It restores gh-pages (also from nothing, with bootstrap) from the highest release that has its files, and from no other: a
+        # release made by hand has no SHA256SUMS to record and is not the one the next version builds on.
+        anchor=$(anchor_release "$d")
+        [ "$anchor" = "$t" ] || die 3 "$t is not the highest published release with all its files (${anchor:-none})"
         if [ "$pages_cmp" = 0 ]; then echo noop; else echo publish; fi
         return 0
     fi
@@ -338,8 +342,38 @@ release_plan() {
         [ "$pages_cmp" = 0 ] || die 3 "$t is published but not matched by gh-pages: use publish-flatpak"
         echo noop
     else
+        # A gh-pages below the highest published stable release with its files is one that was rolled back (a release is published
+        # only after its Pages): signed and valid, but old. A new version must not be built on it, nor on a new chain when gh-pages
+        # is gone (a first publication has no such release). A release without the files (made by hand) is no proof: it was never
+        # on Pages, and whoever can make one can also push gh-pages, so it must not lift the check. The repair is publish-flatpak
+        # (above), which has no such release to build.
+        anchor=$(anchor_release "$d")
+        if [ -n "$anchor" ]; then
+            [ -n "$PG_HEAD" ] || die 5 "gh-pages does not exist, but $anchor is published: a new repository would not continue it. Restore gh-pages, or publish-flatpak for $anchor with bootstrap (docs/release.md, Broken gh-pages)"
+            [ "$(semver_cmp "$PG_TAG" "$anchor")" != -1 ] || die 5 "gh-pages has $PG_TAG, but $anchor is published: gh-pages was rolled back or not updated. Restore it first: publish-flatpak for $anchor (docs/release.md, Broken gh-pages)"
+        fi
         echo publish
     fi
+}
+
+# anchor_release DIR: the highest published stable release that has all its files (the ones the workflow makes), empty if none.
+anchor_release() {
+    ar_left=$(awk -F '\t' '$3 == "false" && $4 == "false" && $2 ~ /^v[0-9A-Za-z.+-]+$/ { print $1 ":" $2 }' "$1/releases.tsv")
+    while [ -n "$ar_left" ]; do
+        ar_best=""
+        for ar_x in $ar_left; do
+            ar_t=${ar_x#*:}
+            semver_valid "$ar_t" || continue
+            ! is_rc "$ar_t" || continue
+            if [ -z "$ar_best" ] || [ "$(semver_cmp "$ar_t" "${ar_best#*:}")" = 1 ]; then ar_best=$ar_x; fi
+        done
+        [ -n "$ar_best" ] || return 0
+        if assets_complete "${ar_best%%:*}"; then
+            echo "${ar_best#*:}"
+            return 0
+        fi
+        ar_left=$(printf '%s\n' $ar_left | grep -vxF "$ar_best" || true)
+    done
 }
 
 # assets_complete RELEASE_ID: the release has exactly SHA256SUMS and RELEASE_FILES, all uploaded.
@@ -362,29 +396,91 @@ reproducible_tar() {
 }
 
 # tar_safe TAR PREFIX: exit 2 unless every member of the archive is a regular file or a
-# directory inside PREFIX/ (no absolute path, no .., no link or device).
+# directory inside PREFIX/ (no absolute path, no empty, . or .. component, no link or device) and no name occurs twice (tar -x keeps
+# the last copy, tar -xO prints all of them, so a hash of the second would not be the file that is unpacked).
 tar_safe() {
     ts=$(mktemp -d "${TMPDIR:-/tmp}/tar-safe.XXXXXX")
     tar -tf "$1" > "$ts/names" 2> /dev/null || { rm -rf "$ts"; die 2 "$1 is not a readable archive"; }
     tar -tvf "$1" 2> /dev/null | cut -c1 > "$ts/types"
     bad=$(grep -Ev "^$2(/|\$)" "$ts/names" | head -n1 || true)
-    badpath=$(grep -E '(^|/)\.\.(/|$)|^/' "$ts/names" | head -n1 || true)
+    badpath=$(grep -E '(^|/)\.\.(/|$)|^/|//|(^|/)\.(/|$)' "$ts/names" | head -n1 || true)
     badtype=$(grep -v '^[-d]$' "$ts/types" | head -n1 || true)
+    dup=$(sed -e 's|^\./||' -e 's|/$||' "$ts/names" | LC_ALL=C sort | uniq -d | head -n1)
     lines=$(wc -l < "$ts/names")
     lines2=$(wc -l < "$ts/types")
     rm -rf "$ts"
     [ -z "$bad" ] || die 2 "$1: member outside $2/: $bad"
     [ -z "$badpath" ] || die 2 "$1: unsafe path: $badpath"
     [ -z "$badtype" ] || die 2 "$1: a member is not a regular file or a directory"
+    [ -z "$dup" ] || die 2 "$1: the member $dup is in the archive twice"
     [ "$lines" = "$lines2" ] || die 2 "$1: unreadable listing"
 }
 
-# extract_repo_tar TAR DIR: unpacks a repo/ archive after tar_safe.
+# check_repo_tar TAR [deltas]: the member names of a repo/ archive are those of an honest OSTree repository (flatpak 1.14.6, ostree
+# 2024.5): only the characters of hex object names, ref names and base64 delta names; only these entries at the top of repo/
+# (deltas and delta-indexes only with "deltas": the unsigned build and the prepared repository may have them, the signed one only
+# once --finish has made its delta, see check_signed_deltas); and no file in refs/ but the heads of the four refs (none under refs/mirrors or refs/remotes). Exit 2 otherwise. Not for
+# the Linux tarball, whose file names are the app's.
+check_repo_tar() {
+    crt=$(tar -tf "$1" 2> /dev/null) || die 2 "$1 is not a readable archive"
+    crt_bad=$(printf '%s\n' "$crt" | LC_ALL=C grep -v '^[A-Za-z0-9._+/-]*$' | head -n1 | tr -c 'A-Za-z0-9._+/\n-' '?' || true)
+    [ -z "$crt_bad" ] || die 2 "$1: a member name has characters that an OSTree repository does not use: $crt_bad"
+    crt_ok="config objects refs state tmp extensions .lock summary summary.sig summary.idx summary.idx.sig summaries"
+    if [ "${2:-}" = deltas ]; then crt_ok="$crt_ok deltas delta-indexes"; fi
+    crt_extra=$(printf '%s\n' "$crt" | awk -F/ '$2 != "" { print $2 }' | LC_ALL=C sort -u | unknown_keys "$crt_ok" | tr '\n' ' ')
+    [ -z "$crt_extra" ] || die 2 "$1: entries at the top of repo/ that an OSTree repository of this release does not have: $crt_extra"
+    crt_extra=$(printf '%s\n' "$crt" | awk '/^repo\/refs\// && !/\/$/' | unknown_keys "repo/refs/heads/$APP_REF repo/refs/heads/$DEBUG_REF repo/refs/heads/appstream/x86_64 repo/refs/heads/appstream2/x86_64" | tr '\n' ' ')
+    [ -z "$crt_extra" ] || die 2 "$1: files in refs/ that are not the heads of the four refs: $crt_extra"
+}
+
+# extract_repo_tar TAR DIR [deltas]: unpacks a repo/ archive after tar_safe and check_repo_tar.
 extract_repo_tar() {
     tar_safe "$1" repo
+    check_repo_tar "$1" "${3:-}"
     mkdir -p "$2"
     tar -C "$2" --no-same-owner --no-same-permissions -xf "$1" || die 2 "cannot unpack $1"
     [ -d "$2/repo/objects" ] || die 2 "$1 holds no OSTree repository"
+}
+
+# delta_b64 HEX: a commit as OSTree writes it in the path of a static delta (base64, no padding, "/" as "_").
+delta_b64() { python3 -I -c 'import base64, sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode().rstrip("=").replace("/", "_"))' "$1"; }
+
+# delta_dir FROM TO, delta_index TO: where a repository keeps the static delta between two commits, and the index of the deltas to TO.
+delta_dir() { dd_f=$(delta_b64 "$1") && dd_t=$(delta_b64 "$2") && printf 'deltas/%s/%s-%s\n' "$(printf '%s' "$dd_f" | cut -c1-2)" "$(printf '%s' "$dd_f" | cut -c3-)" "$dd_t"; }
+delta_index() { di_t=$(delta_b64 "$1") && printf 'delta-indexes/%s/%s.index\n' "$(printf '%s' "$di_t" | cut -c1-2)" "$(printf '%s' "$di_t" | cut -c3-)"; }
+
+# check_deltas REPO [FROM TO SHA]: the static deltas of REPO are none (no FROM) or exactly one, FROM to TO, with its one index and no
+# other file or folder under deltas/ and delta-indexes/: the folder holds the superblock, whose SHA-256 is SHA, and numbered parts.
+# Reads names and one hash; it parses nothing (--finish tries the delta with ostree).
+check_deltas() {
+    cd_have=$(cd "$1" && find deltas delta-indexes -printf '%y %p\n' 2> /dev/null | LC_ALL=C sort)
+    if [ -z "${2:-}" ]; then
+        [ -z "$cd_have" ] || die 2 "$1: static deltas in a repository that has none"
+        return 0
+    fi
+    is_hex "$2" 64 && is_hex "$3" 64 && is_hex "$4" 64 || die 2 "check_deltas: not a commit or a hash"
+    cd_dir=$(delta_dir "$2" "$3") && cd_idx=$(delta_index "$3") || die 2 "$1: cannot name the static delta"
+    cd_extra=$(printf '%s\n' "$cd_have" | awk -v d="$cd_dir" -v i="$cd_idx" '
+        function up(p) { sub(/\/[^\/]*$/, "", p); return p }
+        BEGIN { ok["d deltas"] = ok["d delta-indexes"] = ok["d " up(d)] = ok["d " d] = ok["d " up(i)] = ok["f " i] = 1 }
+        !($0 in ok) && !(index($0, "f " d "/") == 1 && substr($0, length(d) + 4) ~ /^(superblock|[0-9]+)$/) { print; exit }')
+    [ -z "$cd_extra" ] || die 2 "$1: a static delta file or folder that is not the one from $2 to $3: ${cd_extra#* }"
+    printf '%s\n' "$cd_have" | grep -qxF "f $cd_idx" || die 2 "$1: the index of the static delta to $3 is missing"
+    [ -f "$1/$cd_dir/superblock" ] && [ ! -L "$1/$cd_dir/superblock" ] || die 2 "$1: the static delta from $2 to $3 has no superblock"
+    [ "$(sha256_of "$1/$cd_dir/superblock")" = "$4" ] || die 2 "$1: the superblock of the static delta is not the recorded one"
+}
+
+# check_signed_deltas REPO RECORD: REPO has the static deltas that RECORD (flatpak-signed.txt of --finish) says: for a site, the one
+# from the published app commit to the new one, with the recorded SHA-256 of its superblock; for any other mode, none.
+check_signed_deltas() {
+    csd_sha=$(kv_get "$2" delta_superblock_sha256)
+    if [ "$(kv_get "$2" mode)" = site ]; then
+        is_hex "$csd_sha" 64 || die 2 "$2: a release for gh-pages has no delta_superblock_sha256"
+        check_deltas "$1" "$(kv_get "$2" base_app_commit)" "$(kv_get "$2" app_commit)" "$csd_sha"
+    else
+        [ -z "$csd_sha" ] || die 2 "$2: only a release for gh-pages has a static delta"
+        check_deltas "$1"
+    fi
 }
 
 # repo_refs REPO: the refs of an OSTree repository, one per line, sorted.

@@ -88,7 +88,13 @@ How the page is read (the HTML of dev-c.com) can break if the site changes; the 
 - **Restore…** replaces the mods folder with a snapshot. By default the current mods folder is saved as a snapshot first, so a restore can be undone too.
 - **Delete** removes a snapshot; the mods folder stays as it is.
 
-A restore copies the snapshot beside `mods`, swaps the two folders, then removes the old one; if it stops half way, the next change puts the old mods folder back. A mods folder that is a link (to another drive, say) is not restored, since the swap would replace the link with a real folder: remove the link first (the folder it points to is kept), or copy the snapshot's `mods` folder into the linked folder by hand. Snapshots are kept in the game folder's `mods_snapshots/`. On btrfs, XFS and bcachefs a snapshot is instant and takes no space until files change (60 GB in a third of a second); on other filesystems it is a full copy, as big as the mods folder. The window says which applies.
+How saving and restoring behave:
+
+- A restore copies the snapshot beside `mods`, folder by folder, never through a link (a link inside a snapshot comes back as a link), and flushes every file to disk; then it swaps the two folders by name and removes the old one. If it stops half way, the next change puts the old mods folder back: the swap is recoverable, not atomic.
+- A pipe, a socket or a device in the snapshot (or in the mods folder when saving one), and a name that is not valid UTF-8, are refused with a message that names them, and nothing is changed. Copied folders keep their permissions.
+- If something is found moved into the folder the restore is filling, or in its place, the restore stops and leaves that folder where it is (named in the message, `.paleto-…-mods.new` in the game folder) instead of deleting it: look at it, then remove it yourself. The check looks at the new folder itself: a folder moved into it under another name, by something writing in the game folder during the restore, is not noticed if the restore then fails for another reason, and goes with the new folder.
+- A mods folder that is a link (to another drive, say) is not restored, since the swap would replace the link with a real folder: remove the link first (the folder it points to is kept), or copy the snapshot's `mods` folder into the linked folder by hand.
+- Snapshots are kept in the game folder's `mods_snapshots/`. On btrfs, XFS and bcachefs a snapshot is instant and takes no space until files change (60 GB in a third of a second); on other filesystems it is a full copy, as big as the mods folder. The window says which applies.
 
 ## One change at a time, and interrupted changes
 
@@ -119,5 +125,7 @@ The `.paleto` folder in the game folder holds the lock (`lock`) and the records 
 **ScriptHookVDotNet mods (a `scripts` folder with `.dll` files) do nothing, or the game stops at startup.** They need the real .NET Framework 4.8 in the game's Wine prefix: **Mods in game** says whether it is there, and **Prefix tweaks…** (the wine-red button at the top right) installs it ([mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). If the game says "Support for Windows XP and Vista has ended", the prefix was left on an old Windows version; the same tool sets it back.
 
 **Steam reports changed files.** Paleto Modkit edits only the mods folder, but other tools (or deleting game files outside `mods/` by hand) may change the game's own files. **Verify integrity of game files** in Steam puts them back; your mods folder is not touched by it.
+
+**A warning says a folder "holds … names that differ only in case".** Windows does not tell `Foo` and `foo` apart, but Linux does, so a game folder may hold both (two mods unpacked into one, a copy made by hand). A package, an add-on pack or an extraction that names one of them in another case (`scripts\FOO\a.asi`) lands in the first in sorted order, which the warning names, and the install log shows the warning. Rename or remove the one you do not want, so that the game and the tool see the same folder. A name that matches exactly never warns.
 
 **An archive opens but cannot be edited: "… is in the archive twice".** Another tool made it with two entries the game cannot tell apart (names differing only in upper and lower case, or a file and a folder of one name). Saving it would lose one of them, so Paleto Modkit only reads it. Rebuild the archive with the tool that made it, or extract it and make a new one.

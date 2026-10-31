@@ -7,8 +7,9 @@
 #   FLATPAK_TEST_BASE=dir   where the scratch tree goes (default $TMPDIR or /tmp; a disk is kinder than a tmpfs)
 #   KEEP=1                  keep the scratch tree; VERBOSE=1 print the log of a failed step
 # Needs flatpak, ostree, gpg, tar, python3; exits 77 (skipped) if one is missing. Exit 1 if a check fails.
-# What it proves: signing, summary and parent chain (there are no static deltas: see flatpak-sign.sh); install and update by a client that checks
-# signatures; the refusal of a corrupted object, an unsigned summary, a commit signed by another key, an unsigned
+# What it proves: signing, summary and parent chain; install and update by a client that checks signatures, by the one static delta
+# of a release when it is on the published head and by objects when it is not; the refusal of a corrupted or unsigned delta by
+# --finish; the refusal of a corrupted object, an unsigned summary, a commit signed by another key, an unsigned
 # commit under a signed summary, an older repository and a corrupted bundle; the anti-downgrade rule of the
 # signing script. What it cannot: the real build with the Flathub SDK, runtime dependencies (--no-deps), the HTTP
 # serving of GitHub Pages (a throwaway python http.server on 127.0.0.1 stands in: libostree trusts the objects of a
@@ -112,19 +113,23 @@ mkbuild() {
 }
 
 # sign VERSION SITE OUT [KEYFILE] [flatpak-sign.sh options]: sign the build of VERSION on top of the site SITE, in
-# the steps of the signing jobs (prepare and check-prepared without the secret, sign with it, finish without it); the
-# exit code is the one of the first step that fails. Work folders: OUT.pwork, OUT.prep, OUT.work, OUT.res, OUT.fwork.
+# the steps of the signing jobs (prepare, check-prepared and unpack without the secret, sign with it, finish without it); the
+# exit code is the one of the first step that fails. Work folders: OUT.pwork, OUT.prep, OUT.cwork, OUT.checked, OUT.swork, OUT.res, OUT.fwork.
 sign() {
     v=$1 site=$2 out=$3 keyf=${4:-$KEYS/K.sec}
     shift 4
     man=$BASE/m/$v/release-manifest.txt
     pin=$(sha256sum "$man" | cut -d' ' -f1) # the job output of the verify job
-    sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
+    GITHUB_OUTPUT="$out.prep.gho" sh "$PKG/flatpak-sign.sh" --prepare --tag "v$v" --commit "$COMMIT" --manifest "$man" \
         --unsigned "$BASE/b/$v/flatpak-unsigned-repo.tar" --site "$site" --work "$out.pwork" --out "$out.prep" "$@" || return $?
-    MANIFEST_SHA256=$pin sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.work" --site "$site" "$@" || return $?
-    FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") GITHUB_OUTPUT="$out.sign.gho" sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.work" --out "$out.res" || return $?
-    MANIFEST_SHA256=$pin RESULT_SHA256=$(sed -n 's/^result_sha256=//p' "$out.sign.gho") sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --work "$out.fwork" --out "$out" || return $?
-    sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.work"
+    ppin=$(sed -n 's/^prepared_sha256=//p' "$out.prep.gho") # the job output of the prepare job
+    MANIFEST_SHA256=$pin PREPARED_SHA256=$ppin GITHUB_OUTPUT="$out.check.gho" sh "$PKG/flatpak-sign.sh" --check-prepared --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.prep" --work "$out.cwork" --out "$out.checked" --site "$site" "$@" || return $?
+    ckp=$(sed -n 's/^checked_sha256=//p' "$out.check.gho") # the job output of the check job
+    CHECKED_SHA256=$ckp PREPARED_SHA256=$ppin sh "$PKG/flatpak-sign.sh" --unpack --tag "v$v" --commit "$COMMIT" --in "$out.checked" --work "$out.swork" || return $?
+    FLATPAK_GPG_PRIVATE_KEY=$(cat "$keyf") GITHUB_OUTPUT="$out.sign.gho" sh "$PKG/flatpak-sign.sh" --sign --tag "v$v" --commit "$COMMIT" --work "$out.swork" --out "$out.res" || return $?
+    MANIFEST_SHA256=$pin CHECKED_SHA256=$ckp PREPARED_SHA256=$ppin RESULT_SHA256=$(sed -n 's/^result_sha256=//p' "$out.sign.gho") sh "$PKG/flatpak-sign.sh" --finish --tag "v$v" --commit "$COMMIT" --manifest "$man" --in "$out.res" --checked "$out.checked" --work "$out.fwork" --out "$out" || return $?
+    sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.swork"
+    sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.cwork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.pwork"
     sh "$PKG/flatpak-sign.sh" --cleanup --work "$out.fwork"
 }
@@ -195,6 +200,17 @@ nothing_installed() { [ "$(installed "$1")" = none ]; }
 publish() { rm -rf "${WEB:?}/$1"; cp -a "$2" "$WEB/$1"; }
 # forget_summary CLIENT: the client must fetch the summary again
 forget_summary() { rm -rf "$BASE/clients/$1/repo/tmp/cache"; }
+# mark: where the log of the web server is now. since MARK: what was requested after that.
+mark() { wc -l < "$BASE/http.log"; }
+since() { tail -n +$(($1 + 1)) "$BASE/http.log"; }
+# changed_filez NEW OLD: the objects of the files of the app that the head of NEW has and the head of OLD has not (objects/xx/yyyy.filez)
+changed_filez() {
+    ostree --repo="$1/repo" ls -R -C "$APP_REF" / | awk '$1 ~ /^-/ { print $5 }' | LC_ALL=C sort -u > "$BASE/ids.new"
+    ostree --repo="$2/repo" ls -R -C "$APP_REF" / | awk '$1 ~ /^-/ { print $5 }' | LC_ALL=C sort -u > "$BASE/ids.old"
+    LC_ALL=C comm -23 "$BASE/ids.new" "$BASE/ids.old" | sed 's|^\(..\)\(.*\)$|objects/\1/\2.filez|'
+}
+# delta_sha SITE: the SHA-256 of the superblock of the one static delta of the repository of SITE
+delta_sha() { sha256sum "$(find "$1/repo/deltas" -name superblock)" | cut -d' ' -f1; }
 
 # ---- the test -------------------------------------------------------------------------------------------------
 
@@ -227,12 +243,34 @@ site_from "$BASE/o2" 1.1.0 "$BASE/P2"
 C2=$(head_of "$BASE/P2")
 check "the new commit differs" test "$C1" != "$C2"
 check "the parent of C2 is C1" same "$C1" "$(ostree --repo="$BASE/P2/repo" rev-parse "$APP_REF^")"
-# no static delta is made (they would have to be made with the key present or left out of the signed summary)
-check "no static delta was generated" sh -c "ostree --repo='$BASE/P2/repo' static-delta list | grep -q 'No static deltas'"
+# --finish made one static delta, from the published head to the new one, after the signing (the signed summary says indexed-deltas)
+check "one static delta, from C1 to C2" same "$C1-$C2" "$(ostree --repo="$BASE/P2/repo" static-delta list)"
+check "and its index" test "$(find "$BASE/P2/repo/delta-indexes" -type f | wc -l)" = 1
+check "flatpak-signed.txt has the hash of its superblock" same "$(delta_sha "$BASE/P2")" "$(sed -n 's/^delta_superblock_sha256=//p' "$BASE/o2/flatpak-signed.txt")"
+check "the first publication has no delta" test ! -e "$BASE/P1/repo/deltas" -a ! -e "$BASE/P1/repo/delta-indexes"
 check "the history is kept (two commits)" same 2 "$(ostree --repo="$BASE/P2/repo" log "$APP_REF" | grep -c '^commit ')"
+# a client on C1 reads the delta and no file object that changed; the control, below, has no delta and must fetch them
+changed_filez "$BASE/P2" "$BASE/P1" > "$BASE/changed.12"
+check "the update changes file objects (the test proves something)" test -s "$BASE/changed.12"
+rm -rf "$BASE/P2n"
+cp -a "$BASE/P2" "$BASE/P2n"
+rm -rf "$BASE/P2n/repo/deltas" "$BASE/P2n/repo/delta-indexes"
+publish PN "$BASE/P1"
+check "remote-add (control)" remote clientn PN
+check "install 1.0.0 (control)" install_app clientn
+publish PN "$BASE/P2n"
+M=$(mark)
+check "update without a delta (control)" fp clientn update --noninteractive --no-deps --no-related "$ID//master"
+since "$M" > "$BASE/update.control.log"
+check "the control has C2" same "$C2" "$(installed clientn)"
+check "the control fetched the changed objects" grep -qF -f "$BASE/changed.12" "$BASE/update.control.log"
 publish P "$BASE/P2"
+M=$(mark)
 check "update" fp client update --noninteractive --no-deps --no-related "$ID//master"
+since "$M" > "$BASE/update.log"
 check "the installed commit is C2" same "$C2" "$(installed client)"
+check "the update fetched the superblock of the delta" grep -q 'deltas/.*/superblock' "$BASE/update.log"
+refuse "and no object that changed" grep -qF -f "$BASE/changed.12" "$BASE/update.log"
 check "the client's repository has C1 as the parent of C2" same "$C1" "$(ostree --repo="$BASE/clients/client/repo" rev-parse "t:$APP_REF^")"
 check "a signed bundle was made" test -s "$BASE/o2/PaletoModkit-x86_64.flatpak"
 
@@ -250,9 +288,29 @@ site_from "$BASE/o6" 1.2.0 "$BASE/P3"
 CD2=$(head_of "$BASE/P3")
 check "the parent of the new commit is the one the client has" same "$CD1" "$(ostree --repo="$BASE/P3/repo" rev-parse "$APP_REF^")"
 publish PD "$BASE/P3"
+M=$(mark)
 check "update from the repository with deltas" fp clientd update --noninteractive --no-deps --no-related "$ID//master"
+since "$M" > "$BASE/update.d.log"
 check "the client has the new commit" same "$CD2" "$(installed clientd)"
-check "the old deltas are not carried into the new repository" sh -c "ostree --repo='$BASE/P3/repo' static-delta list | grep -q 'No static deltas'"
+check "the update used the new delta" grep -q 'deltas/.*/superblock' "$BASE/update.d.log"
+check "the old deltas are not carried into the new repository: only the new one is there" same "$CD1-$CD2" "$(ostree --repo="$BASE/P3/repo" static-delta list)"
+
+echo "# 5c: a client two releases behind updates by objects"
+publish PB "$BASE/P1"
+check "remote-add (behind)" remote clientb PB
+check "install 1.0.0 (behind)" install_app clientb
+check "sign 1.2.0 on the published 1.1.0" sign 1.2.0 "$BASE/P2" "$BASE/o7" "$KEYS/K.sec"
+site_from "$BASE/o7" 1.2.0 "$BASE/P4"
+C4=$(head_of "$BASE/P4")
+check "the delta of 1.2.0 leads from C2" same "$C2-$C4" "$(ostree --repo="$BASE/P4/repo" static-delta list)"
+changed_filez "$BASE/P4" "$BASE/P1" > "$BASE/changed.14"
+publish PB "$BASE/P4"
+M=$(mark)
+check "update (behind)" fp clientb update --noninteractive --no-deps --no-related "$ID//master"
+since "$M" > "$BASE/update.behind.log"
+check "the client has the newest commit" same "$C4" "$(installed clientb)"
+refuse "the delta was not used (it leads from the commit it does not have)" grep -q 'deltas/.*/superblock' "$BASE/update.behind.log"
+check "the changed objects were fetched" grep -qF -f "$BASE/changed.14" "$BASE/update.behind.log"
 
 echo "# 6: the bundle"
 check "install the bundle (own installation)" fp bundle install --noninteractive --no-deps --no-related --bundle "$BASE/o2/PaletoModkit-x86_64.flatpak"
@@ -335,6 +393,21 @@ rc=0
 sign 1.2.0 "$BASE/P2" "$BASE/o5" "$KEYS/A.sec" > "$LOG" 2>&1 || rc=$?
 check "signing with another key exits 4" same 4 "$rc"
 check "no keyring is left behind" test -z "$(find "$BASE/rt" -maxdepth 1 -name 'gnupg.*' -o -maxdepth 1 -name 'flatpak-sign.*'; find /dev/shm -maxdepth 1 -name 'paleto-gnupg.*' -user "$(id -u)")"
+
+echo "# 9: --finish refuses a delta that does not take a client from the published commit to the new one"
+# (a stand-in for ostree spoils the delta of the finish step; the other steps run the real one)
+fx_delta_shim "$BASE/shim.corrupt" corrupt
+fx_delta_shim "$BASE/shim.unsigned" unsigned
+rc=0
+(PATH="$BASE/shim.corrupt:$PATH"; sign 1.2.0 "$BASE/P2" "$BASE/o8" "$KEYS/K.sec") > "$BASE/fin.corrupt.log" 2>&1 || rc=$?
+check "a corrupted part of the delta: finish exits 4" same 4 "$rc"
+check "and says it is the delta" grep -q 'does not take a client' "$BASE/fin.corrupt.log"
+check "nothing of the repository was handed over (corrupted part)" test ! -e "$BASE/o8/flatpak-signed-repo.tar"
+rc=0
+(PATH="$BASE/shim.unsigned:$PATH"; sign 1.2.0 "$BASE/P2" "$BASE/o9" "$KEYS/K.sec") > "$BASE/fin.unsigned.log" 2>&1 || rc=$?
+check "a delta made before the signing (no signature in it): finish exits 4" same 4 "$rc"
+check "and says it is the delta" grep -q 'does not take a client' "$BASE/fin.unsigned.log"
+check "nothing of the repository was handed over (delta without signature)" test ! -e "$BASE/o9/flatpak-signed-repo.tar"
 
 echo "# the real installation"
 REAL_AFTER=$(real_listing)

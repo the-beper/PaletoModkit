@@ -13,52 +13,74 @@
 #       hash of the tar). --site: the tag must be above the published version (the same commit
 #       again: nothing is signed, skip=1); --bootstrap: the first publication, DIR of --site is empty; --fresh: a
 #       repository of its own (release candidates, tests). Refuses to run with the secret in the environment.
-#   flatpak-sign.sh --check-prepared --tag vX.Y.Z --commit SHA --manifest release-manifest.txt --in DIR --work DIR
+#   flatpak-sign.sh --check-prepared --tag vX.Y.Z --commit SHA --manifest release-manifest.txt --in DIR --work DIR --out DIR
 #                   (--site DIR [--bootstrap] | --fresh) [--check-remote]
-#                                                         job sign-flatpak, first, NO secret (refuses to run with it)
-#       DIR is the --out of --prepare, which is no proof of anything (another job made it), and the --site is gh-pages
+#                                                         job check-flatpak, NO secret (refuses to run with it)
+#       DIR of --in is the --out of --prepare, which is no proof of anything (another job made it), and the --site is gh-pages
 #       fetched again by this job (packaging/release-pages.sh fetch), so the base does not come from the preparation
 #       either. Checks the hash of the tar against its description, that it is for this tag and commit, that its mode is
-#       the one of the flags, and (--check-remote) that gh-pages is still at the base the preparation had; verifies the
-#       published repository like --prepare does; unpacks the tar; checks its refs and its config (exactly the expected
+#       the one of the flags, and (--check-remote) that gh-pages is still at the base the preparation had; a skip=1 in the
+#       description is believed only if this gh-pages has this tag and commit (exit 5), else it ends here; verifies the
+#       published repository like --prepare does; unpacks the tar (member names, top-level entries and files of refs/ as
+#       an honest repository has them, see check_repo_tar); checks its refs and its config (exactly the expected
 #       one, see repo_config); deletes the old summary files and static deltas; compares the content checksums of the app and Debug commits
 #       with release-manifest.txt, which the verify job made from the build output on its own; and checks every head that is
 #       not the published one (the new commits): parent, ref binding, exactly the metadata keys of an honest run, xa.ref,
 #       xa.metadata and the sizes as the verified build had them, subject and body, no detached metadata, date; and that
-#       the other heads are byte for byte the published ones. A release candidate goes with --fresh and a stable release never does. Writes
-#       DIR of --work with the repository, the list of refs and commits that --sign may sign (the new heads, as they are
-#       now) and base.txt (the mode, gh-pages and the published heads that were checked).
+#       the other heads are byte for byte the published ones. A release candidate goes with --fresh and a stable release never does.
+#       Everything the key will ever read is checked here. Writes to --out, for the signing job: flatpak-checked-repo.tar (the
+#       checked repository, tarred by this job from a plain tree), signlist (the refs and commits that --sign may sign: the new
+#       heads, as they are now), prepared.txt (the description of the preparation), base.txt (the mode, gh-pages and the published
+#       heads that were checked) and flatpak-check-result.txt, which holds the hash of each of them (with skip=1 only prepared.txt
+#       and the record). The hash of the record goes to GITHUB_OUTPUT as checked_sha256.
+#   flatpak-sign.sh --unpack --tag vX.Y.Z --commit SHA --in DIR --work DIR     job sign-flatpak, first, NO secret (refuses to run with it)
+#       DIR of --in is the --out of --check-prepared, a run artifact that a compromised job can replace. Reads nothing with ostree,
+#       gpg, flatpak or git and uses no network. Exit 2 before it reads anything else unless the hash of
+#       flatpak-check-result.txt is CHECKED_SHA256 (the job output of check-flatpak; empty is no pin) and the one of prepared.txt
+#       is PREPARED_SHA256 (the job output of prepare-flatpak: the check job cannot change what the key signs); then: the record
+#       is for this tag and commit, the tar and signlist have the hashes it records, signlist has only lines of a known ref and a
+#       commit and each is the commit prepared.txt names, the tar has only config, objects (named as an archive repository names
+#       them), refs and an empty tmp (no summary, state or lock), every head prepared.txt names is a commit object whose SHA-256
+#       is its id and is the ref in the tar, no other ref is, the detached metadata files (.commitmeta, .commitmeta2) are exactly
+#       those prepared.txt lists with their hashes, a commit to sign has none of its own; then the tar is unpacked into an empty
+#       --work (extract_repo_tar: no link, no static delta) and its config is the expected one. This is a step of its own: the secret is in the environment
+#       of the --sign step, where the children of the shell can read it.
 #   flatpak-sign.sh --sign --tag vX.Y.Z --commit SHA --work DIR --out DIR     job sign-flatpak, the secret, and only it
-#       DIR of --work is the one of --check-prepared. Imports the key into a private keyring in memory (/dev/shm), checks
+#       DIR of --work is the one of --unpack. Imports the key into a private keyring in memory (/dev/shm), checks
 #       that it is the pinned one, signs the commits of the list (ostree gpg-sign) and the summary and its index,
 #       removes the keyring. Writes to --out flatpak-sign-result-repo.tar, flatpak-pubkey.gpg (exported from the
-#       keyring), flatpak-prepared.txt, flatpak-base.txt (base.txt of --check-prepared), flatpak-sign-result.txt. Nothing
-#       is unpacked, made or generated here: no commit, no appstream data, no static delta. The residual surface, with the
-#       key at hand: ostree reading the commit objects to sign them and flatpak build-update-repo reading the commit
-#       metadata of the refs to write the summary: no file of the app is read, parsed or interpreted, and what it does read
-#       was checked by --check-prepared (config, commit metadata) or deleted (the old summary files, deltas) before.
-#       NO STATIC DELTAS: a delta embeds the signature of its commit, so it can only be made after the commit is
-#       signed, and the signed summary has to list it, so the summary would have to be signed again afterwards (tried:
-#       deltas made after the signature, without the key, are not in the signed summary and clients never use them;
-#       a regenerated summary has no signature and clients refuse it). Making them with the key present would read
-#       every content object of the build with the key at hand, so there are none: an update downloads the changed
-#       objects (the compressed files that differ) instead of a delta. To bring deltas back: a keyless job that
-#       makes them from the signed repository, then a second signing step that only signs the summary and its index.
-#   flatpak-sign.sh --finish --tag vX.Y.Z --commit SHA --manifest release-manifest.txt --in DIR --work DIR --out DIR
+#       keyring) and flatpak-sign-result.txt. Nothing is unpacked, made or generated here: no commit, no appstream data, no
+#       static delta. The residual surface, with the key at hand: ostree reading the commit objects to sign them and flatpak
+#       build-update-repo reading the commit metadata of the refs to write the summary: no file of the app is read, parsed or
+#       interpreted, and what it does read was checked by --check-prepared (config, commit metadata) or deleted (the old
+#       summary files, deltas) before, on another machine.
+#       NO STATIC DELTAS here: a delta embeds the signature of its commit, so it can only be made after the signing, and
+#       making it with the key present would read every content object of the build with the key at hand. --finish makes it,
+#       without the key (the signed summary says indexed-deltas, so it needs no change and no second signature).
+#   flatpak-sign.sh --finish --tag vX.Y.Z --commit SHA --manifest release-manifest.txt --in DIR --checked DIR --work DIR --out DIR
 #                                                              job finish-flatpak, NO secret, another machine
-#       DIR of --in is the --out of --sign. Verifies the signed repository with the public key only (the one exported
-#       from the signing keyring), that its config is the expected one and its summary has only the expected keys, that it
-#       is the prepared one plus signatures, that every ref continues the published head of flatpak-base.txt (the record of
-#       the signing job, not the description of the preparation), and that its content is the verified build's; makes the
-#       bundle and writes to --out: flatpak-signed-repo.tar, PaletoModkit-x86_64.flatpak, flatpak-pubkey.gpg,
-#       flatpak-signed.txt (with skip=1 only that file, when --prepare found the tag published).
+#       DIR of --in is the --out of --sign, DIR of --checked the --out of --check-prepared. Verifies the signed repository with
+#       the public key only (the one exported from the signing keyring), that its config is the expected one and its summary has
+#       only the expected keys, that it is the prepared one plus signatures, that every ref continues the published head of
+#       base.txt (the record of the check job, not the description of the preparation or anything the signing job says), and
+#       that its content is the verified build's. With a published head (site mode) it then makes the static delta from the
+#       published app commit to the new one (app ref only; ostree static-delta generate and reindex) and tries it like a
+#       client with only the public key: in a scratch repository it pulls the published commit, then the new one with static
+#       deltas required, and the result must be fsck-clean and the verified build; the summary files and every other name of the
+#       repository must be unchanged and the one delta and its one index the only ones (check_deltas). A first publication
+#       and a repository of its own have none. Makes the bundle and writes to --out: flatpak-signed-repo.tar,
+#       PaletoModkit-x86_64.flatpak, flatpak-pubkey.gpg, flatpak-signed.txt (with delta_superblock_sha256, empty without a delta;
+#       with skip=1 only that file, when --prepare found the tag published).
 #   flatpak-sign.sh --cleanup [--work DIR]   stops gpg agents and removes the temporary keyrings and the work
 #                                            folder (run it in an "if: always()" step)
-# MANIFEST_SHA256 (environment): the hash of release-manifest.txt that the verify job pinned as a job output; --check-prepared
-# and --finish refuse (exit 2) a manifest with another hash, or without a hash, before they read it. RESULT_SHA256: the hash of
-# flatpak-sign-result.txt that --sign wrote to GITHUB_OUTPUT (that file holds the hashes of everything else --finish reads from
-# the artifact of the sign job, which a compromised job could replace); --finish checks it first. --finish writes signed_sha256
-# (the hash of flatpak-signed.txt) to GITHUB_OUTPUT for the publish job.
+# Every file that goes from one job to the next is a run artifact, which a compromised job can replace, so each hop has a pin, the
+# hash of a record that the job that made it wrote to GITHUB_OUTPUT (the environment variables below hold the pins, and a file is
+# refused with exit 2, before it is read, if its pin is empty or differs). MANIFEST_SHA256: release-manifest.txt (verify), checked by
+# --check-prepared and --finish. CHECKED_SHA256: flatpak-check-result.txt (check-flatpak), checked by --unpack and --finish; the record
+# holds the hash of every other file of the --out of --check-prepared, and --finish checks prepared.txt and base.txt against it.
+# RESULT_SHA256: flatpak-sign-result.txt (sign-flatpak, holds the hashes of the signed repository and the public key), checked by
+# --finish. PREPARED_SHA256: flatpak-prepared.txt (prepare-flatpak, the description of the preparation, with the id of every head), checked by
+# --check-prepared, --unpack and --finish. --finish writes signed_sha256 (the hash of flatpak-signed.txt) to GITHUB_OUTPUT for the publish job.
 # The key must be the one of FLATPAK_KEY_FPR in release.conf and, with --site, the published one: no rotation.
 # Temporary files go to $RUNNER_TEMP (else $TMPDIR, else /tmp). Exit codes: see release-lib.sh (4: signing).
 set -eu
@@ -73,7 +95,7 @@ COMMIT_FUTURE_MARGIN=3600
 [ $# -ge 1 ] || die 1 "usage: see the header of $0"
 CMD=$1
 shift
-TAG="" COMMIT="" MANIFEST="" UNSIGNED="" SITE="" OUT="" IN="" WORK="" BOOTSTRAP=0 FRESH=0 CHECK_REMOTE=0
+TAG="" COMMIT="" MANIFEST="" UNSIGNED="" SITE="" OUT="" IN="" CHK="" WORK="" BOOTSTRAP=0 FRESH=0 CHECK_REMOTE=0
 while [ $# -gt 0 ]; do
     case $1 in
         --tag) TAG=${2:?}; shift 2 ;;
@@ -86,12 +108,16 @@ while [ $# -gt 0 ]; do
         --check-remote) CHECK_REMOTE=1; shift ;;
         --work) WORK=${2:?}; shift 2 ;;
         --in) IN=${2:?}; shift 2 ;;
+        --checked) CHK=${2:?}; shift 2 ;;
         --out) OUT=${2:?}; shift 2 ;;
         *) die 1 "unknown argument $1" ;;
     esac
 done
 case $WORK in
     / | . | ..) die 1 "--work $WORK is not a work folder" ;;
+esac
+case $OUT in
+    / | . | ..) die 1 "--out $OUT is not an output folder" ;;
 esac
 
 if [ "$CMD" = --cleanup ]; then
@@ -106,13 +132,16 @@ fi
 
 [ -n "$WORK" ] || die 1 "--work is needed"
 release_init
-for c in flatpak ostree gpg; do command -v "$c" > /dev/null || die 1 "$c is needed"; done
+# --unpack reads nothing with these tools and must run without them
+if [ "$CMD" != --unpack ]; then
+    for c in flatpak ostree gpg; do command -v "$c" > /dev/null || die 1 "$c is needed"; done
+fi
 FPR=$(conf_hex FLATPAK_KEY_FPR 40 | tr 'a-f' 'A-F')
 unset GNUPGHOME
 
 # ---- the secret is in the environment of --sign and of nothing else ---------------------------------------------
 case $CMD in
---prepare | --check-prepared | --finish)
+--prepare | --check-prepared | --unpack | --finish)
     [ -z "${FLATPAK_GPG_PRIVATE_KEY:-}" ] || die 1 "FLATPAK_GPG_PRIVATE_KEY is set: $CMD reads untrusted data and must run without the secret"
     ;;
 esac
@@ -193,7 +222,7 @@ prepare() {
     [ "$(kv_get "$MANIFEST" tag)" = "$TAG" ] && [ "$(kv_get "$MANIFEST" commit)" = "$COMMIT" ] || die 2 "the manifest is not for $TAG at $COMMIT"
     UNSIGNED_SHA=$(sha256_of "$UNSIGNED")
     [ "$UNSIGNED_SHA" = "$(kv_get "$MANIFEST" flatpak_unsigned_tar_sha256)" ] || die 2 "the unsigned repository is not the verified one"
-    extract_repo_tar "$UNSIGNED" "$WORK/u"
+    extract_repo_tar "$UNSIGNED" "$WORK/u" deltas
     check_unsigned_repo "$WORK/u/repo" "$VERSION"
 
     # The published state.
@@ -211,7 +240,7 @@ prepare() {
     fi
 
     # The new commits, unsigned, on top of the published repository, with summary and appstream data.
-    PREP_SHA="" PREP_APP="" PREP_DEBUG=""
+    PREP_SHA="" PREP_APP="" PREP_DEBUG="" PREP_AS="" PREP_AS2="" PREP_META=""
     if [ "$SKIP" = 0 ]; then
         if [ "$MODE" = site ]; then
             cp -a "$SITE/repo" "$WORK/repo"
@@ -230,8 +259,11 @@ prepare() {
         }
         rm -rf "$WORK/repo/tmp"
         mkdir "$WORK/repo/tmp"
+        PREP_META=$(commitmeta_dir "$WORK/repo")
         PREP_APP=$(ostree --repo="$WORK/repo" rev-parse "$APP_REF")
         PREP_DEBUG=$(ostree --repo="$WORK/repo" rev-parse "$DEBUG_REF")
+        if repo_refs "$WORK/repo" | grep -qxF appstream/x86_64; then PREP_AS=$(ostree --repo="$WORK/repo" rev-parse appstream/x86_64); fi
+        if repo_refs "$WORK/repo" | grep -qxF appstream2/x86_64; then PREP_AS2=$(ostree --repo="$WORK/repo" rev-parse appstream2/x86_64); fi
         if [ -n "$BASE_APP" ]; then
             [ "$(ostree --repo="$WORK/repo" rev-parse "$APP_REF^")" = "$BASE_APP" ] || die 2 "the new app commit does not continue the published one"
             [ "$(ostree --repo="$WORK/repo" rev-parse "$DEBUG_REF^")" = "$BASE_DEBUG" ] || die 2 "the new Debug commit does not continue the published one"
@@ -255,12 +287,34 @@ prepare() {
         echo "prepared_tar_sha256=$PREP_SHA"
         echo "prepared_app_commit=$PREP_APP"
         echo "prepared_debug_commit=$PREP_DEBUG"
+        echo "prepared_appstream_commit=$PREP_AS"
+        echo "prepared_appstream2_commit=$PREP_AS2"
+        printf '%s\n' "$PREP_META" | sed -n 's/^./commitmeta=&/p'
     } > "$OUT/flatpak-prepared.txt"
+    job_output prepared_sha256 "$(sha256_of "$OUT/flatpak-prepared.txt")"
     if [ "$SKIP" = 1 ]; then echo "$TAG is already published for this commit: nothing to sign"; else echo "prepared $TAG ($MODE)"; fi
 }
 
 # base_head FILE REF: the published head of REF in a base record (flatpak-base.txt), empty if there is none.
 base_head() { awk -v r="$2" '$1 == "head" && $2 == r { print $3; exit }' "$1"; }
+
+# commitmeta_dir REPO: "objects/xx/yyyy.commitmeta[2] SHA-256" for every detached metadata file of REPO, sorted. flatpak build-update-repo
+# parses the one of every head with the key at hand, so the description pins them all (ostree.gpgsigs of the published commits,
+# xa.reachable and the sizes that flatpak writes), and --unpack accepts exactly this set.
+commitmeta_dir() {
+    (cd "$1" && find objects -type f \( -name '*.commitmeta' -o -name '*.commitmeta2' \) | LC_ALL=C sort | while read -r cm_f; do printf '%s %s\n' "$cm_f" "$(sha256_of "$cm_f")"; done)
+}
+
+# prepared_id FILE REF: the commit of REF that the description FILE names (empty if it names none)
+prepared_id() {
+    case $2 in
+        "$APP_REF") pi_key=prepared_app_commit ;;
+        "$DEBUG_REF") pi_key=prepared_debug_commit ;;
+        appstream/x86_64) pi_key=prepared_appstream_commit ;;
+        *) pi_key=prepared_appstream2_commit ;;
+    esac
+    kv_get "$1" "$pi_key"
+}
 
 # prepared_state FILE: reads the description of a prepared repository and checks it is for TAG and COMMIT
 prepared_state() {
@@ -274,10 +328,47 @@ prepared_state() {
     SKIP=$(kv_get "$P" skip)
 }
 
-# ---- check-prepared: before the key exists, in the job that signs ----------------------------------------------------
+# ---- check-prepared: before the key exists, in a job of its own -----------------------------------------------------
 # The prepared repository comes from another job: its description is no proof. What it holds is compared with the
 # manifest of the verify job (which parsed the build output on its own) and with gh-pages as this job fetched it, and the
-# refs and commits to sign are named. Everything the key will sign is checked here, so --sign parses nothing of the data.
+# refs and commits to sign are named. Everything the key will sign is checked here, so --sign parses nothing of the data,
+# and the checked repository leaves this job as a tar of its own making, with a record whose hash is a job output.
+
+# check_output: --out for the signing job and for --finish: the checked repository (tarred here, from the plain tree in $WORK, not the
+# archive of the preparation), the sign list, the description and the base, and the record with the hash of each (all but the
+# description and the record are absent on a skip). The tar must pass what --unpack will check of it.
+check_output() {
+    rm -rf "$OUT"
+    mkdir -p "$OUT"
+    co_tar="" co_base="" co_list=""
+    cp "$WORK/prepared.txt" "$OUT/prepared.txt"
+    if [ "$SKIP" = 0 ]; then
+        # only what --unpack accepts: config, objects, refs and an empty tmp (ostree makes what else it needs)
+        rm -rf "$WORK/repo/tmp" "$WORK/repo/state" "$WORK/repo/extensions" "$WORK/repo/.lock"
+        mkdir "$WORK/repo/tmp"
+        tar -C "$WORK" --owner=0 --group=0 --numeric-owner -cf "$OUT/flatpak-checked-repo.tar" repo
+        tar_safe "$OUT/flatpak-checked-repo.tar" repo
+        check_repo_tar "$OUT/flatpak-checked-repo.tar"
+        check_signing_tar "$OUT/flatpak-checked-repo.tar"
+        check_commitmeta "$OUT/flatpak-checked-repo.tar" "$WORK/prepared.txt"
+        cp "$WORK/signlist" "$WORK/base.txt" "$OUT/"
+        co_tar=$(sha256_of "$OUT/flatpak-checked-repo.tar")
+        co_base=$(sha256_of "$OUT/base.txt")
+        co_list=$(sha256_of "$OUT/signlist")
+    fi
+    {
+        echo "format=1"
+        echo "tag=$TAG"
+        echo "version=$VERSION"
+        echo "commit=$COMMIT"
+        echo "mode=$MODE"
+        echo "skip=$SKIP"
+        echo "base_sha256=$co_base"
+        echo "signlist_sha256=$co_list"
+        echo "checked_tar_sha256=$co_tar"
+    } > "$OUT/flatpak-check-result.txt"
+    job_output checked_sha256 "$(sha256_of "$OUT/flatpak-check-result.txt")"
+}
 
 # check_new_commit REF COMMIT BASE [XA_SUM FROM_COMMIT]: a commit the key is about to sign (REPO is $WORK/repo, the published
 # one $SITE/repo): it continues the published head of its ref, says it belongs to it, has exactly the metadata keys of an
@@ -316,7 +407,7 @@ check_new_commit() {
 }
 
 check_prepared() {
-    [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$IN" ] && [ -n "$MANIFEST" ] || die 1 "usage: see the header of $0"
+    [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$IN" ] && [ -n "$MANIFEST" ] && [ -n "$OUT" ] || die 1 "usage: see the header of $0"
     [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
     check_pinned "$MANIFEST" "${MANIFEST_SHA256:-}" "$MANIFEST"
     check_site_flags
@@ -325,11 +416,17 @@ check_prepared() {
     # A release candidate has a repository of its own and a stable release never does (the sign job does not take the
     # validate job's word for which one this is).
     if is_rc "$TAG"; then [ "$FRESH" = 1 ] || die 3 "$TAG is a release candidate: it is checked with --fresh only"; else [ "$FRESH" = 0 ] || die 3 "$TAG is a stable release: --fresh is for release candidates"; fi
+    [ -f "$IN/flatpak-prepared.txt" ] && [ ! -L "$IN/flatpak-prepared.txt" ] || die 2 "$IN/flatpak-prepared.txt is missing"
+    check_pinned "$IN/flatpak-prepared.txt" "${PREPARED_SHA256:-}" "$IN/flatpak-prepared.txt"
     prepared_state "$IN/flatpak-prepared.txt"
     rm -rf "$WORK"
     mkdir -p "$WORK"
     cp "$IN/flatpak-prepared.txt" "$WORK/prepared.txt"
     if [ "$SKIP" = 1 ]; then
+        # The preparation says the tag is published: gh-pages, as this job fetched it, must say it too.
+        site_state
+        [ "$MODE" = site ] && [ "$PG_TAG" = "$TAG" ] && [ "$PG_COMMIT" = "$COMMIT" ] || die 5 "the preparation says $TAG is on gh-pages for this commit, but gh-pages has ${PG_TAG:-no version} at ${PG_COMMIT:-an unknown commit}"
+        check_output
         echo "nothing to sign"
         return 0
     fi
@@ -348,7 +445,7 @@ check_prepared() {
     fi
     : > "$WORK/base.heads"
     if [ "$MODE" = site ]; then site_verify; fi
-    extract_repo_tar "$IN/flatpak-prepared-repo.tar" "$WORK/x"
+    extract_repo_tar "$IN/flatpak-prepared-repo.tar" "$WORK/x" deltas
     mv "$WORK/x/repo" "$WORK/repo"
     rm -rf "$WORK/x"
     check_refs "$WORK/repo"
@@ -371,9 +468,11 @@ check_prepared() {
         base=$(awk -v r="$ref" '$2 == r { print $3 }' "$WORK/base.heads")
         if ! repo_refs "$WORK/repo" | grep -qxF "$ref"; then
             [ -z "$base" ] || die 2 "$ref of the published repository is missing in the prepared one"
+            [ -z "$(prepared_id "$WORK/prepared.txt" "$ref")" ] || die 2 "$ref is missing in the prepared repository, which the preparation described"
             continue
         fi
         new=$(ostree --repo="$WORK/repo" rev-parse "$ref")
+        [ "$new" = "$(prepared_id "$WORK/prepared.txt" "$ref")" ] || die 2 "$ref is not the commit the preparation described"
         if [ "$new" = "$base" ]; then
             # The published head is signed already and stays so, but build-update-repo reads it with the key at hand.
             nc_obj=objects/$(printf '%s' "$new" | cut -c1-2)/$(printf '%s' "$new" | cut -c3-)
@@ -402,7 +501,95 @@ check_prepared() {
         echo "base_gh_pages_previous=$BASE_PREV"
         cat "$WORK/base.heads"
     } > "$WORK/base.txt"
+    check_output
     echo "checked $TAG: $(wc -l < "$WORK/signlist") refs to sign"
+}
+
+# check_signing_tar TAR: the member names of the checked repository as the signing machine accepts them, which is less than
+# check_repo_tar: only config, objects, refs and an empty tmp, objects named like the objects of an archive repository (the
+# commit objects, trees and files, and the detached metadata of commits: commitmeta, and commitmeta2 that flatpak writes), no summary, subsummary, state or lock.
+check_signing_tar() {
+    cst=$(tar -tf "$1" | grep -Ev '^repo/$|^repo/(config|tmp/|objects/)$|^repo/refs(/.*)?$|^repo/objects/[0-9a-f]{2}/$|^repo/objects/[0-9a-f]{2}/[0-9a-f]{62}\.(commit|dirtree|dirmeta|filez|commitmeta2?)$' | head -n1 | tr -c 'A-Za-z0-9._+/\n-' '?' || true)
+    [ -z "$cst" ] || die 2 "$1: a member that the signing job does not accept in a checked repository: $cst"
+}
+
+# check_commitmeta TAR PREPARED: the detached metadata files of TAR are those PREPARED lists, with the same hashes: no other, none missing.
+check_commitmeta() {
+    cm_want=$(sed -n 's/^commitmeta=//p' "$2" | LC_ALL=C sort)
+    cm_got=$(tar -tf "$1" | sed -n 's|^repo/\(objects/[0-9a-f]\{2\}/[0-9a-f]\{62\}\.commitmeta2\{0,1\}\)$|\1|p' | LC_ALL=C sort |
+        while read -r cm_f; do printf '%s %s\n' "$cm_f" "$(tar -xOf "$1" "repo/$cm_f" | sha256sum | cut -d' ' -f1)"; done)
+    [ "$cm_got" = "$cm_want" ] || die 2 "$1: the detached metadata files (.commitmeta, .commitmeta2) are not the ones the preparation described"
+}
+
+# check_signing_content TAR LIST PREPARED: what the key will sign is what the preparation described, whatever the check job says.
+# PREPARED is pinned by the job output of prepare-flatpak. Every head it names is a commit object whose SHA-256 is its id and is
+# the ref in the tar, and the list names only those commits; a listed commit has no detached metadata yet.
+check_signing_content() {
+    csc_names=$(tar -tf "$1")
+    check_commitmeta "$1" "$3"
+    for csc_ref in "$APP_REF" "$DEBUG_REF" appstream/x86_64 appstream2/x86_64; do
+        csc_id=$(prepared_id "$3" "$csc_ref")
+        if [ -z "$csc_id" ]; then
+            if printf '%s\n' "$csc_names" | grep -qxF "repo/refs/heads/$csc_ref"; then die 2 "$csc_ref: the tar has this ref, which the preparation did not describe"; fi
+            continue
+        fi
+        is_hex "$csc_id" 64 || die 2 "$3: $csc_ref has no valid commit"
+        csc_obj=repo/objects/$(printf '%s' "$csc_id" | cut -c1-2)/$(printf '%s' "$csc_id" | cut -c3-)
+        [ "$(tar -xOf "$1" "$csc_obj.commit" 2> /dev/null | sha256sum | cut -d' ' -f1)" = "$csc_id" ] || die 2 "$csc_ref: the commit object in the tar is not the commit $csc_id the preparation described"
+        [ "$(tar -xOf "$1" "repo/refs/heads/$csc_ref" 2> /dev/null)" = "$csc_id" ] || die 2 "$csc_ref: the ref in the tar is not the commit $csc_id the preparation described"
+    done
+    while read -r csc_ref csc_id; do
+        [ "$csc_id" = "$(prepared_id "$3" "$csc_ref")" ] || die 2 "$csc_ref: the list names $csc_id, not the commit the preparation described"
+        csc_obj=repo/objects/$(printf '%s' "$csc_id" | cut -c1-2)/$(printf '%s' "$csc_id" | cut -c3-)
+        if printf '%s\n' "$csc_names" | grep -qxF "$csc_obj.commitmeta"; then die 2 "$csc_ref: the commit $csc_id to sign has detached metadata already"; fi
+    done < "$2"
+}
+
+# recorded RECORD FILE KEY: exit 2 unless FILE is a plain file with the SHA-256 that RECORD (the record of the check job) has under KEY.
+recorded() {
+    [ -f "$2" ] && [ ! -L "$2" ] || die 2 "$2 is missing"
+    [ "$(sha256_of "$2")" = "$(kv_get "$1" "$3")" ] || die 2 "$2 does not have the hash the check job recorded"
+}
+
+# ---- unpack: in the signing job, before the secret exists ---------------------------------------------------------------
+# No ostree, gpg, flatpak or git here and no network: the files of another job are hashed, listed and unpacked, nothing else.
+unpack() {
+    [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$IN" ] || die 1 "usage: see the header of $0"
+    semver_valid "$TAG" || die 2 "$TAG is not a release tag"
+    is_hex "$COMMIT" 40 || die 2 "$COMMIT is not a commit"
+    CR=$IN/flatpak-check-result.txt
+    [ -f "$CR" ] && [ ! -L "$CR" ] || die 2 "$CR is missing"
+    check_pinned "$CR" "${CHECKED_SHA256:-}" "$CR"
+    [ "$(kv_get "$CR" format)" = 1 ] || die 2 "$CR: unknown format"
+    [ "$(kv_get "$CR" tag)" = "$TAG" ] && [ "$(kv_get "$CR" commit)" = "$COMMIT" ] || die 2 "$CR is not for $TAG at $COMMIT"
+    # The description of the preparation, pinned by the job output of prepare-flatpak: the check job cannot change what it says.
+    P=$IN/prepared.txt
+    [ -f "$P" ] && [ ! -L "$P" ] || die 2 "$P is missing"
+    check_pinned "$P" "${PREPARED_SHA256:-}" "$P"
+    prepared_state "$P"
+    [ "$SKIP" = "$(kv_get "$CR" skip)" ] || die 2 "$CR and $P do not agree on skip"
+    if [ "$SKIP" = 0 ]; then
+        recorded "$CR" "$IN/signlist" signlist_sha256
+        recorded "$CR" "$IN/flatpak-checked-repo.tar" checked_tar_sha256
+        # only the four refs, each at a commit: the list is read with the key at hand
+        awk -v a="$APP_REF" -v d="$DEBUG_REF" 'NF != 2 || $2 !~ /^[0-9a-f]+$/ || length($2) != 64 || ($1 != a && $1 != d && $1 != "appstream/x86_64" && $1 != "appstream2/x86_64") { bad = 1 } END { exit bad + (NR < 2) }' "$IN/signlist" || die 2 "$IN/signlist is not a list of the refs of this release with their commits"
+        tar_safe "$IN/flatpak-checked-repo.tar" repo
+        check_signing_tar "$IN/flatpak-checked-repo.tar"
+        check_signing_content "$IN/flatpak-checked-repo.tar" "$IN/signlist" "$P"
+    fi
+    rm -rf "$WORK"
+    mkdir -p "$WORK"
+    cp "$CR" "$WORK/flatpak-check-result.txt"
+    if [ "$SKIP" = 1 ]; then
+        echo "nothing to sign"
+        return 0
+    fi
+    cp "$IN/signlist" "$WORK/signlist"
+    extract_repo_tar "$IN/flatpak-checked-repo.tar" "$WORK/x"
+    mv "$WORK/x/repo" "$WORK/repo"
+    rmdir "$WORK/x"
+    check_repo_config "$WORK/repo" || die 2 "the config of the checked repository is not the expected one"
+    echo "unpacked $TAG: $(wc -l < "$WORK/signlist") refs to sign"
 }
 
 # ---- sign: the only step with the secret ------------------------------------------------------------------------
@@ -415,23 +602,22 @@ sign() {
     # (gpg, flatpak, ostree) inherits it. (The environment of this process itself cannot be cleared.)
     secret=${FLATPAK_GPG_PRIVATE_KEY:-}
     unset FLATPAK_GPG_PRIVATE_KEY
-    prepared_state "$WORK/prepared.txt"
+    [ -f "$WORK/flatpak-check-result.txt" ] || die 1 "$WORK is not the output of --unpack"
+    [ "$(kv_get "$WORK/flatpak-check-result.txt" tag)" = "$TAG" ] && [ "$(kv_get "$WORK/flatpak-check-result.txt" commit)" = "$COMMIT" ] || die 2 "$WORK is not for $TAG at $COMMIT"
+    SKIP=$(kv_get "$WORK/flatpak-check-result.txt" skip)
     mkdir -p "$OUT"
-    cp "$WORK/prepared.txt" "$OUT/flatpak-prepared.txt"
     if [ "$SKIP" = 1 ]; then
         # --finish reads nothing else of a skip, and still gets a record that is pinned
         {
             echo "format=1"
             echo "tag=$TAG"
             echo "commit=$COMMIT"
-            echo "prepared_sha256=$(sha256_of "$OUT/flatpak-prepared.txt")"
         } > "$OUT/flatpak-sign-result.txt"
         job_output result_sha256 "$(sha256_of "$OUT/flatpak-sign-result.txt")"
         echo "nothing to sign"
         return 0
     fi
-    [ -f "$WORK/signlist" ] && [ -f "$WORK/base.txt" ] && [ -d "$WORK/repo/objects" ] || die 1 "$WORK is not the output of --check-prepared"
-    cp "$WORK/base.txt" "$OUT/flatpak-base.txt"
+    [ "$SKIP" = 0 ] && [ -f "$WORK/signlist" ] && [ -d "$WORK/repo/objects" ] || die 1 "$WORK is not the output of --unpack"
     [ -n "$secret" ] || die 4 "the secret FLATPAK_GPG_PRIVATE_KEY is empty or not set"
 
     shm=""
@@ -480,8 +666,6 @@ sign() {
         echo "tag=$TAG"
         echo "commit=$COMMIT"
         echo "signed_tar_sha256=$(sha256_of "$OUT/flatpak-sign-result-repo.tar")"
-        echo "prepared_sha256=$(sha256_of "$OUT/flatpak-prepared.txt")"
-        echo "base_sha256=$(sha256_of "$OUT/flatpak-base.txt")"
         echo "pubkey_sha256=$(sha256_of "$OUT/flatpak-pubkey.gpg")"
         echo "key_fpr=$FPR"
     } > "$OUT/flatpak-sign-result.txt"
@@ -490,17 +674,68 @@ sign() {
 }
 
 # ---- finish -----------------------------------------------------------------------------------------------------
+
+# repo_state REPO: what a static delta must not change: every name in REPO but the deltas, their indexes, tmp and the lock, and the
+# hashes of the summary files.
+repo_state() {
+    (cd "$1" && find . \( -path ./deltas -o -path ./delta-indexes -o -path ./tmp -o -path ./.lock \) -prune -o -print | LC_ALL=C sort
+        find summary summary.sig summary.idx summary.idx.sig summaries -type f -exec sha256sum {} + 2> /dev/null | LC_ALL=C sort -k2)
+}
+
+# make_delta: the static delta from the published app commit (BASE_APP) to the new one (APP_COMMIT) in the signed repository $WORK/repo,
+# app ref only, and its index; sets DELTA_SHA to the SHA-256 of its superblock. The signed summary is not touched: it says
+# indexed-deltas, so a client reads the index, which is not signed, and the commit and its signature in the superblock. Then the
+# delta is tried like a client does with the public key only: in a scratch repository, the published commit is pulled and the new one
+# is pulled with static deltas required, and it must be the verified build.
+make_delta() {
+    md_state=$(repo_state "$WORK/repo")
+    ostree --repo="$WORK/repo" static-delta generate --from="$BASE_APP" --to="$APP_COMMIT" > "$WORK/delta.log" 2>&1 &&
+        ostree --repo="$WORK/repo" static-delta reindex >> "$WORK/delta.log" 2>&1 || {
+        sed 's/^/    /' "$WORK/delta.log" >&2
+        die 4 "ostree static-delta generate or reindex failed"
+    }
+    rm -rf "$WORK/repo/tmp"
+    mkdir "$WORK/repo/tmp"
+    DELTA_SHA=$(sha256_of "$WORK/repo/$(delta_dir "$BASE_APP" "$APP_COMMIT")/superblock") || die 4 "the static delta has no superblock"
+    check_deltas "$WORK/repo" "$BASE_APP" "$APP_COMMIT" "$DELTA_SHA"
+    [ "$(repo_state "$WORK/repo")" = "$md_state" ] || die 4 "making the static delta changed the repository, summary files included"
+    md_dt=$WORK/deltatest
+    rm -rf "$md_dt"
+    # (a bare-user repository: an archive one cannot take a delta)
+    ostree --repo="$md_dt" init --mode=bare-user || die 4 "cannot create a scratch repository"
+    ostree --repo="$md_dt" remote add --set=gpg-verify=true --set=gpg-verify-summary=true --gpg-import="$IN/flatpak-pubkey.gpg" chk "file://$WORK/repo" ||
+        die 4 "cannot import the public key"
+    ostree --repo="$md_dt" pull --untrusted chk "$APP_REF@$BASE_APP" > "$WORK/deltatest.log" 2>&1 &&
+        ostree --repo="$md_dt" pull --untrusted --require-static-deltas chk "$APP_REF" >> "$WORK/deltatest.log" 2>&1 || {
+        sed 's/^/    /' "$WORK/deltatest.log" >&2
+        die 4 "the static delta does not take a client on the published commit to the new one"
+    }
+    [ "$(ostree --repo="$md_dt" rev-parse "$APP_REF")" = "$APP_COMMIT" ] || die 4 "the static delta leads to another commit"
+    ostree --repo="$md_dt" fsck > /dev/null 2>&1 || die 4 "ostree fsck failed after the static delta"
+    [ "$(content_sum "$md_dt" "$APP_REF")" = "$(kv_get "$MANIFEST" flatpak_app_content)" ] || die 4 "the content after the static delta is not the verified build"
+    rm -rf "$md_dt"
+}
+
 finish() {
-    [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$MANIFEST" ] && [ -n "$IN" ] && [ -n "$OUT" ] || die 1 "usage: see the header of $0"
+    [ -n "$TAG" ] && [ -n "$COMMIT" ] && [ -n "$MANIFEST" ] && [ -n "$IN" ] && [ -n "$CHK" ] && [ -n "$OUT" ] || die 1 "usage: see the header of $0"
     [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
     check_pinned "$MANIFEST" "${MANIFEST_SHA256:-}" "$MANIFEST"
+    # The artifact of the check job: its record is the one the job pinned, and the record has the hash of every other file. The
+    # description and the base are read from it, not from the artifact of the signing job, which holds the signed repository only.
+    CR=$CHK/flatpak-check-result.txt
+    [ -f "$CR" ] && [ ! -L "$CR" ] || die 2 "$CR is missing"
+    check_pinned "$CR" "${CHECKED_SHA256:-}" "$CR"
+    [ "$(kv_get "$CR" format)" = 1 ] || die 2 "$CR: unknown format"
+    [ "$(kv_get "$CR" tag)" = "$TAG" ] && [ "$(kv_get "$CR" commit)" = "$COMMIT" ] || die 2 "$CR is not for $TAG at $COMMIT"
+    P=$CHK/prepared.txt
+    [ -f "$P" ] && [ ! -L "$P" ] || die 2 "$P is missing"
+    check_pinned "$P" "${PREPARED_SHA256:-}" "$P"
+    prepared_state "$P"
+    [ "$SKIP" = "$(kv_get "$CR" skip)" ] || die 2 "$CR and $P do not agree on skip"
     # The artifact of the sign job: its record is the one the job pinned, and the record has the hash of every other file.
     R=$IN/flatpak-sign-result.txt
     [ -f "$R" ] && [ ! -L "$R" ] || die 2 "$R is missing"
     check_pinned "$R" "${RESULT_SHA256:-}" "$R"
-    [ "$(sha256_of "$IN/flatpak-prepared.txt")" = "$(kv_get "$R" prepared_sha256)" ] || die 2 "flatpak-prepared.txt does not have the hash the signing job recorded"
-    prepared_state "$IN/flatpak-prepared.txt"
-    P=$IN/flatpak-prepared.txt
     mkdir -p "$OUT"
     if [ "$SKIP" = 1 ]; then
         {
@@ -517,7 +752,6 @@ finish() {
     [ -f "$MANIFEST" ] || die 2 "$MANIFEST is missing"
     [ "$(kv_get "$MANIFEST" tag)" = "$TAG" ] && [ "$(kv_get "$MANIFEST" commit)" = "$COMMIT" ] || die 2 "the manifest is not for $TAG at $COMMIT"
     [ "$(kv_get "$MANIFEST" flatpak_unsigned_tar_sha256)" = "$(kv_get "$P" unsigned_tar_sha256)" ] || die 2 "the prepared repository does not come from the verified build"
-    R=$IN/flatpak-sign-result.txt
     for f in flatpak-sign-result-repo.tar flatpak-pubkey.gpg flatpak-sign-result.txt; do
         [ -f "$IN/$f" ] && [ ! -L "$IN/$f" ] || die 2 "$IN/$f is missing"
     done
@@ -526,10 +760,9 @@ finish() {
     [ "$(sha256_of "$IN/flatpak-pubkey.gpg")" = "$(kv_get "$R" pubkey_sha256)" ] || die 2 "flatpak-pubkey.gpg does not have the hash the signing job recorded"
     rm -rf "$WORK"
     mkdir -p "$WORK"
-    # The record of the signing job: the mode and the published heads it checked, not what the preparation said.
-    B=$IN/flatpak-base.txt
-    [ -f "$B" ] && [ ! -L "$B" ] || die 2 "$B is missing"
-    [ "$(sha256_of "$B")" = "$(kv_get "$R" base_sha256)" ] || die 2 "$B does not have the hash the signing job recorded"
+    # The record of the check job: the mode and the published heads it checked, not what the preparation said.
+    B=$CHK/base.txt
+    recorded "$CR" "$B" base_sha256
     [ "$(kv_get "$B" format)" = 1 ] || die 2 "$B: unknown format"
     MODE=$(kv_get "$B" mode)
     case $MODE in fresh | bootstrap | site) ;; *) die 2 "$B: unknown mode $MODE" ;; esac
@@ -556,6 +789,10 @@ finish() {
     # Signing only added signatures: the commits are the prepared ones.
     [ "$APP_COMMIT" = "$(kv_get "$P" prepared_app_commit)" ] || die 4 "the signed app commit is not the prepared one"
     [ "$DEBUG_COMMIT" = "$(kv_get "$P" prepared_debug_commit)" ] || die 4 "the signed Debug commit is not the prepared one"
+    for ref in appstream/x86_64 appstream2/x86_64; do
+        if repo_refs "$WORK/repo" | grep -qxF "$ref"; then pw=$(ostree --repo="$WORK/repo" rev-parse "$ref"); else pw=""; fi
+        [ "$pw" = "$(prepared_id "$P" "$ref")" ] || die 4 "the signed $ref is not the prepared one"
+    done
     # Every ref continues the published head of the record (or is it, or has no parent when there is none).
     for ref in "$APP_REF" "$DEBUG_REF" appstream/x86_64 appstream2/x86_64; do
         b=$(base_head "$B" "$ref")
@@ -567,6 +804,9 @@ finish() {
     done
     [ "$(content_sum "$WORK/repo" "$APP_REF")" = "$(kv_get "$MANIFEST" flatpak_app_content)" ] || die 4 "the signed app content is not the verified build"
     [ "$(content_sum "$WORK/repo" "$DEBUG_REF")" = "$(kv_get "$MANIFEST" flatpak_debug_content)" ] || die 4 "the signed Debug content is not the verified build"
+    # With a published head to continue (site) a client on it updates by a delta; the first publication and a repository of its own have none.
+    DELTA_SHA=""
+    if [ "$MODE" = site ]; then make_delta; fi
 
     flatpak build-bundle --gpg-keys="$IN/flatpak-pubkey.gpg" "$WORK/repo" "$OUT/PaletoModkit-x86_64.flatpak" "$APP_ID" "$BRANCH" \
         --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo > "$WORK/bundle.log" 2>&1 || {
@@ -589,6 +829,7 @@ finish() {
         echo "app_commit=$APP_COMMIT"
         echo "debug_commit=$DEBUG_COMMIT"
         echo "summary_sha256=$(sha256_of "$WORK/repo/summary")"
+        echo "delta_superblock_sha256=$DELTA_SHA"
         echo "bundle_sha256=$(sha256_of "$OUT/PaletoModkit-x86_64.flatpak")"
         echo "bundle_size=$(stat -c %s "$OUT/PaletoModkit-x86_64.flatpak")"
         echo "repo_tar_sha256=$(sha256_of "$OUT/flatpak-signed-repo.tar")"
@@ -603,7 +844,8 @@ finish() {
 case $CMD in
 --prepare) prepare ;;
 --check-prepared) check_prepared ;;
+--unpack) unpack ;;
 --sign) sign ;;
 --finish) finish ;;
-*) die 1 "unknown command $CMD (--prepare, --check-prepared, --sign, --finish, --cleanup)" ;;
+*) die 1 "unknown command $CMD (--prepare, --check-prepared, --unpack, --sign, --finish, --cleanup)" ;;
 esac

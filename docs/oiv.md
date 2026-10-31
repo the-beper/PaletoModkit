@@ -55,7 +55,7 @@ The count and the size of the list of files are first judged from the end record
 
 ## The installation log
 
-The installer ends with a log of every change (`add …`, `edit …`, `saved …`) and its warnings. Keep it in mind when a mod does not work: a warning usually means the package was made for another version of the game files.
+The installer ends with a log of every change (`add …`, `edit …`, `saved …`) and its warnings. Keep it in mind when a mod does not work: a warning usually means the package was made for another version of the game files. A warning about names that "differ only in case" is about the game folder, not the package: see [Troubleshooting](troubleshooting.md#common-problems).
 
 When an install fails after it changed files, the install dialog (and `paleto install`, which prints it before the error) shows the same log of what was done and undone, then the error. If everything was undone the error ends with "(nothing was installed)". If not, the dialog lists what is left, with the backups, under "Left behind (not undone)", and says how to finish: the interrupted-change notice offers it the next time you choose the game, or run `paleto recover`; the next change to the game is refused until then. The same holds for add-on packs, which install as one batch ([Add-on packs](mods.md)).
 

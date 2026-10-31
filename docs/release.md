@@ -17,7 +17,7 @@ For the maintainer who cuts releases and fixes them when they fail. The workflow
 - [Bumping pins](#bumping-pins)
 - [Testing the pipeline locally](#testing-the-pipeline-locally)
 
-Exit codes of every release script: 0 ok or nothing to do, 1 usage or internal error, 2 validation (format, mismatch, missing file, checksum, structure), 3 refused by policy (downgrade, same tag with other content, Flatpak identity change), 4 signing, 5 conflict on the remote or remote unreadable (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead of the release, GitHub answer missing or malformed).
+Exit codes of every release script: 0 ok or nothing to do, 1 usage or internal error, 2 validation (format, mismatch, missing file, checksum, structure), 3 refused by policy (downgrade, same tag with other content, Flatpak identity change), 4 signing, 5 conflict on the remote or remote unreadable (lease lost, gh-pages missing, tag moved, several releases for one tag, Pages ahead of the release, gh-pages below the published release, GitHub answer missing or malformed).
 
 ## One-time setup
 
@@ -60,7 +60,7 @@ The tag must point to a commit that is on `main`. `release-validate.sh` refuses 
    The tag is `vMAJOR.MINOR.PATCH`, or `-rc.N` after it. Nothing else (`v1.6`, `v1.6.0-beta.1`) is accepted. A tag push is always a release.
 
    Push only the tag; never make the release on the GitHub web page ("Draft a new release", "Publish release"). The workflow makes it, with its files. A release published by hand has no files and, being immutable, can never get them: `validate` then stops ("published but incomplete"), and that tag can no longer be released. Cut the next version (`-rc.N+1`, or the next patch).
-4. Watch the run. The builds take most of the time. When `sign-flatpak` waits, open the run and approve the deployment to `flatpak-signing`. Check first that the run is yours and the tag is the one you pushed.
+4. Watch the run. The builds take most of the time. When `sign-flatpak` waits, open the run and approve the deployment to `flatpak-signing`. It waits only after `check-flatpak` is green, so everything the key will sign has been checked by then. Check first that the run is yours and the tag is the one you pushed.
 5. When `publish` ends, check the release page and `flatpak remote-info` as in [the next section](#artifacts-and-how-to-verify-them).
 
 A release candidate becomes a GitHub prerelease. It never touches `gh-pages`, and its Flatpak repository is a fresh one of its own.
@@ -77,13 +77,14 @@ Every job checks out the commit the tag points to. Nothing comes from `main`. On
 | `build-linux` | ubuntu-22.04 | `cargo test --locked`, then `build-release.sh`: tarball, AppImage and `.zsync`. Skipped in `publish-flatpak` mode. | none |
 | `build-flatpak` | ubuntu-24.04 | `build-flatpak.sh` with `EXPORT_REPO=1`: the unsigned OSTree repository, in the pinned Flathub image. | none |
 | `verify` | ubuntu-24.04 | `release-verify.sh builds`: structure and hashes of everything built; writes `release-manifest.txt`. | none |
-| `check-signing-env` | ubuntu-24.04 | `release-check-env.sh`: fails unless the environment `flatpak-signing` exists with a required reviewer and deployments limited to selected branches and tags. A job that names a missing environment makes GitHub create it unprotected, so this runs in a job without `environment:`, in parallel with the builds; `prepare-flatpak` and `sign-flatpak` need it. | none (read-only token) |
-| `prepare-flatpak` | ubuntu-24.04 | Reads the build and `gh-pages` (the untrusted data), checks the version rules, adds the new unsigned commits on top of the published repository, makes the summary. Refuses a published `repo/config` other than the four expected lines (exit 2). | none |
-| `sign-flatpak` | ubuntu-24.04 | First, without the secret, it fetches and verifies `gh-pages` again and runs `flatpak-sign.sh --check-prepared`: mode, `repo/config`, refs, the content checksums of the app and Debug commits against `release-manifest.txt` from `verify`, and for every new commit its parent (the published head), ref binding, exactly the expected metadata keys, `xa.ref`, `xa.metadata` and the sizes of the verified build, subject and body, absence of a detached signature and date (not before its parent, not more than an hour ahead). The other heads must be byte for byte the published ones, and a release candidate is only checked against a repository of its own (`--fresh`). It deletes the old summary files and static deltas. Then `--sign` (the only step with the key) signs only the new heads and the summary, and fails if a head moved. It builds nothing and makes no bundle. | environment `flatpak-signing` (approval) |
-| `finish-flatpak` | ubuntu-24.04 | Verifies the signed repository with the public key only, on a machine that never held the key: config, the keys of the summary (an allowlist), the parents from `flatpak-base.txt`. Builds the bundle. | none (read-only, no environment) |
+| `check-signing-env` | ubuntu-24.04 | `release-check-env.sh`: fails unless the environment `flatpak-signing` exists with a required reviewer and deployments limited to selected branches and tags. A job that names a missing environment makes GitHub create it unprotected, so this runs in a job without `environment:`, in parallel with the builds; `prepare-flatpak`, `check-flatpak` and `sign-flatpak` need it. | none (read-only token) |
+| `prepare-flatpak` | ubuntu-24.04 | Reads the build and `gh-pages` (the untrusted data), checks the version rules, adds the new unsigned commits on top of the published repository, makes the summary. `flatpak-prepared.txt` names the commit of every head, and its hash is the job output `prepared_sha256`. Refuses a published `repo/config` other than the four expected lines (exit 2). | none |
+| `check-flatpak` | ubuntu-24.04 | Everything that is read before the key, on a machine that never sees it. Fetches and verifies `gh-pages` again and runs `flatpak-sign.sh --check-prepared`: mode, `repo/config`, refs, the content checksums of the app and Debug commits against `release-manifest.txt` from `verify`, and for every new commit its parent (the published head), ref binding, exactly the expected metadata keys, `xa.ref`, `xa.metadata` and the sizes of the verified build, subject and body, absence of a detached signature and date (not before its parent, not more than an hour ahead). The other heads must be byte for byte the published ones, and a release candidate is only checked against a repository of its own (`--fresh`). It deletes the old summary files and static deltas. It requires the pin of `prepare-flatpak` on `flatpak-prepared.txt` and that every head is the commit that file names. Then it makes a tar of the checked repository from a plain tree (its own, not the preparation's) and a record, `flatpak-check-result.txt`, with the hash of the tar, the sign list and the base. The hash of the record and the id of the artifact are its job outputs. | none (read-only token) |
+| `sign-flatpak` | ubuntu-24.04 | Needs `check-flatpak`, so the approval is asked for after the checks, not before. Downloads the artifact by the pinned id, then `--unpack`, a step of its own without the key and without ostree, gpg, flatpak, git or network: the hash of the record against the job output of `check-flatpak` and the one of `prepared.txt` against the job output of `prepare-flatpak`, the hashes of the tar and the sign list against the record, the sign list and the refs and commit objects in the tar against `prepared.txt` (every head: the SHA-256 of its commit object is its id; the list names only those commits, none has detached metadata of its own, and the detached metadata files are exactly the described ones), the member names of the tar (only `config`, `objects` named like an archive repository's, `refs` and an empty `tmp`: no summary, state or lock), the config; the tar is unpacked into an empty folder. Then `--sign` (the only step with the key) signs only the new heads and the summary, and fails if a head moved. With the key it reads the commit objects (`ostree gpg-sign`) and the config, refs and commit metadata (`flatpak build-update-repo --no-update-appstream`), and no file of the app. It builds nothing and makes no bundle. | environment `flatpak-signing` (approval) |
+| `finish-flatpak` | ubuntu-24.04 | Verifies the signed repository with the public key only, on a machine that never held the key: config, the keys of the summary (an allowlist), the parents from `base.txt` of `check-flatpak`. With a published head to continue (not the first publication, not a release candidate) it makes the static delta from the published app commit to the new one, and tries it like a client with only the public key: in a scratch repository it pulls the published commit, then the new one with static deltas required; the result must be the verified build. The summary files and every other name of the repository must be unchanged, and exactly one delta and its index must exist. Builds the bundle. | none (read-only, no environment) |
 | `publish` | ubuntu-24.04 | Needs `finish-flatpak`. `release-publish.sh`: the draft release with its files, then `gh-pages`, then the release itself. One at a time (`concurrency: release-publish`). | `contents: write` |
 
-Jobs that parse untrusted data (`verify`, `prepare-flatpak`, `finish-flatpak`) run on other virtual machines than the one with the key. The Windows build is a slot for a later milestone.
+Jobs that parse untrusted data (`verify`, `prepare-flatpak`, `check-flatpak`, `finish-flatpak`) run on other virtual machines than the one with the key. The one that signs only unpacks a tar that `check-flatpak` made and pinned. The Windows build is a slot for a later milestone.
 
 Modes of a manual run:
 
@@ -91,7 +92,7 @@ Modes of a manual run:
 | :--- | :--- |
 | `build-only` (default) | Builds and verifies. Publishes nothing. |
 | `release` | The full release of an existing tag. |
-| `publish-flatpak` | Only `gh-pages`, for a release that is published already and is the highest. No Linux build, the release is not touched. |
+| `publish-flatpak` | Only `gh-pages`, for the highest published release with all its files. No Linux build, the release is not touched. |
 
 A manual run must start from `main`.
 
@@ -113,11 +114,24 @@ The run also keeps workflow artifacts for 14 days (30 for the Linux build). The 
 | Artifact | Made by | What |
 | :--- | :--- | :--- |
 | `verified-<commit>` | `verify` | `release-manifest.txt`, the checksums every later check compares with. |
-| `flatpak-prepared-<commit>` | `prepare-flatpak` | The unsigned repository with the new commits. `sign-flatpak` runs `--check-prepared` on it before the key is used. |
-| `flatpak-sign-result-<commit>` | `sign-flatpak` | The signed repository, the exported public key and `flatpak-base.txt` (the mode and published heads that `sign-flatpak` checked). `finish-flatpak` verifies it. |
-| `flatpak-signed-<commit>` | `finish-flatpak` | The verified repository and the bundle. `publish` uploads from it. |
+| `flatpak-prepared-<commit>` | `prepare-flatpak` | The unsigned repository with the new commits, and `flatpak-prepared.txt` (the commit of every head). `check-flatpak` runs `--check-prepared` on it; the job with the key never reads the repository. |
+| `flatpak-checked-<commit>` | `check-flatpak` | The checked repository (a tar of the check job's own), `signlist` (the commits that may be signed), `prepared.txt` (a copy of `flatpak-prepared.txt`), `base.txt` (the mode and published heads that were checked) and `flatpak-check-result.txt` (the hash of the tar, `signlist` and `base.txt`). `sign-flatpak` unpacks the tar; `finish-flatpak` reads the records. |
+| `flatpak-sign-result-<commit>` | `sign-flatpak` | The signed repository, the exported public key and `flatpak-sign-result.txt` (their hashes). `finish-flatpak` verifies it; kept one day only, because its summary was signed over the base of this run. |
+| `flatpak-signed-<commit>` | `finish-flatpak` | The verified repository (with its static delta, if any) and the bundle. `publish` uploads from it. |
 
-A run artifact can be replaced by a compromised job of the same run (it can read the run's token), while a job output cannot be changed by another job. So `verify` publishes the SHA-256 of `release-manifest.txt`, `sign-flatpak` the one of `flatpak-sign-result.txt` (which holds the hashes of the prepared description, the base record, the public key and the signed repository) and `finish-flatpak` the one of `flatpak-signed.txt` (which holds the hashes of the signed repository, the public key and the bundle) as job outputs. The next jobs get them in `MANIFEST_SHA256`, `RESULT_SHA256` and `SIGNED_SHA256` and exit 2 before reading the files if a hash is empty or differs. `prepare-flatpak` needs nothing: its result is only trusted after `sign-flatpak` has checked it against the pinned manifest. The Linux files are checked by `publish` against the pinned manifest.
+A run artifact can be replaced by a compromised job of the same run (it can read the run's token), while a job output cannot be changed by another job. So each file that goes from one job to the next is pinned by the hash of a record, which the job that made it writes as a job output; the next job gets it in an environment variable and exits 2, before it reads the file, if the hash is empty or differs.
+
+| Record | Made by | Job output, variable | Checked by |
+| :--- | :--- | :--- | :--- |
+| `release-manifest.txt` | `verify` | `manifest_sha256`, `MANIFEST_SHA256` | `check-flatpak`, `finish-flatpak`, `publish` (the Linux files) |
+| `flatpak-prepared.txt` (the commit of every head) | `prepare-flatpak` | `prepared_sha256`, `PREPARED_SHA256` | `check-flatpak`, `sign-flatpak` (`--unpack`), `finish-flatpak` |
+| `flatpak-check-result.txt` (the hashes of the checked tar, `signlist` and `base.txt`) | `check-flatpak` | `checked_sha256`, `CHECKED_SHA256`; also `checked_artifact_id` | `sign-flatpak` (`--unpack`), `finish-flatpak` |
+| `flatpak-sign-result.txt` (the hashes of the signed repository and the public key) | `sign-flatpak` | `result_sha256`, `RESULT_SHA256` | `finish-flatpak` |
+| `flatpak-signed.txt` (the hashes of the signed repository, the public key, the bundle and the superblock of the delta) | `finish-flatpak` | `signed_sha256`, `SIGNED_SHA256` | `publish` |
+
+`sign-flatpak` and `finish-flatpak` download the checked artifact by its id: an artifact of the same name uploaded later has another one. `flatpak-prepared.txt` is what ties the key to the preparation: `check-flatpak` alone, if compromised, cannot change what is signed. It can write any tar, list, description and record and pin them itself, but `--unpack` refuses a description other than the pinned one, a list that names another commit than the one the description names for that ref, a commit object whose SHA-256 is not its id and a ref that is not the described commit, a ref the description does not name, and detached metadata files (`.commitmeta`, `.commitmeta2`: the signatures of the published commits and what flatpak writes, which `flatpak build-update-repo` parses with the key) other than the ones it lists with their hashes. Content and metadata keys of the commits were checked by `check-flatpak` (honest run) against the manifest and `gh-pages`; a lie there needs `prepare-flatpak` compromised as well, and `finish-flatpak` verifies the signed repository against the same pin.
+
+What is not closed: the signing machine still parses bytes of the check job before the key (the unzip of the artifact download, then `tar` listing the members and reading the headers), and a flaw in them, triggered by a crafted tar, is not stopped by the pins, which are only checked against files already unzipped. The check job alone controls those bytes, so exploiting such a flaw needs only a compromised `check-flatpak` (inferred; no such flaw is known). The checks above limit what the key signs, not what a flaw in a parser could do on the signing machine.
 
 A user checks them like this:
 
@@ -139,7 +153,7 @@ flatpak remote-info --log paletomodkit io.github.the_beper.PaletoModkit
 
 `flatpak-sign.sh --sign` imports the key into a private keyring in memory (`/dev/shm/paleto-gnupg.*`), stops with exit 4 if its fingerprint is not the pinned one, signs, and removes the keyring. An `always()` step runs `--cleanup`, which removes any keyring left over.
 
-There is no rotation. Clients trust the key in the file they added the remote with, and the scripts refuse any other key (exit 3 in `--prepare`, exit 4 in `--sign`). A new key means a new remote: see [Lost signing key](#lost-signing-key).
+There is no rotation. Clients trust the key in the file they added the remote with, and the scripts refuse any other key (exit 3 in `--prepare` and `--check-prepared`, exit 4 in `--sign`). A new key means a new remote: see [Lost signing key](#lost-signing-key).
 
 ## Draft, gh-pages, publish
 
@@ -174,6 +188,8 @@ The release is refused with exit 3, in `validate` and again in `publish`, when:
 - the tag is already on `gh-pages` for another commit, or is published with other files than this build;
 - the Flatpak id, branch or remote files would change.
 
+A new stable version is refused with exit 5 when `gh-pages` has a lower version than the highest published stable release that has its files: a release is published only after its Pages, so `gh-pages` was rolled back (a signed but older state) or not updated. Restore it first ([Broken gh-pages](#broken-gh-pages)). It is refused the same way when `gh-pages` is gone and such a release exists (a new chain would not continue it). A release without the files (made by hand) does not count: whoever can make one can also push `gh-pages`. Candidates have no Pages.
+
 The Flatpak history is a chain: each commit has the published one as parent, and an older commit on top would be refused by clients. The answer to a bad release is always a new, higher version. There is no rollback mode. A user can go back locally with `flatpak update --commit`.
 
 Tag the same version again after a failure only if nothing was published. An equal tag with the same commit and a complete release is a no-op (`plan=noop`, exit 0).
@@ -189,11 +205,11 @@ Every release keeps the previous state in the branch `gh-pages-previous`. If `gh
    git push --force-with-lease=gh-pages:<broken-sha> origin origin/gh-pages-previous:gh-pages
    ```
 
-2. Start the workflow by hand from `main`, with the highest published tag and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched.
+2. Start the workflow by hand from `main`, with the highest published tag that has its files and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched. It is the only mode that runs while `gh-pages` is below the highest release.
 
-A refused `repo/config` (exit 2 in `prepare-flatpak` or `sign-flatpak`) means someone changed the unsigned file on `gh-pages`: treat it as an incident, restore from `gh-pages-previous` the same way.
+A refused `repo/config` (exit 2 in `prepare-flatpak` or `check-flatpak`) means someone changed the unsigned file on `gh-pages`: treat it as an incident, restore from `gh-pages-previous` the same way.
 
-Bootstrap only if both branches are gone. Then run `publish-flatpak` (or, for the very first release, `release`) with `bootstrap_pages` ticked. It creates `gh-pages` from nothing, with the pinned key, and refuses to run if `gh-pages` exists. Users keep their remote: the files and the key are the same. Their next update starts a new history, which `flatpak update` takes as a plain update.
+Bootstrap only if both branches are gone. Then run `publish-flatpak` for the highest published tag that has its files (any other tag is refused, exit 3) with `bootstrap_pages` ticked. `release` with `bootstrap_pages` is only for the very first release: it is refused (exit 5) while a published stable release with its files exists. It creates `gh-pages` from nothing, with the pinned key, and refuses to run if `gh-pages` exists. Users keep their remote: the files and the key are the same. Their next update starts a new history, which `flatpak update` takes as a plain update.
 
 ## Lost signing key
 
@@ -235,9 +251,10 @@ Rules:
 | `verify` fails (missing file, checksum, converter missing from the tarball) | 2 | The build is wrong, not the pipeline. Fix, release a higher version. |
 | `check-signing-env` fails | 3 or 5 | 3: the environment is missing, has no required reviewer or does not limit deployments to selected branches and tags; fix it under Settings, Environments ([One-time setup](#one-time-setup)), then re-run failed jobs. 5: GitHub could not be read; check the job's token permissions (`contents: read`, `actions: read`), then re-run. Nothing was signed. |
 | `sign-flatpak` not approved, or rejected | - | Nothing was published. Re-run the job and approve. |
-| `sign-flatpak` fails in `--check-prepared` (mode, config, refs, parents, bindings, metadata keys, dates or checksums differ from `gh-pages` or the manifest) | 2, 3 or 5 | The prepared repository is wrong. Nothing was signed. Re-run all jobs; if it repeats, release a higher version. |
-| `sign-flatpak` fails because a head moved | see log | The repository changed between the check and the signing. Nothing was published. Re-run all jobs. |
-| `finish-flatpak` fails (signature, content, config, summary keys or parents do not verify) | 2 or 4 | Do not publish. Re-run all jobs; if it repeats, treat it as an incident. |
+| `check-flatpak` fails in `--check-prepared` (the pin of the preparation, mode, config, refs, names or entries of the archive, parents, bindings, metadata keys, dates or checksums differ from `gh-pages` or the manifest; a skip that `gh-pages` does not confirm) | 2, 3 or 5 | The prepared repository is wrong. Nothing was signed, and the approval was never asked for. Re-run all jobs; if it repeats, release a higher version. |
+| `sign-flatpak` fails in `--unpack` | 2 | The artifact is not what `check-flatpak` and `prepare-flatpak` pinned (a hash, the record, a member of the tar, a commit or ref that `flatpak-prepared.txt` does not name, config). Nothing was signed. Re-run all jobs; if it repeats, treat it as an incident. |
+| `sign-flatpak` fails because a head moved | 2 | The repository changed between the unpack and the signing (`not the commit that was checked`). Nothing was published. Re-run all jobs. |
+| `finish-flatpak` fails (signature, content, config, summary keys, parents or static delta do not verify) | 2 or 4 | Do not publish. Re-run all jobs; if it repeats, treat it as an incident. |
 | `sign-flatpak` fails on the key | 4 | The secret is empty or is not the pinned key. Put the right one in the environment, re-run failed jobs. |
 | Draft partly uploaded | 1 or 5 | Re-run `publish`: it deletes wrong or incomplete assets and uploads the missing ones. |
 | `gh-pages` changed since signing | 5 | Someone else wrote to it. Check why, then Re-run all jobs. Nothing was written. |
@@ -246,13 +263,17 @@ Rules:
 | Pages wait timed out | 5 | The push worked but the site is slow. The draft stays. Re-run `publish`. |
 | Pages ahead of the release (gh-pages at the tag, draft missing or another build) | 5 | Do not push again. If the draft is missing and the build is the right one, re-run the original run's `publish`. Else the repository serves a build with no release: release a higher version. |
 | Published but mismatched with the record | 3 | Do not re-run. Release a higher version. |
+| `publish` says the signing job skipped a tag that `gh-pages` does not have | 5 | The record of the skip is not true; nothing was published. Re-run all jobs. |
+| `validate` or `publish` says `gh-pages` is below the published release | 5 | Restore it ([Broken gh-pages](#broken-gh-pages)). |
 | Publication cancelled while pending | - | The release is a draft. Re-run after the other runs finish. |
 
 ## How users get updates
 
 `flatpak update` (or the software center) pulls the new commit from the remote and checks its signature and the signed summary. The new commit has the old one as its parent.
 
-There are no static deltas. A delta carries the signature of its commit, so it can only be made after signing, and the signed summary would have to list it and be signed again. Making them with the key at hand would mean reading every file of the build in the signing job. So an update downloads the objects that changed (compressed files), not a delta. Files that did not change are not downloaded again. The first install downloads everything. The signing job deletes the static deltas and summary files of the earlier releases and the summary is rebuilt each release: a client downloads the new subsummary whole (a few KB; inferred).
+Each stable release after the first publication has one static delta, from the previous release's app commit to the new one. A client on the published head downloads it (about 3 MB for a release that changes the two Rust binaries, against about 21 MB of changed objects; measured on v1.5.1 to v1.6.0). A client on any older commit finds no delta from its commit and downloads the objects that changed (compressed files, not the ones it has). The first install downloads everything.
+
+A delta carries the signature of its commit, so it is made after signing, by `finish-flatpak`, which never holds the key. The signed summary is not changed: it says `indexed-deltas`, so a client reads the unsigned index (`delta-indexes/`) and the superblock of the delta, and checks the signature of the commit inside it. Whoever can write to `gh-pages` can therefore break updates (inferred: the client falls back to objects or fails), but not forge one. `check-flatpak` deletes the deltas, indexes and summary files of the earlier releases and the summary is rebuilt each release: a client downloads the new subsummary whole (a few KB; inferred). `publish` accepts exactly that one delta and its index, with the superblock hash of `flatpak-signed.txt`, and no other.
 
 `gh-pages` is replaced by one commit each release, so OSTree objects do not pile up in git history. Old OSTree commits are pruned to a depth of 3.
 
@@ -276,6 +297,7 @@ An empty or malformed hash or commit makes `release-validate.sh` stop with exit 
 | Test | Needs | Checks |
 | :--- | :--- | :--- |
 | `tarball-test.sh` | GNU tar, gzip | The tarball packing is deterministic. |
+| `clean-dist-test.sh` | none | `build-release.sh` removes only what it makes from `dist/`. |
 | `check-env-test.sh` | `jq` | The pre-flight check of the signing environment, on saved API answers and a stub of `gh`. |
 | `release-sim.sh`, `flatpak-repo-test.sh` | `flatpak`, `ostree`, `gpg` (and `git`, `jq`, `tar`, `curl` for the first) | The whole pipeline, and signing with the real flatpak client. |
 
@@ -283,6 +305,7 @@ A test prints `SKIP` and exits 77 when a tool is missing. They use throwaway key
 
 ```bash
 sh packaging/tests/tarball-test.sh           # the tarball packing is deterministic
+sh packaging/tests/clean-dist-test.sh        # the release build leaves foreign files in dist/ alone
 sh packaging/tests/check-env-test.sh         # the pre-flight check of the signing environment
 sh packaging/tests/release-sim.sh            # the whole pipeline against a local remote and a stub of gh
 sh packaging/tests/release-sim.sh -l         # list the scenarios

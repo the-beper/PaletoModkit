@@ -644,6 +644,25 @@ fn backups_in(base: &Path, prefix: &Prefix) -> Vec<Backup> {
     out.into_iter().map(|(_, b)| b).collect()
 }
 
+/// Copies a Wine prefix by path (links inside are made again as they are). A prefix is outside every game folder,
+/// so there is nothing here for a swapped folder to reach.
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Copies the prefix to the backups folder.
 pub fn backup(prefix: &Prefix, label: &str) -> Result<Backup, Error> {
     backup_in(&backups_dir(), prefix, label)
@@ -660,7 +679,7 @@ fn backup_in(base: &Path, prefix: &Prefix, label: &str) -> Result<Backup, Error>
     let dir = base.join(&id);
     let partial = base.join(format!(".{id}.partial"));
     let _ = std::fs::remove_dir_all(&partial);
-    let result = crate::snapshots::copy_tree(&prefix.path, &partial.join("pfx")).and_then(|_| {
+    let result = copy_tree(&prefix.path, &partial.join("pfx")).and_then(|_| {
         std::fs::write(partial.join("label.txt"), label.trim())?;
         std::fs::write(partial.join(SOURCE), source_of(prefix))?;
         std::fs::rename(&partial, &dir)?;
@@ -705,7 +724,7 @@ fn restore_in(base: &Path, prefix: &Prefix, id: &str) -> Result<(), Error> {
     for dir in [&incoming, &outgoing] {
         let _ = std::fs::remove_dir_all(dir);
     }
-    if let Err(e) = crate::snapshots::copy_tree(&chosen.dir.join("pfx"), &incoming) {
+    if let Err(e) = copy_tree(&chosen.dir.join("pfx"), &incoming) {
         let _ = std::fs::remove_dir_all(&incoming);
         return Err(e);
     }
@@ -1390,7 +1409,7 @@ mod tests {
                 .unwrap()
                 .success()
         };
-        let mut child = Command::new("sleep").arg("5").env("WINEPREFIX", "/steam/pfx/").spawn().unwrap();
+        let mut child = Command::new("sleep").arg("60").env("WINEPREFIX", "/steam/pfx/").spawn().unwrap();
         let found = run("/steam/pfx");
         let other = run("/steam/other");
         let _ = child.kill();
@@ -1413,8 +1432,17 @@ mod tests {
         let on_host = |p: &Prefix| Command::new("sh").args(["-c", RUNNING_ON_HOST, "sh"]).arg(&p.path).arg(&p.compat).status().unwrap().success();
 
         for (var, path) in [("WINEPREFIX", "library/compatdata/271590/pfx/"), ("STEAM_COMPAT_DATA_PATH", "library/compatdata/271590")] {
-            let mut child = Command::new("sleep").arg("5").env(var, dir.path().join(path)).spawn().unwrap();
-            let found = (is_running(&prefix), on_host(&prefix));
+            // Killed below, so it lives long enough for a slow machine: scanning every process is not quick under load.
+            let mut child = Command::new("sleep").arg("60").env(var, dir.path().join(path)).spawn().unwrap();
+            // A scan can miss it when the machine cannot start the processes of the shell in time: ask again.
+            let mut found = (false, false);
+            for _ in 0..40 {
+                found = (is_running(&prefix), on_host(&prefix));
+                if found == (true, true) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
             let not_other = (is_running(&other), on_host(&other));
             let _ = child.kill();
             let _ = child.wait();

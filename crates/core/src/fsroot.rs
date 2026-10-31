@@ -121,6 +121,8 @@ pub struct GameRoots {
     lock: Mutex<LockSlot>,
     /// The tool's data folder, where the lock and the journals go if the game folder cannot be written to.
     data: PathBuf,
+    /// What the operation noticed that its caller should tell the user (see [`GameRoots::take_notes`]).
+    notes: Mutex<Vec<String>>,
 }
 
 /// The game lock as this `GameRoots` holds it. The lock itself is an `flock` on
@@ -227,6 +229,13 @@ impl Resolved {
         path
     }
 
+    /// The folder it is in so far as it exists, as a path through the root as it was reached.
+    pub(crate) fn folder(&self) -> PathBuf {
+        let mut path = self.base.clone();
+        path.extend(&self.logical);
+        path
+    }
+
     /// The names from the root to the destination, link-free.
     pub fn relative(&self) -> Vec<String> {
         self.logical.iter().chain(&self.missing).chain(std::iter::once(&self.name)).cloned().collect()
@@ -239,6 +248,8 @@ struct Walked {
     missing: Vec<String>,
     name: String,
     existing: Option<Existing>,
+    /// Names that matched more than one entry on the way (see [`case_warning`]).
+    notes: Vec<String>,
 }
 
 /// Folders the tool keeps its own files in, at the top of the game folder.
@@ -287,20 +298,49 @@ fn normal_parts(path: &Path) -> Result<Vec<String>, Error> {
     Ok(out)
 }
 
+/// An entry found by [`find_ci`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub name: String,
+    pub kind: Kind,
+    /// The other entries that differ from the name only in case, when it was not matched exactly (sorted).
+    pub others: Vec<String>,
+}
+
 /// The entry of `dir` called `name`, or else the one that differs only in ASCII
 /// case (game files are named inconsistently): exact wins, else the first in order.
-pub(crate) fn find_ci(dir: &Dir, name: &str) -> io::Result<Option<(String, Kind)>> {
+/// Only the second case guesses, so only it lists the folder and reports the entries it passed over.
+pub(crate) fn find_ci(dir: &Dir, name: &str) -> io::Result<Option<Found>> {
     if let Some(kind) = dir.kind(name)? {
-        return Ok(Some((name.to_string(), kind)));
+        return Ok(Some(Found { name: name.to_string(), kind, others: Vec::new() }));
     }
     let mut hits: Vec<String> = dir.names()?.into_iter().filter(|n| n.eq_ignore_ascii_case(name)).collect();
     hits.sort();
-    for hit in hits {
-        if let Some(kind) = dir.kind(&hit)? {
-            return Ok(Some((hit, kind)));
+    for (i, hit) in hits.iter().enumerate() {
+        if let Some(kind) = dir.kind(hit)? {
+            let others = hits.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, h)| h.clone()).collect();
+            return Ok(Some(Found { name: hit.clone(), kind, others }));
         }
     }
     Ok(None)
+}
+
+/// The warning for a name that matched more than one entry of `folder` (the game, which is not case-sensitive,
+/// would see only one of them); `None` if it matched one.
+fn case_warning(folder: &Path, found: &Found) -> Option<String> {
+    if found.others.is_empty() {
+        return None;
+    }
+    // Names come from the game folder: written escaped, so that one with a newline cannot pass for a line of the log.
+    let mut all: Vec<String> = std::iter::once(&found.name).chain(&found.others).map(|n| format!("{n:?}")).collect();
+    all.sort();
+    let last = all.pop().expect("at least two");
+    Some(format!(
+        "warning: {} holds {} and {last}, names that differ only in case: {:?} was used (first in sorted order); rename or remove one, the game sees only one",
+        folder.display().to_string().escape_debug(),
+        all.join(", "),
+        found.name
+    ))
 }
 
 const MAX_HOPS: usize = 40;
@@ -326,6 +366,7 @@ impl Root {
         let mut pending: VecDeque<String> = comps.iter().cloned().collect();
         let (mut hops, mut retried) = (0, false);
         let mut through = self.shown.clone();
+        let mut notes = Vec::new();
         let bad = |why: &str| Error::UnsafePath { path: shown.to_string(), why: why.to_string() };
         while let Some(c) = pending.pop_front() {
             if c == ".." {
@@ -338,14 +379,16 @@ impl Root {
             }
             let last = pending.is_empty();
             let top = stack.last().expect("the root is never popped");
-            let Some((actual, kind)) = find_ci(top, &c)? else {
+            let Some(Found { name: actual, kind, others }) = find_ci(top, &c)? else {
                 let mut rest: Vec<String> = std::iter::once(c).chain(pending).collect();
                 let name = rest.pop().expect("at least this name");
                 if rest.iter().any(|r| r == "..") {
                     return Err(bad("a link to a folder that does not exist"));
                 }
-                return Ok(Walked { stack, logical, missing: rest, name, existing: None });
+                return Ok(Walked { stack, logical, missing: rest, name, existing: None, notes });
             };
+            let spellings = Found { name: actual.clone(), kind, others };
+            notes.extend(case_warning(&self.shown.join(logical.iter().collect::<PathBuf>()), &spellings));
             match kind {
                 Kind::Dir if !last || follow_final => match top.open_dir(&actual) {
                     Ok(dir) => {
@@ -365,12 +408,12 @@ impl Root {
                 },
                 Kind::Dir | Kind::File | Kind::Other if last => {
                     let existing = top.stat(&actual)?;
-                    return Ok(Walked { stack, logical, missing: Vec::new(), name: actual, existing });
+                    return Ok(Walked { stack, logical, missing: Vec::new(), name: actual, existing, notes });
                 }
                 Kind::File | Kind::Other => return Err(bad(&format!("\"{actual}\" is a file, not a folder"))),
                 Kind::Link if last && !follow_final => {
                     let existing = top.stat(&actual)?;
-                    return Ok(Walked { stack, logical, missing: Vec::new(), name: actual, existing });
+                    return Ok(Walked { stack, logical, missing: Vec::new(), name: actual, existing, notes });
                 }
                 Kind::Dir => unreachable!("a folder is entered above"),
                 Kind::Link => {
@@ -396,10 +439,14 @@ impl Root {
 
     /// Opens a file by `comps`, following every link, as the game does (the
     /// originals of a game may live on another drive). `None` if there is none.
-    fn open_free(&self, comps: &[String]) -> Result<Option<File>, Error> {
+    fn open_free(&self, comps: &[String], notes: &mut Vec<String>) -> Result<Option<File>, Error> {
         let mut dir = self.dir.try_clone()?;
+        let mut shown = self.shown.clone();
         for (i, c) in comps.iter().enumerate() {
-            let Some((actual, _)) = find_ci(&dir, c)? else { return Ok(None) };
+            let Some(found) = find_ci(&dir, c)? else { return Ok(None) };
+            notes.extend(case_warning(&shown, &found));
+            let actual = found.name;
+            shown.push(&actual);
             let missing = |e: &io::Error| matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR));
             if i + 1 == comps.len() {
                 // Only a regular file is ever opened: not what a link leads to if that is a pipe or a device.
@@ -518,12 +565,32 @@ impl GameRoots {
             return Err(changed(&shown));
         }
         let game = Root { dir, kind: RootKind::Game, id, shown, canon, fallback: false };
-        let roots = GameRoots { game, mods: OnceLock::new(), refused: OnceLock::new(), lock: Mutex::new(LockSlot::default()), data: crate::game::data_dir() };
+        let roots = GameRoots { game, mods: OnceLock::new(), refused: OnceLock::new(), lock: Mutex::new(LockSlot::default()), data: crate::game::data_dir(), notes: Mutex::new(Vec::new()) };
         // A mods folder that cannot be used is only an error for what needs it.
         match roots.mods_state() {
             Ok(_) | Err(Error::UnsafePath { .. }) => Ok(roots),
             Err(e) => Err(e),
         }
+    }
+
+    /// Records something the caller should tell the user (a warning line); each one only once.
+    pub(crate) fn note(&self, line: String) {
+        let mut notes = self.notes.lock().unwrap_or_else(PoisonError::into_inner);
+        if !notes.contains(&line) {
+            notes.push(line);
+        }
+    }
+
+    /// [`GameRoots::note`] for a name found in `folder` that other spellings of it also match.
+    pub(crate) fn note_spellings(&self, folder: &Path, found: &Found) {
+        if let Some(warning) = case_warning(folder, found) {
+            self.note(warning);
+        }
+    }
+
+    /// What operations on these roots noticed since the last call (the transaction engine puts it in its log).
+    pub fn take_notes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notes.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The mods folder if it exists and may be used; `None` if there is none (yet).
@@ -581,12 +648,15 @@ impl GameRoots {
     /// the game's `x64` or `update` under another name, or on another device (see [`owned_refusal`]).
     fn check_owned_folder(&self, top: &Dir, shown: &Path) -> Result<(), Error> {
         let mut others = vec![("game", self.game.id)];
+        // Every spelling of them, not only the one the resolver would pick: the folder must be none of them.
+        let present = self.game.dir.names()?;
         for name in ["x64", "update"] {
-            if let Ok(Some((actual, _))) = find_ci(&self.game.dir, name)
-                && let Ok(dir) = self.game.dir.open_dir_following(&actual)
-                && let Ok(id) = dir.fingerprint()
-            {
-                others.push((name, id));
+            for actual in present.iter().filter(|n| n.eq_ignore_ascii_case(name)) {
+                if let Ok(dir) = self.game.dir.open_dir_following(actual)
+                    && let Ok(id) = dir.fingerprint()
+                {
+                    others.push((name, id));
+                }
             }
         }
         if let Some(mods) = self.mods.get() {
@@ -651,6 +721,9 @@ impl GameRoots {
             }
         };
         let mut w = root.walk(comps, false, &shown)?;
+        for note in std::mem::take(&mut w.notes) {
+            self.note(note);
+        }
         // The mods folder is no place for loose files, however it is reached (`mods` may be a
         // link to `mods_profileA`, and `scripts` another to it): compare the folders themselves.
         let mods = match (kind, self.mods_state()) {
@@ -1070,6 +1143,7 @@ impl GameRoots {
         for root in self.mods.get().into_iter().chain(std::iter::once(&self.game)) {
             let Ok(rest) = abs.strip_prefix(&root.canon).or_else(|_| abs.strip_prefix(&root.shown)) else { continue };
             let w = root.walk(&normal_parts(rest)?, true, &r.path().display().to_string())?;
+            w.notes.iter().for_each(|n| self.note(n.clone()));
             return match w.existing {
                 None => Ok(None),
                 Some(Existing::File(_)) => Ok(Some(w.stack.last().expect("the root").open_read(&w.name)?)),
@@ -1081,7 +1155,10 @@ impl GameRoots {
 
     /// The original game file for a game-relative path, read-only, through any link.
     pub fn original(&self, p: &RelPath) -> Result<Option<File>, Error> {
-        self.game.open_free(p.parts())
+        let mut notes = Vec::new();
+        let found = self.game.open_free(p.parts(), &mut notes);
+        notes.into_iter().for_each(|n| self.note(n));
+        found
     }
 
     /// Writes the destination whole: into a new file of an unpredictable name next

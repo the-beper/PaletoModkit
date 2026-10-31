@@ -91,7 +91,7 @@ builds)
     if [ -n "$LINUX" ]; then check_linux "$LINUX"; fi
     only_files "$FLATPAK" flatpak-unsigned-repo.tar flatpak-build.txt
     check_buildfile "$FLATPAK/flatpak-build.txt"
-    extract_repo_tar "$FLATPAK/flatpak-unsigned-repo.tar" "$SCRATCH/u"
+    extract_repo_tar "$FLATPAK/flatpak-unsigned-repo.tar" "$SCRATCH/u" deltas
     check_unsigned_repo "$SCRATCH/u/repo" "$VERSION"
     [ "$(ostree --repo="$SCRATCH/u/repo" rev-parse "$APP_REF")" = "$(kv_get "$FLATPAK/flatpak-build.txt" app_commit)" ] || die 2 "flatpak-build.txt: another app commit than the repository"
     mkdir -p "$OUT"
@@ -141,7 +141,8 @@ final)
     want=$(conf_hex FLATPAK_KEY_FPR 40 | tr 'a-f' 'A-F')
     [ "$fpr" = "$want" ] || die 2 "flatpak-pubkey.gpg is the key ${fpr:-unknown}, not $want"
     [ "$(kv_get "$S" key_fpr)" = "$want" ] || die 2 "flatpak-signed.txt names another key than $want"
-    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$SCRATCH/s"
+    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$SCRATCH/s" deltas
+    check_signed_deltas "$SCRATCH/s/repo" "$S"
     verify_signed_repo "$SCRATCH/s/repo" "$IN/flatpak-pubkey.gpg" "$SCRATCH" "$VERSION"
     R=$SCRATCH/s/repo
     [ "$(ostree --repo="$R" rev-parse "$APP_REF")" = "$(kv_get "$S" app_commit)" ] || die 2 "the app commit is not the recorded one"

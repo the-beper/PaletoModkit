@@ -198,3 +198,46 @@ fx_flatpak() {
     } > "$2/flatpak-build.txt"
     rm -rf "$t"
 }
+
+# fx_delta_shim DIR MODE: DIR/ostree, a stand-in for the real ostree (found now, on the PATH of the caller) that spoils the static delta
+# of --finish and passes on everything else. corrupt: a byte of the first part is flipped after "static-delta generate". unsigned: the
+# delta is made in a copy of the repository without the detached metadata of its commits, as one made before the signing would be
+# (no signature in its superblock), and moved in. Put DIR first on the PATH of --finish.
+fx_delta_shim() {
+    mkdir -p "$1"
+    real=$(command -v ostree)
+    case $2 in
+        corrupt)
+            sed "s|@REAL@|$real|" > "$1/ostree" <<'SHIM'
+#!/bin/sh
+"@REAL@" "$@" || exit $?
+case " $* " in
+    *" static-delta generate "*)
+        part=$(find "${1#--repo=}/deltas" -type f -name 0 | head -n1)
+        printf '\377' | dd of="$part" bs=1 seek=100 conv=notrunc 2> /dev/null
+        ;;
+esac
+SHIM
+            ;;
+        unsigned)
+            sed "s|@REAL@|$real|" > "$1/ostree" <<'SHIM'
+#!/bin/sh
+case " $* " in
+    *" static-delta generate "*)
+        r=${1#--repo=}
+        t=$(mktemp -d "${TMPDIR:-/tmp}/shim.XXXXXX")
+        cp -a "$r" "$t/repo"
+        find "$t/repo/objects" -name '*.commitmeta' -delete
+        shift
+        "@REAL@" --repo="$t/repo" "$@" || exit $?
+        mkdir -p "$r/deltas"
+        cp -a "$t/repo/deltas/." "$r/deltas/"
+        rm -rf "$t"
+        ;;
+    *) exec "@REAL@" "$@" ;;
+esac
+SHIM
+            ;;
+    esac
+    chmod +x "$1/ostree"
+}

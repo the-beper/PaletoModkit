@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::Error;
-use crate::fsroot::{Dir, Existing, Fingerprint, GameRoots, Kind, LockGuard, Resolved, RootKind, find_ci, random};
+use crate::fsroot::{Dir, Existing, Fingerprint, Found, GameRoots, Kind, LockGuard, Resolved, RootKind, find_ci, random};
 use crate::game::Game;
 use crate::relpath::RelPath;
 use journal::{End, JOp, Journal, Mode, OpKind, ParseError, RootRec, State};
@@ -175,7 +175,7 @@ fn backup_name(txn: &str, i: usize) -> String {
     format!(".paleto-{txn}-{i}.old")
 }
 
-fn sync_file(file: &File) -> io::Result<()> {
+pub(crate) fn sync_file(file: &File) -> io::Result<()> {
     fault!(SyncFile);
     file.sync_all()
 }
@@ -443,7 +443,8 @@ fn finish_rollback(jdir: &Dir, jname: &str, rolled: &Rolled, write: impl FnOnce(
     }
 }
 
-fn txn_error(cause: Error, log: Vec<String>, rolled: &Rolled) -> Error {
+fn txn_error(roots: &GameRoots, cause: Error, mut log: Vec<String>, rolled: &Rolled) -> Error {
+    log.extend(roots.take_notes());
     Error::Txn(Box::new(TxnFailure { cause, log, undone: rolled.failures.is_empty(), failures: rolled.failures.clone(), journaled: true, verb: "installed" }))
 }
 
@@ -950,7 +951,7 @@ impl<'r> Txn<'r> {
             if self.left.is_empty() {
                 return cause;
             }
-            return txn_error(cause, log, &Rolled { failures: self.left.clone(), notes: Vec::new() });
+            return txn_error(self.roots, cause, log, &Rolled { failures: self.left.clone(), notes: Vec::new() });
         }
         self.fail(cause, log, true)
     }
@@ -984,7 +985,7 @@ impl<'r> Txn<'r> {
             return cause;
         }
         let rolled = self.rollback_now();
-        if rolled.failures.is_empty() && !wrap { cause } else { txn_error(cause, log, &rolled) }
+        if rolled.failures.is_empty() && !wrap { cause } else { txn_error(self.roots, cause, log, &rolled) }
     }
 
     fn note_root(&mut self, kind: RootKind) -> Result<(), Error> {
@@ -1036,12 +1037,15 @@ impl<'r> Txn<'r> {
             // The folder may exist by now under another case (one this transaction made for an earlier file, or
             // somebody else's): names are matched as the resolver matches them, so one name is one folder.
             let hit = find_ci(&dest.parent, &name)?;
-            let name = hit.as_ref().map_or(name, |(actual, _)| actual.clone());
+            if let Some(found) = &hit {
+                self.roots.note_spellings(&dest.folder(), found);
+            }
+            let name = hit.as_ref().map_or(name, |found| found.name.clone());
             let op = JOp { kind: OpKind::Mkdir, anchor: dest.anchor(), dir: dest.logical.clone(), name: name.clone(), expect: None, mode: Mode::Move, made: None, kept: false, did: false };
             let i = self.add_op(op, &dest.parent)?;
             let (made, kept) = match hit {
-                Some((_, Kind::Dir)) => (dest.parent.open_dir(&name)?, true),
-                Some((_, Kind::Link)) => return Err(unsafe_dest(dest, &format!("\"{name}\" is a link"))),
+                Some(Found { kind: Kind::Dir, .. }) => (dest.parent.open_dir(&name)?, true),
+                Some(Found { kind: Kind::Link, .. }) => return Err(unsafe_dest(dest, &format!("\"{name}\" is a link"))),
                 Some(_) => return Err(unsafe_dest(dest, &format!("\"{name}\" is not a folder"))),
                 None => match dest.parent.mkdir(&name) {
                     Ok(dir) => (dir, false),
@@ -1315,6 +1319,7 @@ impl<'r> Txn<'r> {
             log.push(format!("everything was installed, but these backups could not be removed and are removed at the next run: {}", left.join("; ")));
         }
         self.phase = Phase::Done;
+        log.extend(self.roots.take_notes());
         log
     }
 }

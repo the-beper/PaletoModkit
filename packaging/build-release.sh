@@ -67,7 +67,8 @@ command -v zsyncmake > /dev/null || die 1 "missing zsyncmake: install zsync"
 cargo build --release --locked -p paleto-modkit -p paleto-cli
 # The Legacy -> Enhanced converter (.NET, CodeWalker based).
 OUT=target/cwconv ./packaging/build-cwconv.sh
-rm -rf "$DIST" && mkdir -p "$DIST"
+# Removes only what this script makes: dist/ may hold other files (the Flatpak bundle, work files).
+"$ROOT/packaging/clean-dist.sh" "$DIST" "$NAME" "$ARCH"
 
 # Shared install tree: bin/ + share/.
 stage() {

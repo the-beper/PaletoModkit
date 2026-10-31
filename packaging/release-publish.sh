@@ -6,7 +6,7 @@
 #       DIR: the artifacts of the earlier jobs in one folder (see release-verify.sh final)
 #       --bootstrap  gh-pages does not exist yet and this creates it
 #       release          the release (a prerelease for -rc.N: nothing on gh-pages) and, for a stable tag, Pages
-#       publish-flatpak  only Pages, for a release that is already published and is the highest
+#       publish-flatpak  only Pages, for the highest published release with all its files
 # Environment: GH_TOKEN, GH_REPO (the gh CLI; the token is also handed to git by a credential helper that reads
 # it, never in a URL), REMOTE, RELEASE_WAIT (seconds to wait for the list of releases to show a change, default 60)
 # and RELEASE_POLL (3), PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), GITHUB_RUN_ID
@@ -58,8 +58,10 @@ now=$(remote_tag "$TAG")
 [ "$now" = "$COMMIT" ] || die 5 "the tag $TAG is ${now:-gone} on the remote, this run built $COMMIT"
 release_state "$TMP/state"
 
-# The signing job found $TAG already on gh-pages for this commit and signed nothing.
+# The signing job found $TAG already on gh-pages for this commit and signed nothing. The record of a skip is made by jobs that
+# read untrusted data: gh-pages, read from the remote now, must say it.
 if [ "$(kv_get "$S" skip)" = 1 ]; then
+    [ "$PG_TAG" = "$TAG" ] && [ "$PG_COMMIT" = "$COMMIT" ] || die 5 "the signing job skipped $TAG, but gh-pages has ${PG_TAG:-no version} at ${PG_COMMIT:-an unknown commit}, not $TAG at $COMMIT: nothing was published"
     [ "$MODE" = release ] || { echo "$TAG is already on gh-pages: nothing to do"; exit 0; }
     pub_id=$(awk -F '\t' -v t="$TAG" '$2 == t && $3 == "false" { print $1 }' "$TMP/state/releases.tsv")
     [ -n "$pub_id" ] || die 5 "$TAG is on gh-pages but the release is not published: Pages is ahead of the release (docs/release.md)"
@@ -188,6 +190,8 @@ push_pages() {
         [ "$(git -C "$g" rev-parse HEAD)" = "$PG_HEAD" ] || die 5 "gh-pages moved while publishing"
         link=$(find "$g" -path "$g/.git" -prune -o -type l -print | head -n1)
         [ -z "$link" ] || die 2 "gh-pages holds a symbolic link ($link)"
+        # The static delta leads from the base that flatpak-signed.txt records: it must be the app head published now, or a client on it gets no delta.
+        [ "$(cat "$g/repo/refs/heads/$APP_REF" 2> /dev/null)" = "$(kv_get "$S" base_app_commit)" ] || die 5 "the app commit published on gh-pages is not the base the signed repository was made from: run all jobs again"
         cp "$g/paleto-modkit.flatpakrepo" "$g/paleto-modkit.flatpakref" "$TMP/old/" || die 5 "gh-pages has no .flatpakrepo or .flatpakref"
         git -C "$g" checkout -q --orphan paleto-new
         git -C "$g" rm -rqf .
@@ -195,7 +199,8 @@ push_pages() {
     else
         git init -q --initial-branch=paleto-new "$g"
     fi
-    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$TMP/ex"
+    extract_repo_tar "$IN/flatpak-signed-repo.tar" "$TMP/ex" deltas
+    check_signed_deltas "$TMP/ex/repo" "$S"
     mv "$TMP/ex/repo" "$g/repo"
     rm -rf "$g/repo/tmp"
     # The key in the files users added the remote with is the PUBLISHED one, byte for byte (a fresh export of the same

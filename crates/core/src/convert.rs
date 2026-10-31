@@ -107,7 +107,19 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Result<std::process::Out
             out
         })
     }
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A program that was written a moment ago can be "busy" while a fork of another thread still holds its file
+    // open for writing, until that fork runs its own program: a short wait ends it.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => break result?,
+        }
+    };
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
     let status = loop {
@@ -397,6 +409,11 @@ pub fn legacy_in_archive(archive: &Archive, keys: Option<&Keys>) -> Vec<String> 
     while let Some((prefix, child)) = queue.pop() {
         let archive = child.as_ref().unwrap_or(archive);
         for (path, i) in archive.walk(0) {
+            // The parser refuses odd names; the paths found here go on to edit the archive, so check again. Skipped
+            // without a message on purpose: it cannot happen with the parser, and this list has no channel for one.
+            if !crate::vfs::is_plain_entry_path(&path) {
+                continue;
+            }
             let entry = &archive.entries[i];
             if entry.is_archive() {
                 if let Ok(c) = archive.open_child(i, keys) {
@@ -669,6 +686,25 @@ done
     }
 
     #[test]
+    fn legacy_files_with_names_that_are_not_plain_paths_are_left_out() {
+        let res = |v: u32| [b"RSC7".as_slice(), &v.to_le_bytes(), &((v >> 4) << 28).to_le_bytes(), &((v & 15) << 28).to_le_bytes(), b"payload"].concat();
+        let dir = tempfile::tempdir().unwrap();
+        let mut ed = ArchiveEditor::new("a.rpf");
+        for name in ["car.yft", "evil.yft", "x64/odd.yft"] {
+            ed.add_file(name, res(162)).unwrap();
+        }
+        let path = dir.path().join("a.rpf");
+        ed.save(&path).unwrap();
+        let mut archive = Archive::open(&path, None).unwrap();
+        assert_eq!(legacy_in_archive(&archive, None), ["car.yft", "evil.yft", "x64/odd.yft"]);
+        // The parser cannot produce these names: make the entry list by hand.
+        for (name, odd) in [("evil.yft", "../evil.yft"), ("odd.yft", "../odd.yft")] {
+            archive.entries.iter_mut().find(|e| e.name == name).unwrap().name = odd.into();
+        }
+        assert_eq!(legacy_in_archive(&archive, None), ["car.yft"]);
+    }
+
+    #[test]
     fn converts_files_on_disk() {
         let res = |v: u32| [b"RSC7".as_slice(), &v.to_le_bytes(), &((v >> 4) << 28).to_le_bytes(), &((v & 15) << 28).to_le_bytes(), b"payload"].concat();
         let dir = tempfile::tempdir().unwrap();
@@ -744,6 +780,35 @@ done
         assert!(start.elapsed() < Duration::from_secs(10));
         let out = output_within(Command::new("sh").args(["-c", "echo out; echo err >&2"]), Duration::from_secs(30)).unwrap();
         assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (&b"out\n"[..], &b"err\n"[..]));
+    }
+
+    #[test]
+    fn a_program_written_a_moment_ago_runs_while_other_threads_fork() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicBool;
+        let dir = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            // Each fork holds the files open for writing at that moment until it runs `true`.
+            for _ in 0..4 {
+                s.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = Command::new("true").status();
+                    }
+                });
+            }
+            for i in 0..300 {
+                let path = dir.path().join(format!("tool{i}"));
+                std::fs::write(&path, "#!/bin/sh\necho ok\n").unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let out = output_within(&mut Command::new(&path), Duration::from_secs(30));
+                if !out.as_ref().is_ok_and(|o| o.stdout == b"ok\n") {
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("run {i}: {out:?}");
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
     }
 
     #[test]

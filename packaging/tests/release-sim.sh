@@ -180,60 +180,104 @@ job_verify() { # RUN
     export MANIFEST_SHA256
 }
 
-# job_sign RUN: fetch Pages (stable) and sign; SECRET_FILE says which key.
-job_sign() {
+# The signing, as four jobs on four machines (own RUNNER_TEMP each): they share only the files of the run artifacts (prepared, checked,
+# signres) and the hashes of the job outputs (verify.gho, check.gho, sign.gho). SECRET_FILE says which key the sign job has.
+sign_ctx() { # RUN: d, tag, commit, m and the arguments of the jobs
     d=$LIVE/runs/$1
     tag=$(kv "$d/validate.out" tag)
     commit=$(kv "$d/validate.out" commit)
+    sign_args="--tag $tag --commit $commit"
+    m=$d/verified/release-manifest.txt
+    boot=""
+    [ "$BOOTSTRAP" != true ] || boot=--bootstrap
+}
+
+# job_prepare RUN: no secret
+job_prepare() {
+    sign_ctx "$1"
     rt=$SIM/rt/$1
-    rm -rf "$rt"
+    rm -rf "$rt" "$d/prepared"
     mkdir -p "$rt"
-    secret=$(cat "${SECRET_FILE:-$KEYS/K.sec}")
     case $tag in
-        *-rc.*) site="--fresh" csite="--fresh" ;;
+        *-rc.*) site="--fresh" ;;
         *)
-            boot=""
-            [ "$BOOTSTRAP" != true ] || boot=--bootstrap
             run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages" $boot
             [ "$RC" = 0 ] || return 0
             site="--site $rt/pages $boot"
-            # sign-flatpak fetches gh-pages again, on a machine of its own
-            run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages2" $boot
-            [ "$RC" = 0 ] || return 0
-            csite="--site $rt/pages2 $boot"
             ;;
     esac
-    # The steps of the jobs: prepare (no secret), check-prepared (none), sign (the secret, nothing else), finish (none).
-    sign_args="--tag $tag --commit $commit"
-    m=$d/verified/release-manifest.txt
-    MANIFEST_SHA256=$(kv "$d/verify.gho" manifest_sha256)
-    export MANIFEST_SHA256
-    rm -f "$d/sign-prepare.log" "$d/sign-check.log" "$d/sign-sign.log" "$d/sign-finish.log"
-    rm -rf "$d/prepared" "$d/signres"
-    : > "$d/finish.gho"
-    : > "$d/sign.gho"
+    : > "$d/prepare.gho"
     # shellcheck disable=SC2086
-    run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
+    run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/prepare.gho" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --work "$rt/prepwork" --out "$d/prepared"
-    rc=$RC
-    if [ "$rc" = 0 ]; then
-        # shellcheck disable=SC2086
-        run "$d/sign-check.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --check-prepared $sign_args --manifest "$m" --in "$d/prepared" --work "$rt/signwork" $csite --check-remote
-        rc=$RC
+    # PREPARED_HOOK DIR: a function that edits the output of --prepare, as a compromised prepare job would (which also pins what it wrote)
+    if [ "$RC" = 0 ] && [ -n "${PREPARED_HOOK:-}" ]; then
+        "$PREPARED_HOOK" "$d/prepared"
+        echo "prepared_sha256=$(sha256sum "$d/prepared/flatpak-prepared.txt" | cut -d' ' -f1)" > "$d/prepare.gho"
     fi
-    if [ "$rc" = 0 ]; then
-        # shellcheck disable=SC2086
-        run "$d/sign-sign.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/sign.gho" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sign_args --work "$rt/signwork" --out "$d/signres"
-        rc=$RC
+}
+
+# job_check RUN: gh-pages fetched again (stable), everything checked before the key; no secret
+job_check() {
+    sign_ctx "$1"
+    ct=$SIM/rt/$1-check
+    rm -rf "$ct" "$d/checked"
+    mkdir -p "$ct"
+    : > "$d/check.gho"
+    case $tag in
+        *-rc.*) csite="--fresh" ;;
+        *)
+            run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$ct" sh packaging/release-pages.sh fetch "$ct/pages" $boot
+            [ "$RC" = 0 ] || return 0
+            csite="--site $ct/pages $boot"
+            ;;
+    esac
+    # shellcheck disable=SC2086
+    run "$d/sign-check.log" in_dir "$d/build" env RUNNER_TEMP="$ct" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" PREPARED_SHA256="$(kv "$d/prepare.gho" prepared_sha256)" GITHUB_OUTPUT="$d/check.gho" \
+        sh packaging/flatpak-sign.sh --check-prepared $sign_args --manifest "$m" --in "$d/prepared" --work "$ct/checkwork" --out "$d/checked" $csite --check-remote
+}
+
+# job_sign RUN: the artifact of the check job, unpacked without the key (step 1), then signed (the Sign step)
+job_sign() {
+    sign_ctx "$1"
+    st=$SIM/rt/$1-sign
+    rm -rf "$st" "$d/signres"
+    mkdir -p "$st"
+    : > "$d/sign.gho"
+    secret=$(cat "${SECRET_FILE:-$KEYS/K.sec}")
+    run "$d/sign-unpack.log" in_dir "$d/build" env RUNNER_TEMP="$st" CHECKED_SHA256="$(kv "$d/check.gho" checked_sha256)" PREPARED_SHA256="$(kv "$d/prepare.gho" prepared_sha256)" \
+        sh packaging/flatpak-sign.sh --unpack $sign_args --in "$d/checked" --work "$st/signwork"
+    if [ "$RC" = 0 ]; then
+        run "$d/sign-sign.log" in_dir "$d/build" env RUNNER_TEMP="$st" GITHUB_OUTPUT="$d/sign.gho" FLATPAK_GPG_PRIVATE_KEY="$secret" \
+            sh packaging/flatpak-sign.sh --sign $sign_args --work "$st/signwork" --out "$d/signres"
     fi
-    if [ "$rc" = 0 ]; then
-        # shellcheck disable=SC2086
-        run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/sign.gho" result_sha256)" GITHUB_OUTPUT="$d/finish.gho" sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --work "$rt/finwork" --out "$d/signed"
-        rc=$RC
-    fi
-    cat "$d"/sign-prepare.log "$d"/sign-check.log "$d"/sign-sign.log "$d"/sign-finish.log > "$d/sign.log" 2> /dev/null || true
-    in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --cleanup --work "$rt/signwork" > "$d/cleanup.log" 2>&1 || true
-    RC=$rc
+    sj=$RC
+    in_dir "$d/build" env RUNNER_TEMP="$st" sh packaging/flatpak-sign.sh --cleanup --work "$st/signwork" > "$d/cleanup.log" 2>&1 || true
+    RC=$sj
+}
+
+# job_finish RUN: no secret, another machine
+job_finish() {
+    sign_ctx "$1"
+    ft=$SIM/rt/$1-fin
+    rm -rf "$ft"
+    mkdir -p "$ft"
+    : > "$d/finish.gho"
+    run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$ft" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" CHECKED_SHA256="$(kv "$d/check.gho" checked_sha256)" PREPARED_SHA256="$(kv "$d/prepare.gho" prepared_sha256)" \
+        RESULT_SHA256="$(kv "$d/sign.gho" result_sha256)" GITHUB_OUTPUT="$d/finish.gho" \
+        sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --checked "$d/checked" --work "$ft/finwork" --out "$d/signed"
+}
+
+# signing_jobs RUN: prepare, check, sign and finish in order, stopping at the first that fails (SIGN_FAIL names it); sign.log has all their logs
+SIGN_FAIL=""
+signing_jobs() {
+    SIGN_FAIL=""
+    rm -f "$LIVE/runs/$1"/sign-*.log
+    for j in prepare check sign finish; do
+        "job_$j" "$1"
+        [ "$RC" = 0 ] || { SIGN_FAIL=$j; break; }
+    done
+    cat "$LIVE/runs/$1"/sign-prepare.log "$LIVE/runs/$1"/sign-check.log "$LIVE/runs/$1"/sign-unpack.log "$LIVE/runs/$1"/sign-sign.log "$LIVE/runs/$1"/sign-finish.log > "$LIVE/runs/$1/sign.log" 2> /dev/null || true
 }
 
 job_publish() { # RUN MODE
@@ -266,8 +310,8 @@ pipeline() {
     [ "$RC" = 0 ] || { PIPE_FAIL=verify; return 0; }
     [ "$(kv "$LIVE/runs/$n/validate.out" publish)" = true ] || return 0
     [ "$until" != verify ] || return 0
-    job_sign "$n"
-    [ "$RC" = 0 ] || { PIPE_FAIL=sign; return 0; }
+    signing_jobs "$n"
+    [ "$RC" = 0 ] || { PIPE_FAIL=$SIGN_FAIL; return 0; }
     [ "$until" != sign ] || return 0
     job_publish "$n" "$mode"
     [ "$RC" = 0 ] || { PIPE_FAIL=publish; return 0; }
@@ -370,6 +414,8 @@ sc_prerelease() {
     assert_eq "draft flag" false "$(stub_field v1.7.0-rc.1 draft)"
     assert_eq "assets" 5 "$(stub_assets v1.7.0-rc.1)"
     assert_eq "gh-pages unchanged" "$before" "$(git -C "$LIVE/origin.git" rev-parse gh-pages)"
+    assert_eq "no static delta is recorded for a release candidate" "" "$(kv "$LIVE/runs/1/signed/flatpak-signed.txt" delta_superblock_sha256)"
+    assert_eq "no static delta in the repository of a release candidate" 0 "$(tar -tf "$LIVE/runs/1/signed/flatpak-signed-repo.tar" | grep -c 'delta')"
     assert_eq "latest unchanged" v1.5.1 "$(cat "$GH_STUB_DIR/latest")"
     # an rc cannot go to Pages
     job_validate 2 v1.7.0-rc.1 publish-flatpak
@@ -648,8 +694,6 @@ sc_tampered_signed() {
     [ -f "$f" ] || { fail "the object $f does not exist"; return 0; }
     chmod u+w "$f"
     printf Z | dd of="$f" bs=1 seek=$(($(stat -c %s "$f") - 3)) conv=notrunc 2> /dev/null
-    # a client without the static deltas reads the objects: make it so (the deltas carry the content otherwise)
-    rm -rf "$t/repo/deltas" "$t/repo/delta-indexes"
     tar -C "$t" -cf "$d/signed/flatpak-signed-repo.tar" repo
     snapshot > "$SIM/snap.before"
     job_publish 1 release
@@ -835,6 +879,8 @@ sc_concurrent() {
 sc_gh_pages_missing() {
     git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages
     git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    # the very first publication: no release yet
+    rm -rf "$GH_STUB_DIR/rel"
     commit_release 1.6.0
     tag_release v1.6.0
     pipeline 1 v1.6.0 release
@@ -854,6 +900,20 @@ sc_gh_pages_missing() {
     pipeline 3 v1.6.1 release
     BOOTSTRAP=false
     assert_rc "bootstrap on an existing gh-pages" 5
+    # both branches gone with a release published: a new version does not start a new chain, the highest release rebuilds gh-pages
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    BOOTSTRAP=true
+    pipeline 4 v1.6.1 release
+    assert_rc "bootstrap of a new version when 1.6.0 is published" 5
+    assert_eq "failed job" validate "$PIPE_FAIL"
+    assert_log "$LIVE/runs/4/validate.log" "v1.6.0 is published"
+    pipeline 5 v1.6.0 publish-flatpak workflow_dispatch
+    BOOTSTRAP=false
+    assert_rc "bootstrap by publish-flatpak of the highest release" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    assert_eq "gh-pages commits" 1 "$(pages_count)"
 }
 
 sc_another_writer() {
@@ -939,6 +999,104 @@ sc_publish_flatpak() {
     assert_eq "the release was not touched" "$snapshot_stub" "$(cd "$GH_STUB_DIR" && find . -type f -not -name log | LC_ALL=C sort | xargs sha256sum)"
 }
 
+# rollback_pages: gh-pages is its previous state again (the version before the last release), the site follows
+rollback_pages() {
+    git -C "$LIVE/origin.git" update-ref refs/heads/gh-pages "$(git -C "$LIVE/origin.git" rev-parse gh-pages-previous)"
+    git -C "$LIVE/origin.git" update-ref -d refs/heads/gh-pages-previous
+    rm -rf "$LIVE/site"
+    mkdir -p "$LIVE/site"
+    git -C "$LIVE/origin.git" archive refs/heads/gh-pages | tar -x -C "$LIVE/site"
+}
+
+# The record of a skip is made by jobs that read untrusted data. With gh-pages not at the tag, publish-flatpak would say "nothing
+# to do" and end green: both the signing job (--check-prepared) and the publish job check the record against gh-pages.
+forge_skip() { sed -i 's/^skip=.*/skip=1/' "$1/flatpak-prepared.txt"; }
+sc_forged_skip() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release
+    assert_rc "release" 0
+    rollback_pages
+    pipeline 2 v1.6.0 publish-flatpak workflow_dispatch sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/2
+    assert_eq "skip of the honest run" 0 "$(kv "$d/signed/flatpak-signed.txt" skip)"
+    # the publish job: a record of a skip that fits its pin
+    sed -i 's/^skip=.*/skip=1/' "$d/signed/flatpak-signed.txt"
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
+    snapshot > "$SIM/snap.before"
+    job_publish 2 publish-flatpak
+    assert_rc "publish of a forged skip" 5
+    assert_log "$d/publish.log" "nothing was published"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "something was written"
+    assert_eq "gh-pages tag" v1.5.1 "$(kv "$LIVE/site/release.txt" tag)"
+    # the check job: the description of the preparation says skip, gh-pages does not
+    PREPARED_HOOK=forge_skip
+    signing_jobs 2
+    PREPARED_HOOK=
+    assert_rc "check of a forged skip" 5
+    assert_log "$d/sign.log" "gh-pages has"
+}
+
+# gh-pages rolled back to an older state, signed and valid: a new version is not built on it. The release list says which
+# version gh-pages must at least have; the repair is publish-flatpak for the highest published tag.
+sc_replay_pages() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    commit_release 1.6.1
+    tag_release v1.6.1
+    pipeline 1 v1.6.0 release
+    assert_rc "release 1.6.0" 0
+    pipeline 2 v1.6.1 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    rollback_pages
+    assert_eq "gh-pages tag" v1.5.1 "$(kv "$LIVE/site/release.txt" tag)"
+    job_validate 3 v1.6.1 release
+    assert_rc "validate of 1.6.1 over a gh-pages with 1.5.1 when 1.6.0 is published" 5
+    assert_log "$LIVE/runs/3/validate.log" "publish-flatpak for v1.6.0"
+    snapshot > "$SIM/snap.before"
+    job_publish 2 release
+    assert_rc "publish of 1.6.1 over a gh-pages with 1.5.1" 5
+    assert_log "$LIVE/runs/2/publish.log" "publish-flatpak for v1.6.0"
+    snapshot > "$SIM/snap.after"
+    cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "something was written"
+    # a release candidate has no Pages
+    commit_release 1.7.0-rc.1
+    tag_release v1.7.0-rc.1
+    job_validate 4 v1.7.0-rc.1 release
+    assert_rc "validate of a release candidate" 0
+    # the repair, then the release goes on
+    pipeline 5 v1.6.0 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak of 1.6.0" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    job_validate 6 v1.6.1 release
+    assert_rc "validate of 1.6.1 after the repair" 0
+    # a release made by hand (published, without the files) was never on Pages: it is no reason to refuse the next version...
+    d=$GH_STUB_DIR/rel/9001
+    mkdir -p "$d"
+    echo v1.6.1 > "$d/tag"
+    echo false > "$d/draft"
+    echo false > "$d/prerelease"
+    commit_release 1.6.2
+    tag_release v1.6.2
+    job_validate 7 v1.6.2 release
+    assert_rc "validate of 1.6.2 when the highest release has no files and gh-pages has 1.6.0" 0
+    # ...and no way to lift the check: the anchor is the highest release that has them (1.6.0), not the highest
+    rollback_pages
+    job_validate 8 v1.6.2 release
+    assert_rc "validate of 1.6.2 over a gh-pages with 1.5.1, 1.6.0 published and a release of 1.6.1 without files" 5
+    assert_log "$LIVE/runs/8/validate.log" "publish-flatpak for v1.6.0"
+    # the advice works with the release made by hand present: 1.6.0 is the highest with its files, and gh-pages is restored
+    pipeline 9 v1.6.0 publish-flatpak workflow_dispatch
+    assert_rc "publish-flatpak of 1.6.0 when a release of 1.6.1 has no files" 0
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+    job_validate 10 v1.6.2 release
+    assert_rc "validate of 1.6.2 after the repair" 0
+}
+
 sc_sign_fresh_and_verify() {
     # the signing script on its own: a fresh repository, then the bundle
     commit_release 1.6.0
@@ -955,7 +1113,7 @@ sc_sign_fresh_and_verify() {
     # a skipped signing: run 4 was validated before the release, signs after it
     d=$LIVE/runs/1
     rm -rf "$d/signed"
-    job_sign 1
+    signing_jobs 1
     assert_rc "sign again on the published state" 0
     assert_eq "skip" 1 "$(kv "$d/signed/flatpak-signed.txt" skip)"
     [ ! -e "$d/signed/flatpak-signed-repo.tar" ] || fail "something was signed on skip"
@@ -987,7 +1145,7 @@ sc_pages_second_key() {
     tag_release v1.6.0
     edit_pages "second key" mut_two_keys
     pipeline 1 v1.6.0 release
-    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_eq "failed job" prepare "$PIPE_FAIL"
     assert_rc "sign with two keys in the published file" 3
     assert_log "$LIVE/runs/1/sign.log" "exactly the key"
     [ ! -e "$LIVE/runs/1/signed/PaletoModkit-x86_64.flatpak" ] || fail "a bundle was made"
@@ -998,7 +1156,7 @@ sc_pages_other_key() {
     tag_release v1.6.0
     edit_pages "another key" mut_other_key
     pipeline 1 v1.6.0 release
-    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_eq "failed job" prepare "$PIPE_FAIL"
     assert_rc "sign with another published key" 3
 }
 
@@ -1021,13 +1179,13 @@ sc_pages_symlink() {
     edit_pages "a link" mut_symlink
     pipeline 1 v1.6.0 release push verify
     assert_eq "failed job" "" "$PIPE_FAIL"
-    job_sign 1
+    signing_jobs 1
     assert_rc "fetch of gh-pages with a link" 2
     assert_log "$LIVE/runs/1/pages.log" "symbolic link"
     [ ! -e "$SIM/rt/1/pages" ] || fail "the clone was left behind"
 }
 
-# the secret in the environment of the signing job: only --sign accepts it, and none of its child processes sees it
+# the secret in the environment of the jobs: only --sign accepts it, and none of its child processes sees it
 sc_sign_secret_env() {
     commit_release 1.6.0
     tag_release v1.6.0
@@ -1051,23 +1209,32 @@ sc_sign_secret_env() {
     assert_rc "fetch again" 0
     m=$d/verified/release-manifest.txt
     args="--tag $tag --commit $commit --manifest $m --unsigned $d/fp/flatpak-unsigned-repo.tar --site $rt/pages --work $rt/pw --out $d/prepared"
-    cargs="--tag $tag --commit $commit --manifest $m --in $d/prepared --work $rt/w --site $rt/pages2 --check-remote"
-    sargs="--tag $tag --commit $commit --work $rt/w --out $d/signres"
-    fargs="--tag $tag --commit $commit --manifest $m --in $d/signres --work $rt/fw --out $d/signed"
+    cargs="--tag $tag --commit $commit --manifest $m --in $d/prepared --work $rt/w --out $d/checked --site $rt/pages2 --check-remote"
+    uargs="--tag $tag --commit $commit --in $d/checked --work $rt/sw"
+    sargs="--tag $tag --commit $commit --work $rt/sw --out $d/signres"
+    fargs="--tag $tag --commit $commit --manifest $m --in $d/signres --checked $d/checked --work $rt/fw --out $d/signed"
     secret=$(cat "$KEYS/K.sec")
     # shellcheck disable=SC2086
     run "$d/p0.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --prepare $args
     assert_rc "prepare with the secret" 1
     assert_log "$d/p0.log" "without the secret"
     # shellcheck disable=SC2086
-    run "$d/p1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --prepare $args
+    run "$d/p1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/p1.gho" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --prepare $args
     assert_rc "prepare" 0
+    pp=$(kv "$d/p1.gho" prepared_sha256)
     # shellcheck disable=SC2086
     run "$d/p1b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --check-prepared $cargs
     assert_rc "check-prepared with the secret" 1
     # shellcheck disable=SC2086
-    run "$d/p1c.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --check-prepared $cargs
+    run "$d/p1c.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$pp" GITHUB_OUTPUT="$d/p1c.gho" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --check-prepared $cargs
     assert_rc "check-prepared" 0
+    ckp=$(kv "$d/p1c.gho" checked_sha256)
+    # shellcheck disable=SC2086
+    run "$d/p1d.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --unpack $uargs
+    assert_rc "unpack with the secret" 1
+    # shellcheck disable=SC2086
+    run "$d/p1e.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --unpack $uargs
+    assert_rc "unpack" 0
     : > "$rt/seen"
     : > "$rt/calls"
     # shellcheck disable=SC2086
@@ -1077,7 +1244,7 @@ sc_sign_secret_env() {
     # the sign step unpacks nothing and makes no commit, no appstream data and no delta: it signs
     if grep -q -e build-commit-from -e 'untrusted' "$rt/calls"; then fail "the sign step made commits from the build output"; fi
     grep 'build-update-repo' "$rt/calls" | grep -q -e '--no-update-appstream' || fail "the sign step generated appstream data"
-    if grep -q -e 'generate-static-deltas' "$rt/calls"; then fail "the sign step generated static deltas"; fi
+    if grep -q -e 'generate-static-deltas' -e 'static-delta' "$rt/calls"; then fail "the sign step made static deltas"; fi
     grep -q 'gpg-sign' "$rt/calls" || fail "the sign step did not sign with ostree gpg-sign"
     for t in flatpak gpg ostree; do
         [ "$(grep -c "^$t " "$rt/calls")" -gt 0 ] || fail "the shim of $t was never called: the check proves nothing"
@@ -1087,8 +1254,11 @@ sc_sign_secret_env() {
     run "$d/p3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --finish $fargs
     assert_rc "finish with the secret" 1
     # shellcheck disable=SC2086
-    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/p2.gho" result_sha256)" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
+    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/p2.gho" result_sha256)" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
     assert_rc "finish" 0
+    # the delta is made here, by the step without the key, after the signing
+    grep -q 'static-delta generate' "$rt/calls" || fail "the finish step made no static delta"
+    grep -q 'static-delta reindex' "$rt/calls" || fail "the finish step did not index the static delta"
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 
@@ -1129,7 +1299,7 @@ sc_pages_key_bytes() {
 mut_variant_key() { k=$(base64 -w0 "$SIM/K2.pub"); sed -i "s|^GPGKey=.*|GPGKey=$k|" paleto-modkit.flatpakrepo paleto-modkit.flatpakref; }
 mut_other_file() { echo hello > other.txt; }
 
-# what the signing job checks before it signs: the hash of the prepared repository, the tag, the base of gh-pages, and
+# what the check job checks before the key exists: the hash of the prepared repository, the tag, the base of gh-pages, and
 # the content against the manifest of the verify job (a prepare job that lies about everything it wrote)
 sc_sign_prepared_checks() {
     commit_release 1.6.0
@@ -1154,11 +1324,15 @@ sc_sign_prepared_checks() {
     for f in flatpak-prepared-repo.tar flatpak-prepared.txt; do assert_file "prepared output" "$d/prepared/$f"; done
     # shellcheck disable=SC2329
     chk_it() { # IN TAG [OPTION]
-        in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --check-prepared --tag "$2" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/w" --site "$rt/pages2" ${3:+"$3"}
+        in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$(sha256sum "$1/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --check-prepared --tag "$2" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/w" --out "$rt/co" --site "$rt/pages2" ${3:+"$3"}
+    }
+    # shellcheck disable=SC2329
+    unpack_it() {
+        in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$rt/co/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$d/prepared/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$rt/co" --work "$rt/sw"
     }
     # shellcheck disable=SC2329
     sign_it() {
-        in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/w" --out "$d/signres"
+        in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/sw" --out "$d/signres"
     }
     # a prepared repository that changed after it was described
     rm -rf "$d/prepared.bad"
@@ -1170,6 +1344,13 @@ sc_sign_prepared_checks() {
     # another tag than the one prepared
     run "$d/q3.log" chk_it "$d/prepared" v1.6.1
     assert_rc "check for another tag" 2
+    # the description of the preparation is pinned by the job output of prepare-flatpak: no pin, another pin
+    for pin in "" "$(printf 'a%.0s' $(seq 64))"; do
+        run "$d/q3b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$pin" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" \
+            --in "$d/prepared" --work "$rt/w" --out "$rt/co" --site "$rt/pages2"
+        assert_rc "check with the pin '$pin' of the preparation" 2
+        assert_log "$d/q3b.log" "pinned"
+    done
     # a prepare job that lies about everything: another build of the same commit, prepared consistently, its
     # description edited to name the verified build. Only the content checksum against the manifest can tell.
     fx_flatpak "$d/build" "$d/fp2"
@@ -1183,9 +1364,9 @@ sc_sign_prepared_checks() {
     run "$d/q7.log" chk_it "$d/prepared2" "$tag"
     assert_rc "check of a prepared repository of another build" 2
     assert_log "$d/q7.log" "not the verified build"
-    # the sign step does not accept a work folder that --check-prepared did not make
-    rm -rf "$rt/w"
-    mkdir -p "$rt/w"
+    # the sign step does not accept a work folder that --unpack did not make
+    rm -rf "$rt/sw"
+    mkdir -p "$rt/sw"
     run "$d/q8.log" sign_it
     assert_rc "sign without a check" 1
     # gh-pages moved since the preparation
@@ -1195,9 +1376,11 @@ sc_sign_prepared_checks() {
     # a ref that points to another commit after the check: not signed
     run "$d/q9.log" chk_it "$d/prepared" "$tag"
     assert_rc "check" 0
-    par=$(ostree --repo="$rt/w/repo" rev-parse "$APP_REF^")
-    printf '%s\n' "$par" > "$rt/w/repo/refs/heads/$APP_REF"
-    assert_eq "the ref was moved" "$par" "$(ostree --repo="$rt/w/repo" rev-parse "$APP_REF")"
+    run "$d/q9b.log" unpack_it
+    assert_rc "unpack" 0
+    par=$(ostree --repo="$rt/sw/repo" rev-parse "$APP_REF^")
+    printf '%s\n' "$par" > "$rt/sw/repo/refs/heads/$APP_REF"
+    assert_eq "the ref was moved" "$par" "$(ostree --repo="$rt/sw/repo" rev-parse "$APP_REF")"
     run "$d/q10.log" sign_it
     assert_rc "sign after a ref changed" 2
     assert_log "$d/q10.log" "not the commit that was checked"
@@ -1212,7 +1395,7 @@ sc_pages_hostile_config() {
     tag_release v1.6.0
     edit_pages "a hostile repository config" mut_hostile_config
     pipeline 1 v1.6.0 release
-    assert_eq "failed job" sign "$PIPE_FAIL"
+    assert_eq "failed job" prepare "$PIPE_FAIL"
     assert_rc "sign over a repository with a hostile config" 2
     assert_log "$LIVE/runs/1/sign.log" "config"
     [ ! -e "$LIVE/runs/1/signed/PaletoModkit-x86_64.flatpak" ] || fail "a bundle was made"
@@ -1249,7 +1432,7 @@ sc_sign_hostile_prepared() {
     hx_check() { # IN OPTION...: --check-prepared of a prepared directory
         i=$1
         shift
-        in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" --in "$i" --work "$rt/w" "$@" --check-remote
+        in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$(sha256sum "$i/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" --in "$i" --work "$rt/w" --out "$rt/co" "$@" --check-remote
     }
     # shellcheck disable=SC2329
     hx_make() { # NAME MUTATOR: $d/hx.NAME is the prepared directory with the repository MUTATOR changed, described as a lying prepare job would
@@ -1258,9 +1441,12 @@ sc_sign_hostile_prepared() {
         mkdir -p "$rt/hx.$1"
         tar -C "$rt/hx.$1" -xf "$d/prepared/flatpak-prepared-repo.tar"
         "$2" "$rt/hx.$1/repo"
-        tar -C "$rt/hx.$1" --owner=0 --group=0 --numeric-owner -cf "$d/hx.$1/flatpak-prepared-repo.tar" repo
+        tar -C "$rt/hx.$1" --owner=0 --group=0 --numeric-owner ${HX_TRANSFORM:+"--transform=$HX_TRANSFORM"} -cf "$d/hx.$1/flatpak-prepared-repo.tar" repo
         sed -i -e "s/^prepared_tar_sha256=.*/prepared_tar_sha256=$(sha256sum "$d/hx.$1/flatpak-prepared-repo.tar" | cut -d' ' -f1)/" \
-            -e "s/^prepared_app_commit=.*/prepared_app_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse "$APP_REF")/" "$d/hx.$1/flatpak-prepared.txt"
+            -e "s/^prepared_app_commit=.*/prepared_app_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse "$APP_REF")/" \
+            -e "s/^prepared_appstream_commit=.*/prepared_appstream_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse appstream/x86_64 2> /dev/null || true)/" \
+            -e "s/^prepared_appstream2_commit=.*/prepared_appstream2_commit=$(ostree --repo="$rt/hx.$1/repo" rev-parse appstream2/x86_64 2> /dev/null || true)/" -e '/^commitmeta=/d' "$d/hx.$1/flatpak-prepared.txt"
+        (cd "$rt/hx.$1/repo" && find objects -type f \( -name '*.commitmeta' -o -name '*.commitmeta2' \) | LC_ALL=C sort | while read -r f; do echo "commitmeta=$f $(sha256sum "$f" | cut -d' ' -f1)"; done) >> "$d/hx.$1/flatpak-prepared.txt"
     }
     # shellcheck disable=SC2329
     hx_u64() { # N: the text of a uint64 that ostree prints as N (it byte-swaps what it prints)
@@ -1286,12 +1472,13 @@ sc_sign_hostile_prepared() {
     # shellcheck disable=SC2329
     hx_refuse() { # NAME MUTATOR PATTERN [CODE]: the check exits with CODE (2) and names the reason
         hx_make "$1" "$2"
-        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | appstreamsubject | tamper) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
+        [ "$(kv "$d/hx.$1/flatpak-prepared.txt" prepared_app_commit)" != "$prep_app" ] || case $1 in config | appstreamkey | appstreamsubject | tamper | tar*) ;; *) fail "$1: the mutation did not change the app commit" ;; esac
         run "$d/hx.$1.log" hx_check "$d/hx.$1" --site "$rt/pages2"
         assert_rc "check of a prepared repository with $1" "${4:-2}"
         assert_log "$d/hx.$1.log" "$3"
         [ -e "$rt/w/signlist" ] && fail "$1: a list of commits to sign was written"
-        rm -rf "$rt/w"
+        [ -e "$rt/co/flatpak-check-result.txt" ] && fail "$1: a record of the check was written"
+        rm -rf "$rt/w" "$rt/co"
     }
     # shellcheck disable=SC2329
     mut_config() { printf '[flatpak]\nredirect-url=https://evil.example/repo\ntitle=Evil\n' >> "$1/config"; }
@@ -1351,24 +1538,31 @@ xa.metadata=x"; }
     run "$d/hx.ok.log" hx_check "$d/prepared" --site "$rt/pages2"
     assert_rc "check of the honest prepared repository" 0
     for f in summary summary.sig summary.idx summary.idx.sig summaries deltas delta-indexes; do [ ! -e "$rt/w/repo/$f" ] || fail "$f of the prepared repository is still there after the check"; done
-    rm -rf "$rt/w"
+    # what the check hands to the signing job: the tar of the cleaned repository, the sign list and the records, hashed in the record
+    for f in flatpak-checked-repo.tar signlist base.txt prepared.txt flatpak-check-result.txt; do assert_file "the output of the check" "$rt/co/$f"; done
+    for x in flatpak-checked-repo.tar:checked_tar_sha256 signlist:signlist_sha256 base.txt:base_sha256; do
+        assert_eq "${x%%:*} in the record of the check" "$(sha256sum "$rt/co/${x%%:*}" | cut -d' ' -f1)" "$(kv "$rt/co/flatpak-check-result.txt" "${x##*:}")"
+    done
+    if tar -tf "$rt/co/flatpak-checked-repo.tar" | grep -q -e '^repo/summary' -e '^repo/deltas' -e '^repo/delta-indexes'; then fail "the checked tar has summary files or deltas"; fi
+    cmp -s "$rt/w/signlist" "$rt/co/signlist" || fail "the sign list of the output is not the one of the check"
+    rm -rf "$rt/w" "$rt/co"
     hx_make honest mut_honest
     run "$d/hx.honest.log" hx_check "$d/hx.honest" --site "$rt/pages2"
     assert_rc "check of a new commit made like the honest one" 0
     grep -q "^$APP_REF $(ostree --repo="$rt/hx.honest/repo" rev-parse "$APP_REF")\$" "$rt/w/signlist" || fail "the new app commit is not on the sign list"
-    rm -rf "$rt/w"
+    rm -rf "$rt/w" "$rt/co"
 
     hx_make appstream mut_appstream
     run "$d/hx.appstream.log" hx_check "$d/hx.appstream" --site "$rt/pages2"
     assert_rc "check of a new appstream commit" 0
     grep -q '^appstream2/x86_64 ' "$rt/w/signlist" || fail "the new appstream commit is not on the sign list"
-    rm -rf "$rt/w"
+    rm -rf "$rt/w" "$rt/co"
     hx_make deltas mut_deltas
     run "$d/hx.deltas.log" hx_check "$d/hx.deltas" --site "$rt/pages2"
     assert_rc "check of a prepared repository with planted deltas" 0
     for f in deltas delta-indexes; do [ ! -e "$rt/w/repo/$f" ] || fail "the planted $f are still there after the check"; done
     [ -d "$rt/w/repo/tmp" ] || fail "the checked repository has no tmp folder"
-    rm -rf "$rt/w"
+    rm -rf "$rt/w" "$rt/co"
     hx_refuse config mut_config "config"
     hx_refuse appstreamkey mut_appstream_key "other metadata keys than"
     hx_refuse appstreamsubject mut_appstream_subject "subject or the body"
@@ -1389,6 +1583,25 @@ xa.metadata=x"; }
     hx_refuse commitmeta mut_commitmeta "commitmeta"
     hx_refuse future mut_future "in the future"
     hx_refuse past mut_past "older than"
+    # what is in the archive and not in the repository: files that no honest run has, in places ostree ignores
+    # shellcheck disable=SC2329
+    mut_tarremotes() { mkdir -p "$1/refs/remotes/evil"; printf '%s\n' "$base_app" > "$1/refs/remotes/evil/x"; }
+    # shellcheck disable=SC2329
+    mut_tarmirrors() { printf '%s\n' "$base_app" > "$1/refs/mirrors/x"; }
+    # shellcheck disable=SC2329
+    mut_tartop() { echo x > "$1/evil"; }
+    # shellcheck disable=SC2329
+    mut_tarname() { echo x > "$1/objects/odd name"; }
+    hx_refuse tarremotes mut_tarremotes "files in refs/"
+    hx_refuse tarmirrors mut_tarmirrors "files in refs/"
+    hx_refuse tartop mut_tartop "top of repo/"
+    hx_refuse tarname mut_tarname "characters"
+    # a member "repo//evil" has an empty component: it matches no check on the names, and tar unpacks it as repo/evil
+    HX_TRANSFORM='s|^repo/evil$|repo//evil|'
+    hx_refuse tartopslash mut_tartop "unsafe path"
+    HX_TRANSFORM='s|^repo/refs/mirrors/x$|repo//refs/mirrors/x|'
+    hx_refuse tarmirrorslash mut_tarmirrors "unsafe path"
+    HX_TRANSFORM=""
 
     # the mode and the base: the flags say what the preparation had to be, the description is no proof
     run "$d/hx.fresh1.log" hx_check "$d/preparedf" --site "$rt/pages2"
@@ -1413,8 +1626,8 @@ xa.metadata=x"; }
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 
-# the same for the result of the signing job: finish takes the mode and the parents from the record the signing job made,
-# and refuses a summary with keys that flatpak build-update-repo does not write on its own
+# the same for the result of the signing job: finish takes the mode and the parents from the record of the check job, not from
+# anything the signing job says, and refuses a summary with keys that flatpak build-update-repo does not write on its own
 sc_sign_hostile_result() {
     commit_release 1.6.0
     tag_release v1.6.0
@@ -1427,13 +1640,19 @@ sc_sign_hostile_result() {
     mkdir -p "$rt"
     m=$d/verified/release-manifest.txt
     # shellcheck disable=SC2329
-    hr_finish() { # IN: the record of the signing job is made to fit the files of IN and pinned, as a forger who could also change the
-        # job output would do it (the pin itself is tested in sign_pins), so that the checks of finish itself are reached
-        for x in flatpak-prepared.txt:prepared_sha256 flatpak-base.txt:base_sha256 flatpak-pubkey.gpg:pubkey_sha256 flatpak-sign-result-repo.tar:signed_tar_sha256; do
+    hr_finish() { # IN [CHK]: the records of the signing job (IN) and of the check job (CHK, default the honest one) are made to fit their files
+        # and pinned, as a forger who could also change the job outputs would do it (the pins are tested in sign_pins), so that the
+        # checks of finish itself are reached
+        chk=${2:-$d/checked}
+        for x in flatpak-pubkey.gpg:pubkey_sha256 flatpak-sign-result-repo.tar:signed_tar_sha256; do
             [ ! -f "$1/${x%%:*}" ] || sed -i "s/^${x##*:}=.*/${x##*:}=$(sha256sum "$1/${x%%:*}" | cut -d' ' -f1)/" "$1/flatpak-sign-result.txt"
         done
-        in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(sha256sum "$1/flatpak-sign-result.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/fw" --out "$rt/out"
+        [ ! -f "$chk/base.txt" ] || sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$chk/base.txt" | cut -d' ' -f1)/" "$chk/flatpak-check-result.txt"
+        in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="${HR_PATH:-$PATH}" RESULT_SHA256="$(sha256sum "$1/flatpak-sign-result.txt" | cut -d' ' -f1)" CHECKED_SHA256="$(sha256sum "$chk/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$chk/prepared.txt" | cut -d' ' -f1)" \
+            sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --checked "$chk" --work "$rt/fw" --out "$rt/out"
     }
+    # shellcheck disable=SC2329
+    hr_chk() { rm -rf "$d/hc.$1"; cp -a "$d/checked" "$d/hc.$1"; }
     # shellcheck disable=SC2329
     hr_copy() { rm -rf "$d/hr.$1"; cp -a "$d/signres" "$d/hr.$1"; }
     # shellcheck disable=SC2329
@@ -1445,24 +1664,33 @@ sc_sign_hostile_result() {
     hr_unpack() { rm -rf "$rt/hr.$1"; mkdir -p "$rt/hr.$1"; tar -C "$rt/hr.$1" -xf "$d/signres/flatpak-sign-result-repo.tar"; }
     run "$d/r0.log" hr_finish "$d/signres"
     assert_rc "finish of the honest result" 0
-    assert_file "the record of the base" "$d/signres/flatpak-base.txt"
+    assert_file "the record of the base" "$d/checked/base.txt"
+    [ ! -e "$d/signres/flatpak-base.txt" ] || fail "the signing job hands over a record of the base"
     assert_eq "mode in the signed record" site "$(kv "$rt/out/flatpak-signed.txt" mode)"
     assert_eq "the base commit in the signed record" "$(ostree --repo="$LIVE/site/repo" rev-parse "$APP_REF")" "$(kv "$rt/out/flatpak-signed.txt" base_app_commit)"
+    # the finished repository: the signed one plus the one delta and its index; the signed summary files are the same bytes
+    assert_eq "the superblock hash is recorded" 64 "$(kv "$rt/out/flatpak-signed.txt" delta_superblock_sha256 | wc -c | awk '{ print $1 - 1 }')"
+    assert_eq "one superblock in the finished repository" 1 "$(tar -tf "$rt/out/flatpak-signed-repo.tar" | grep -c '^repo/deltas/.*/superblock$')"
+    assert_eq "one index in the finished repository" 1 "$(tar -tf "$rt/out/flatpak-signed-repo.tar" | grep -c '^repo/delta-indexes/.*\.index$')"
+    for f in summary summary.sig summary.idx summary.idx.sig; do
+        assert_eq "$f of the finished repository is the signed one" "$(tar -xOf "$d/signres/flatpak-sign-result-repo.tar" "repo/$f" | sha256sum)" "$(tar -xOf "$rt/out/flatpak-signed-repo.tar" "repo/$f" | sha256sum)"
+    done
     # without the record of the base
-    hr_copy nobase
-    rm -f "$d/hr.nobase/flatpak-base.txt"
-    run "$d/r1.log" hr_finish "$d/hr.nobase"
+    hr_chk nobase
+    rm -f "$d/hc.nobase/base.txt"
+    run "$d/r1.log" hr_finish "$d/signres" "$d/hc.nobase"
     assert_rc "finish without the record of the base" 2
+    assert_log "$d/r1.log" "base.txt is missing"
     # a record that names another parent than the one the signed commit has
-    hr_copy parent
-    sed -i "s|^\(head $APP_REF \).*|\1$(printf 'e%.0s' $(seq 64))|" "$d/hr.parent/flatpak-base.txt"
-    run "$d/r2.log" hr_finish "$d/hr.parent"
+    hr_chk parent
+    sed -i "s|^\(head $APP_REF \).*|\1$(printf 'e%.0s' $(seq 64))|" "$d/hc.parent/base.txt"
+    run "$d/r2.log" hr_finish "$d/signres" "$d/hc.parent"
     assert_rc "finish with a record of another base" 4
     assert_log "$d/r2.log" "does not continue"
     # a record without heads for a site
-    hr_copy noheads
-    sed -i '/^head /d' "$d/hr.noheads/flatpak-base.txt"
-    run "$d/r3.log" hr_finish "$d/hr.noheads"
+    hr_chk noheads
+    sed -i '/^head /d' "$d/hc.noheads/base.txt"
+    run "$d/r3.log" hr_finish "$d/signres" "$d/hc.noheads"
     assert_rc "finish with a record of a site without heads" 4
     # the config of the signed repository
     hr_copy config
@@ -1487,7 +1715,148 @@ sc_sign_hostile_result() {
     run "$d/r5.log" hr_finish "$d/hr.summary"
     assert_rc "finish with a summary that redirects" 4
     assert_log "$d/r5.log" "summary"
+    # static deltas in the signed repository: the signing job makes none, and --check-prepared deleted those of the preparation
+    hr_copy deltas
+    hr_unpack deltas
+    mkdir -p "$rt/hr.deltas/repo/deltas/ab"
+    echo x > "$rt/hr.deltas/repo/deltas/ab/cdef"
+    hr_retar deltas
+    run "$d/r6.log" hr_finish "$d/hr.deltas"
+    assert_rc "finish with deltas in the signed repository" 2
+    assert_log "$d/r6.log" "top of repo/"
+    hr_copy index
+    hr_unpack index
+    mkdir -p "$rt/hr.index/repo/delta-indexes/ab"
+    echo x > "$rt/hr.index/repo/delta-indexes/ab/cdef.index"
+    hr_retar index
+    run "$d/r6b.log" hr_finish "$d/hr.index"
+    assert_rc "finish with an index in the signed repository" 2
+    assert_log "$d/r6b.log" "top of repo/"
+    # the delta that finish makes itself, spoiled (stand-ins for ostree that pass everything else on): a corrupted part, and a delta
+    # made before the signing, which has no signature in its superblock; neither may leave a finished repository
+    fx_delta_shim "$SIM/shim.corrupt" corrupt
+    fx_delta_shim "$SIM/shim.unsigned" unsigned
+    for spoil in corrupt unsigned; do
+        rm -rf "$rt/out"
+        HR_PATH=$SIM/shim.$spoil:$PATH
+        run "$d/r7.$spoil.log" hr_finish "$d/signres"
+        HR_PATH=""
+        assert_rc "finish with a delta that is $spoil" 4
+        assert_log "$d/r7.$spoil.log" "does not take a client"
+        [ ! -e "$rt/out/flatpak-signed-repo.tar" ] || fail "a finished repository was handed over with a delta that is $spoil"
+    done
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+
+# the finished repository, which publish accepts: the one static delta of a release on a published base and its index, with the
+# superblock hash that flatpak-signed.txt records, and nothing else; none for a release candidate. The files are the pinned ones, so
+# a forger changes the tar, its hash in the record and the pin (a job output) together, and only the checks of the delta stop him.
+sc_signed_deltas() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    d=$LIVE/runs/1
+    base_app=$(kv "$d/signed/flatpak-signed.txt" base_app_commit)
+    app=$(kv "$d/signed/flatpak-signed.txt" app_commit)
+    sha=$(kv "$d/signed/flatpak-signed.txt" delta_superblock_sha256)
+    t=$SIM/sd
+    rm -rf "$t"
+    mkdir -p "$t"
+    tar -C "$t" -xf "$d/signed/flatpak-signed-repo.tar"
+    assert_eq "one superblock" 1 "$(find "$t/repo/deltas" -name superblock | wc -l)"
+    assert_eq "one index" 1 "$(find "$t/repo/delta-indexes" -type f | wc -l)"
+    assert_eq "the recorded hash is the one of the superblock" "$sha" "$(sha256sum "$(find "$t/repo/deltas" -name superblock)" | cut -d' ' -f1)"
+    assert_eq "the delta leads from the published app commit to the new one" "$base_app-$app" "$(ostree --repo="$t/repo" static-delta list)"
+    cp -a "$d/signed" "$d/signed.good"
+    # sd_try NAME MUTATOR PATTERN: MUTATOR REPO RECORD changes the repository (or the record), then the hashes are put right
+    # shellcheck disable=SC2329
+    sd_try() {
+        rm -rf "$d/signed" "$SIM/sd.$1"
+        cp -a "$d/signed.good" "$d/signed"
+        mkdir -p "$SIM/sd.$1"
+        tar -C "$SIM/sd.$1" -xf "$d/signed/flatpak-signed-repo.tar"
+        "$2" "$SIM/sd.$1/repo" "$d/signed/flatpak-signed.txt"
+        tar -C "$SIM/sd.$1" --owner=0 --group=0 --numeric-owner -cf "$d/signed/flatpak-signed-repo.tar" repo
+        sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$d/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$d/signed/flatpak-signed.txt"
+        sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
+        snapshot > "$SIM/snap.before"
+        sd_pg=$(git ls-remote "$REMOTE" refs/heads/gh-pages)
+        job_publish 1 release
+        assert_rc "publish with $1" "${4:-2}"
+        assert_log "$d/publish.log" "$3"
+        snapshot > "$SIM/snap.after"
+        [ "$sd_pg" = "$(git ls-remote "$REMOTE" refs/heads/gh-pages)" ] || fail "$1: gh-pages changed"
+        # (a refusal after the draft release was made, exit 5, leaves the draft; gh-pages is what must not change)
+        [ "${4:-2}" != 2 ] || cmp -s "$SIM/snap.before" "$SIM/snap.after" || fail "$1: the remote changed"
+    }
+    # shellcheck disable=SC2329
+    m_second() { mkdir -p "$1/deltas/ab/cdef"; echo x > "$1/deltas/ab/cdef/superblock"; }
+    # shellcheck disable=SC2329
+    m_index() { mkdir -p "$1/delta-indexes/ab"; echo x > "$1/delta-indexes/ab/cdef.index"; }
+    # shellcheck disable=SC2329
+    m_file() { echo x > "$(dirname "$(find "$1/deltas" -name superblock)")/evil"; }
+    # shellcheck disable=SC2329
+    m_dir() { mkdir "$(dirname "$(find "$1/deltas" -name superblock)")/7"; }
+    # shellcheck disable=SC2329
+    m_gone() { rm -rf "$1/deltas" "$1/delta-indexes"; }
+    # shellcheck disable=SC2329
+    m_noindex() { rm -rf "$1/delta-indexes"; }
+    # shellcheck disable=SC2329
+    m_hash() { sed -i "s/^delta_superblock_sha256=.*/delta_superblock_sha256=$(printf 'a%.0s' $(seq 64))/" "$2"; }
+    # shellcheck disable=SC2329
+    m_unrecorded() { sed -i 's/^delta_superblock_sha256=.*/delta_superblock_sha256=/' "$2"; }
+    # shellcheck disable=SC2329
+    m_superblock() { printf Z >> "$(find "$1/deltas" -name superblock)"; }
+    # a delta, its record and its folder name all from another base than the published head: structurally an honest finish, so only
+    # the comparison with the app head of gh-pages stops it
+    # shellcheck disable=SC2329
+    m_base() {
+        mb_old=$(dirname "$(find "$1/deltas" -name superblock)")
+        mb_tmp=$(mktemp -d "$SIM/mb.XXXXXX")
+        cp -a "$mb_old/." "$mb_tmp/"
+        rm -rf "$1/deltas"
+        mb_new=$1/$(lib_run "delta_dir $(printf 'e%.0s' $(seq 64)) $app")
+        mkdir -p "$mb_new"
+        cp -a "$mb_tmp/." "$mb_new/"
+        rm -rf "$mb_tmp"
+        sed -i "s/^base_app_commit=.*/base_app_commit=$(printf 'e%.0s' $(seq 64))/" "$2"
+    }
+    sd_try base m_base "not the base the signed repository was made from" 5
+    sd_try second m_second "not the one from"
+    sd_try index m_index "not the one from"
+    sd_try file m_file "not the one from"
+    sd_try dir m_dir "not the one from"
+    sd_try gone m_gone "index of the static delta"
+    sd_try noindex m_noindex "index of the static delta"
+    sd_try hash m_hash "not the recorded one"
+    sd_try unrecorded m_unrecorded "no delta_superblock_sha256"
+    sd_try superblock m_superblock "not the recorded one"
+    # the honest files go through, and gh-pages then has exactly that delta and its index
+    rm -rf "$d/signed"
+    cp -a "$d/signed.good" "$d/signed"
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$d/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$d/finish.gho"
+    job_publish 1 release
+    assert_rc "publish of the honest files" 0
+    assert_eq "one superblock on gh-pages" 1 "$(find "$LIVE/site/repo/deltas" -name superblock | wc -l)"
+    assert_eq "one index on gh-pages" 1 "$(find "$LIVE/site/repo/delta-indexes" -type f | wc -l)"
+    assert_eq "the delta on gh-pages leads from the old head to the new" "$base_app-$app" "$(ostree --repo="$LIVE/site/repo" static-delta list)"
+    # a release candidate has none, and a planted one is refused
+    commit_release 1.7.0-rc.1
+    tag_release v1.7.0-rc.1
+    pipeline 2 v1.7.0-rc.1 release push sign
+    assert_eq "failed job (rc)" "" "$PIPE_FAIL"
+    e=$LIVE/runs/2
+    rm -rf "$SIM/sd.rc"
+    mkdir -p "$SIM/sd.rc"
+    tar -C "$SIM/sd.rc" -xf "$e/signed/flatpak-signed-repo.tar"
+    m_second "$SIM/sd.rc/repo"
+    tar -C "$SIM/sd.rc" --owner=0 --group=0 --numeric-owner -cf "$e/signed/flatpak-signed-repo.tar" repo
+    sed -i "s/^repo_tar_sha256=.*/repo_tar_sha256=$(sha256sum "$e/signed/flatpak-signed-repo.tar" | cut -d' ' -f1)/" "$e/signed/flatpak-signed.txt"
+    sed -i "s/^signed_sha256=.*/signed_sha256=$(sha256sum "$e/signed/flatpak-signed.txt" | cut -d' ' -f1)/" "$e/finish.gho"
+    job_publish 2 release
+    assert_rc "publish of a release candidate with a planted delta" 2
+    assert_log "$e/publish.log" "that has none"
 }
 
 # the manifest and the signed result go from job to job as run artifacts, which a compromised job can replace; the hashes are job
@@ -1522,8 +1891,8 @@ sc_sign_pins() {
     assert_rc "prepare the other build" 0
     # shellcheck disable=SC2329
     pin_check() { # PIN MANIFEST PREPARED
-        in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" \
-            --manifest "$2" --in "$3" --work "$rt/w" --site "$rt/pages2" --check-remote
+        in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" PREPARED_SHA256="$(sha256sum "$3/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" \
+            --manifest "$2" --in "$3" --work "$rt/w" --out "$rt/co" --site "$rt/pages2" --check-remote
     }
     run "$d/n4.log" pin_check "$(sha256sum "$m2" | cut -d' ' -f1)" "$m2" "$d/prepared2"
     assert_rc "check of the forged pair with the hash of the forged manifest (the control: only the pin can stop it)" 0
@@ -1544,12 +1913,15 @@ sc_sign_pins() {
     e=$LIVE/runs/2
     m=$e/verified/release-manifest.txt
     # shellcheck disable=SC2329
-    fin() { # MANIFEST_PIN RESULT_PIN IN
-        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" RESULT_SHA256="$2" GITHUB_OUTPUT="$rt/fin.gho" sh packaging/flatpak-sign.sh --finish --tag "$tag" \
-            --commit "$(kv "$e/validate.out" commit)" --manifest "$m" --in "$3" --work "$rt/fw" --out "$rt/out"
+    fin() { # MANIFEST_PIN RESULT_PIN IN [CHECKED_PIN [CHECKED_DIR [PREPARED_PIN]]]
+        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" RESULT_SHA256="$2" CHECKED_SHA256="${4-$ckp}" PREPARED_SHA256="${6-$ppin}" GITHUB_OUTPUT="$rt/fin.gho" sh packaging/flatpak-sign.sh --finish --tag "$tag" \
+            --commit "$(kv "$e/validate.out" commit)" --manifest "$m" --in "$3" --checked "${5:-$e/checked}" --work "$rt/fw" --out "$rt/out"
     }
     mp=$(kv "$e/verify.gho" manifest_sha256)
     rp=$(kv "$e/sign.gho" result_sha256)
+    ckp=$(kv "$e/check.gho" checked_sha256)
+    ppin=$(kv "$e/prepare.gho" prepared_sha256)
+    assert_eq "the pin is the hash of the record of the check job" "$(sha256sum "$e/checked/flatpak-check-result.txt" | cut -d' ' -f1)" "$ckp"
     assert_eq "the pin is the hash of the record of the sign job" "$(sha256sum "$e/signres/flatpak-sign-result.txt" | cut -d' ' -f1)" "$rp"
     run "$e/f1.log" fin "" "$rp" "$e/signres"
     assert_rc "finish with an empty pin" 2
@@ -1563,26 +1935,33 @@ sc_sign_pins() {
     run "$e/f5.log" fin "$mp" "$(printf 'a%.0s' $(seq 64))" "$e/signres"
     assert_rc "finish with another pin of the sign job" 2
     assert_log "$e/f5.log" "pinned"
-    # a skip record forged into the result of the sign job: nothing is signed, publish would say "nothing to do"
-    rm -rf "$e/hr.skip"
-    cp -a "$e/signres" "$e/hr.skip"
-    sed -i 's/^skip=.*/skip=1/' "$e/hr.skip/flatpak-prepared.txt"
-    run "$e/f6.log" fin "$mp" "$rp" "$e/hr.skip"
+    # the pin of the check job: empty, or the hash of another record
+    run "$e/f5b.log" fin "$mp" "$rp" "$e/signres" ""
+    assert_rc "finish with an empty pin of the check job" 2
+    assert_log "$e/f5b.log" "pinned"
+    run "$e/f5c.log" fin "$mp" "$rp" "$e/signres" "$(printf 'a%.0s' $(seq 64))"
+    assert_rc "finish with another pin of the check job" 2
+    assert_log "$e/f5c.log" "pinned"
+    # a skip record forged into the description of the preparation: the pin of prepare-flatpak is the real one, and with a pin that
+    # fits the forgery the record of the check job still says it is no skip
+    rm -rf "$e/hc.skip"
+    cp -a "$e/checked" "$e/hc.skip"
+    sed -i 's/^skip=.*/skip=1/' "$e/hc.skip/prepared.txt"
+    run "$e/f6.log" fin "$mp" "$rp" "$e/signres" "$ckp" "$e/hc.skip"
     assert_rc "finish with a forged skip" 2
-    assert_log "$e/f6.log" "recorded"
-    sed -i "s/^prepared_sha256=.*/prepared_sha256=$(sha256sum "$e/hr.skip/flatpak-prepared.txt" | cut -d' ' -f1)/" "$e/hr.skip/flatpak-sign-result.txt"
-    run "$e/f7.log" fin "$mp" "$rp" "$e/hr.skip"
-    assert_rc "finish with a forged skip and a record that fits it" 2
-    assert_log "$e/f7.log" "pinned"
+    assert_log "$e/f6.log" "pinned"
+    run "$e/f7b.log" fin "$mp" "$rp" "$e/signres" "$ckp" "$e/hc.skip" "$(sha256sum "$e/hc.skip/prepared.txt" | cut -d' ' -f1)"
+    assert_rc "finish with a forged skip and a pin that fits it" 2
+    assert_log "$e/f7b.log" "agree on skip"
     # the base of gh-pages in the record changed to the head of gh-pages after it moved: the lease of publish would not see it
-    rm -rf "$e/hr.base"
-    cp -a "$e/signres" "$e/hr.base"
-    sed -i "s/^base_gh_pages=.*/base_gh_pages=$(printf 'c%.0s' $(seq 40))/" "$e/hr.base/flatpak-base.txt"
-    run "$e/f8.log" fin "$mp" "$rp" "$e/hr.base"
+    rm -rf "$e/hc.base"
+    cp -a "$e/checked" "$e/hc.base"
+    sed -i "s/^base_gh_pages=.*/base_gh_pages=$(printf 'c%.0s' $(seq 40))/" "$e/hc.base/base.txt"
+    run "$e/f8.log" fin "$mp" "$rp" "$e/signres" "$ckp" "$e/hc.base"
     assert_rc "finish with another base of gh-pages" 2
     assert_log "$e/f8.log" "recorded"
-    sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$e/hr.base/flatpak-base.txt" | cut -d' ' -f1)/" "$e/hr.base/flatpak-sign-result.txt"
-    run "$e/f9.log" fin "$mp" "$rp" "$e/hr.base"
+    sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$e/hc.base/base.txt" | cut -d' ' -f1)/" "$e/hc.base/flatpak-check-result.txt"
+    run "$e/f9.log" fin "$mp" "$rp" "$e/signres" "$ckp" "$e/hc.base"
     assert_rc "finish with another base of gh-pages and a record that fits it" 2
     assert_log "$e/f9.log" "pinned"
     # the public key in another encoding: the same key, other bytes in the files users add the repository with
@@ -1632,6 +2011,265 @@ sc_sign_pins() {
     # the control: the real files and the real pins publish
     job_publish 2 release
     assert_rc "publish with the real files and pins" 0
+}
+
+# The check job takes over everything that is read before the key, on a machine of its own; the signing job unpacks what it hands over
+# and signs it. The hostile cases of that split: (1) the signing machine runs no ostree, gpg, flatpak, git or curl before the Sign step
+# and only rev-parse, gpg-sign and build-update-repo in it, with the remote unreachable; the files of the check job are pinned by its
+# job output: (2) a tar replaced and the record fitted to it, (3) the artifact of the preparation, (4) an empty pin, (5) a link in the
+# tar under a matching pin; and (6) finish with a foreign pin or a swapped base.
+sc_check_split() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push verify
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    job_prepare 1
+    assert_rc "prepare" 0
+    job_check 1
+    assert_rc "check" 0
+    for f in flatpak-checked-repo.tar signlist base.txt prepared.txt flatpak-check-result.txt; do assert_file "the output of the check" "$d/checked/$f"; done
+    ck=$(kv "$d/check.gho" checked_sha256)
+    pp=$(kv "$d/prepare.gho" prepared_sha256)
+    assert_eq "the pin is the hash of the record of the check job" "$(sha256sum "$d/checked/flatpak-check-result.txt" | cut -d' ' -f1)" "$ck"
+    rt=$SIM/rt/cs
+    mkdir -p "$rt/shim"
+    for t in flatpak gpg gpgconf ostree git curl; do
+        printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\nexec %s "$@"\n' "$t" "$rt" "$(command -v "$t")" > "$rt/shim/$t"
+        chmod +x "$rt/shim/$t"
+    done
+    # shellcheck disable=SC2329
+    unp() { # PIN IN WORK [SHIMS]: --unpack with the remote unreachable
+        in_dir "$d/build" env RUNNER_TEMP="$rt" REMOTE="file://$SIM/nowhere.git" ${4:+PATH="$rt/shim:$PATH"} CHECKED_SHA256="$1" PREPARED_SHA256="$pp" \
+            sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$2" --work "$3"
+    }
+
+    # (1) the signing machine: nothing is run by --unpack, and the Sign step runs three things
+    : > "$rt/calls"
+    run "$d/c1.log" unp "$ck" "$d/checked" "$rt/sw" shim
+    assert_rc "unpack with the remote unreachable" 0
+    assert_eq "calls of ostree, gpg, flatpak, git or curl by --unpack" 0 "$(wc -c < "$rt/calls")"
+    assert_file "the unpacked repository" "$rt/sw/repo/objects"
+    run "$d/c2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" REMOTE="file://$SIM/nowhere.git" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$(cat "$KEYS/K.sec")" \
+        sh packaging/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/sw" --out "$d/signres"
+    assert_rc "sign with the remote unreachable" 0
+    for t in ostree flatpak gpg; do [ "$(grep -c "^$t " "$rt/calls")" -gt 0 ] || fail "the shim of $t was never called: the check proves nothing"; done
+    if grep -q -e '^git ' -e '^curl ' "$rt/calls"; then fail "the sign step ran git or curl"; fi
+    if grep '^ostree ' "$rt/calls" | grep -v -e ' rev-parse ' -e ' gpg-sign ' | grep -q .; then fail "the sign step ran an ostree command other than rev-parse and gpg-sign"; fi
+    if grep '^flatpak ' "$rt/calls" | grep -v '^flatpak build-update-repo ' | grep -q .; then fail "the sign step ran a flatpak command other than build-update-repo"; fi
+
+    # (2) a replaced tar and a record that fits it: the pin of the job output is the old one
+    rm -rf "$rt/c3x" "$d/hc2"
+    mkdir -p "$rt/c3x"
+    tar -C "$rt/c3x" -xf "$d/checked/flatpak-checked-repo.tar"
+    printf '[flatpak]\nredirect-url=https://evil.example/repo\n' >> "$rt/c3x/repo/config"
+    cp -a "$d/checked" "$d/hc2"
+    tar -C "$rt/c3x" --owner=0 --group=0 --numeric-owner -cf "$d/hc2/flatpak-checked-repo.tar" repo
+    sed -i "s/^checked_tar_sha256=.*/checked_tar_sha256=$(sha256sum "$d/hc2/flatpak-checked-repo.tar" | cut -d' ' -f1)/" "$d/hc2/flatpak-check-result.txt"
+    run "$d/c3.log" unp "$ck" "$d/hc2" "$rt/sw2"
+    assert_rc "unpack of a replaced tar with a record that fits it" 2
+    assert_log "$d/c3.log" "pinned"
+    [ ! -e "$rt/sw2" ] || fail "something was unpacked from a replaced tar"
+    # the pin as well: the config is refused after all
+    run "$d/c3b.log" unp "$(sha256sum "$d/hc2/flatpak-check-result.txt" | cut -d' ' -f1)" "$d/hc2" "$rt/sw2b"
+    assert_rc "unpack of a replaced tar with a record that fits it and its pin" 2
+    assert_log "$d/c3b.log" "config"
+
+    # (3) the artifact of the preparation is not the artifact of the check
+    run "$d/c4.log" unp "$ck" "$d/prepared" "$rt/sw3"
+    assert_rc "unpack of the prepared repository" 2
+    [ ! -e "$rt/sw3" ] || fail "something was unpacked from the artifact of the preparation"
+
+    # (4) no pin, or no hash
+    run "$d/c5.log" unp "" "$d/checked" "$rt/sw4"
+    assert_rc "unpack with an empty pin" 2
+    assert_log "$d/c5.log" "pinned"
+    run "$d/c5b.log" unp "not-a-hash" "$d/checked" "$rt/sw4"
+    assert_rc "unpack with a pin that is not a hash" 2
+    [ ! -e "$rt/sw4" ] || fail "something was unpacked without a pin"
+
+    # (5) a link in the tar, the record and the pin fitted to it
+    rm -rf "$rt/c6x" "$d/hc5"
+    mkdir -p "$rt/c6x"
+    tar -C "$rt/c6x" -xf "$d/checked/flatpak-checked-repo.tar"
+    ln -s /etc/passwd "$rt/c6x/repo/objects/evil"
+    cp -a "$d/checked" "$d/hc5"
+    tar -C "$rt/c6x" --owner=0 --group=0 --numeric-owner -cf "$d/hc5/flatpak-checked-repo.tar" repo
+    sed -i "s/^checked_tar_sha256=.*/checked_tar_sha256=$(sha256sum "$d/hc5/flatpak-checked-repo.tar" | cut -d' ' -f1)/" "$d/hc5/flatpak-check-result.txt"
+    run "$d/c6.log" unp "$(sha256sum "$d/hc5/flatpak-check-result.txt" | cut -d' ' -f1)" "$d/hc5" "$rt/sw5"
+    assert_rc "unpack of a tar with a link under a matching pin" 2
+    assert_log "$d/c6.log" "not a regular file"
+    [ ! -e "$rt/sw5/repo" ] || fail "a tar with a link was unpacked"
+
+    # (6) finish: the pin of the check job comes from its job output, and the base from its record
+    job_sign 1
+    assert_rc "sign" 0
+    job_finish 1
+    assert_rc "finish" 0
+    # shellcheck disable=SC2329
+    fin() { # CHECKED_PIN CHECKED_DIR
+        in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" CHECKED_SHA256="$1" PREPARED_SHA256="$pp" RESULT_SHA256="$(kv "$d/sign.gho" result_sha256)" \
+            sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$d/signres" --checked "$2" --work "$rt/fw" --out "$rt/out"
+    }
+    run "$d/c7.log" fin "$ck" "$d/checked"
+    assert_rc "finish with the real pin" 0
+    run "$d/c8.log" fin "$(printf 'a%.0s' $(seq 64))" "$d/checked"
+    assert_rc "finish with a foreign pin" 2
+    assert_log "$d/c8.log" "pinned"
+    run "$d/c8b.log" fin "" "$d/checked"
+    assert_rc "finish with no pin" 2
+    rm -rf "$d/hc6"
+    cp -a "$d/checked" "$d/hc6"
+    sed -i "s/^base_gh_pages=.*/base_gh_pages=$(printf 'c%.0s' $(seq 40))/" "$d/hc6/base.txt"
+    run "$d/c9.log" fin "$ck" "$d/hc6"
+    assert_rc "finish with a swapped base" 2
+    assert_log "$d/c9.log" "recorded"
+    sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$d/hc6/base.txt" | cut -d' ' -f1)/" "$d/hc6/flatpak-check-result.txt"
+    run "$d/c10.log" fin "$ck" "$d/hc6"
+    assert_rc "finish with a swapped base and a record that fits it" 2
+    assert_log "$d/c10.log" "pinned"
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
+}
+
+# A compromised check job writes its own repository, list, description and record, and pins the record itself. The key still signs only what
+# the preparation described: prepare-flatpak pins prepared.txt (the id of every head), and --unpack ties the list, the commit objects and the
+# refs of the tar to it; the tar has only what an archive repository of this release has (no summary, state, lock or tmp content).
+sc_check_compromised() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push verify
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    job_prepare 1
+    assert_rc "prepare" 0
+    job_check 1
+    assert_rc "check" 0
+    pp=$(kv "$d/prepare.gho" prepared_sha256)
+    ckp=$(kv "$d/check.gho" checked_sha256)
+    assert_eq "the pin is the hash of the description of the preparation" "$(sha256sum "$d/prepared/flatpak-prepared.txt" | cut -d' ' -f1)" "$pp"
+    rt=$SIM/rt/cc
+    mkdir -p "$rt"
+    # shellcheck disable=SC2329
+    cc_make() { # NAME MUTATOR: a copy of the output of the check, its repository changed by MUTATOR REPO CHECKED_DIR, the record fitted to it
+        rm -rf "$d/cc.$1" "$rt/cc.$1"
+        cp -a "$d/checked" "$d/cc.$1"
+        mkdir -p "$rt/cc.$1"
+        tar -C "$rt/cc.$1" -xf "$d/checked/flatpak-checked-repo.tar"
+        "$2" "$rt/cc.$1/repo" "$d/cc.$1"
+        rm -rf "$rt/cc.$1/repo/tmp/cache"
+        tar -C "$rt/cc.$1" --owner=0 --group=0 --numeric-owner -cf "$d/cc.$1/flatpak-checked-repo.tar" repo
+        sed -i -e "s/^checked_tar_sha256=.*/checked_tar_sha256=$(sha256sum "$d/cc.$1/flatpak-checked-repo.tar" | cut -d' ' -f1)/" \
+            -e "s/^signlist_sha256=.*/signlist_sha256=$(sha256sum "$d/cc.$1/signlist" | cut -d' ' -f1)/" "$d/cc.$1/flatpak-check-result.txt"
+    }
+    # shellcheck disable=SC2329
+    cc_unpack() { # NAME: the check job pins its own record; the pin of the preparation is the real one
+        in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$d/cc.$1/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="${CC_PIN:-$pp}" \
+            sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/cc.$1" --work "$rt/sw.$1"
+    }
+    # shellcheck disable=SC2329
+    cc_refuse() { # NAME MUTATOR PATTERN
+        cc_make "$1" "$2"
+        run "$d/cc.$1.log" cc_unpack "$1"
+        assert_rc "unpack with $1" 2
+        assert_log "$d/cc.$1.log" "$3"
+        [ ! -e "$rt/sw.$1/repo" ] || fail "$1: a repository was unpacked"
+        CC_PIN=""
+    }
+    # shellcheck disable=SC2329
+    cc_obj() { printf '%s/objects/%s/%s' "$1" "$(printf '%s' "$2" | cut -c1-2)" "$(printf '%s' "$2" | cut -c3-)"; }
+    # shellcheck disable=SC2329
+    cc_newcommit() { ostree --repo="$1" commit -b "$APP_REF" --tree=ref="$APP_REF" --parent="$(ostree --repo="$1" rev-parse "$APP_REF")" -s "evil" > /dev/null; rm -f "$1/.lock"; }
+    # shellcheck disable=SC2329
+    cc_list() { sed -i "s|^$APP_REF .*|$APP_REF $(ostree --repo="$1" rev-parse "$APP_REF^")|" "$2/signlist"; }
+    # a new commit, the ref, the list and the description all say so: only the pin of the description tells
+    # shellcheck disable=SC2329
+    cc_all() { cc_newcommit "$1"; n=$(ostree --repo="$1" rev-parse "$APP_REF"); sed -i "s|^$APP_REF .*|$APP_REF $n|" "$2/signlist"; sed -i "s/^prepared_app_commit=.*/prepared_app_commit=$n/" "$2/prepared.txt"; }
+    # shellcheck disable=SC2329
+    cc_objbytes() { f=$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commit; chmod u+w "$f"; printf Z >> "$f"; }
+    # shellcheck disable=SC2329
+    cc_ref() { printf '%s\n' "$(ostree --repo="$1" rev-parse "$APP_REF^")" > "$1/refs/heads/$APP_REF"; }
+    # shellcheck disable=SC2329
+    cc_summary() { echo x > "$1/summary"; }
+    # shellcheck disable=SC2329
+    cc_summaries() { mkdir -p "$1/summaries"; echo x > "$1/summaries/abc.sub"; }
+    # shellcheck disable=SC2329
+    cc_state() { mkdir -p "$1/state"; echo x > "$1/state/y"; }
+    # shellcheck disable=SC2329
+    cc_lock() { : > "$1/.lock"; }
+    # shellcheck disable=SC2329
+    cc_tmp() { mkdir -p "$1/tmp"; echo x > "$1/tmp/y"; }
+    # shellcheck disable=SC2329
+    cc_oddobj() { echo x > "$1/objects/zz"; }
+    # shellcheck disable=SC2329
+    cc_oddname() { mkdir -p "$1/objects/ab"; echo x > "$1/objects/ab/short.filez"; }
+    # shellcheck disable=SC2329
+    cc_meta() { echo x > "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta"; }
+    # the signing job makes and reads no static delta: a delta or an index in the checked repository is refused
+    # shellcheck disable=SC2329
+    cc_delta() { mkdir -p "$1/deltas/ab/cdef"; echo x > "$1/deltas/ab/cdef/superblock"; }
+    # shellcheck disable=SC2329
+    cc_deltaindex() { mkdir -p "$1/delta-indexes/ab"; echo x > "$1/delta-indexes/ab/cdef.index"; }
+
+    # the detached metadata, which flatpak build-update-repo parses with the key: the published commits' (signatures) and flatpak's (.commitmeta2)
+    # shellcheck disable=SC2329
+    cc_meta2() { f=$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta2; chmod u+w "$f"; printf Z >> "$f"; }
+    # shellcheck disable=SC2329
+    cc_metapub() { f=$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF^")").commitmeta; chmod u+w "$f"; printf Z >> "$f"; }
+    # shellcheck disable=SC2329
+    cc_metagone() { rm -f "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta2"; }
+    # shellcheck disable=SC2329
+    cc_metaplant() { mkdir -p "$1/objects/ab"; cp "$(cc_obj "$1" "$(ostree --repo="$1" rev-parse "$APP_REF")").commitmeta2" "$1/objects/ab/$(printf 'c%.0s' $(seq 62)).commitmeta2"; }
+    # the description names no commit for appstream2, with a pin that fits (a compromised preparation), and the tar has the ref
+    # shellcheck disable=SC2329
+    cc_unlisted() { sed -i 's/^prepared_appstream2_commit=.*/prepared_appstream2_commit=/' "$2/prepared.txt"; CC_PIN=$(sha256sum "$2/prepared.txt" | cut -d' ' -f1); }
+
+    # the control: what the check job really made
+    cc_make honest :
+    run "$d/cc.honest.log" cc_unpack honest
+    assert_rc "unpack of the honest output of the check" 0
+    cc_refuse all cc_all "pinned"
+    cc_refuse newcommit cc_newcommit "the ref in the tar"
+    cc_refuse list cc_list "the list names"
+    cc_refuse objbytes cc_objbytes "commit object in the tar"
+    cc_refuse ref cc_ref "the ref in the tar"
+    cc_refuse summary cc_summary "does not accept"
+    cc_refuse summaries cc_summaries "does not accept"
+    cc_refuse state cc_state "does not accept"
+    cc_refuse lock cc_lock "does not accept"
+    cc_refuse tmp cc_tmp "does not accept"
+    cc_refuse oddobj cc_oddobj "does not accept"
+    cc_refuse oddname cc_oddname "does not accept"
+    cc_refuse delta cc_delta "does not accept"
+    cc_refuse deltaindex cc_deltaindex "does not accept"
+    cc_refuse meta cc_meta "detached metadata"
+    cc_refuse meta2 cc_meta2 "detached metadata files"
+    cc_refuse metapub cc_metapub "detached metadata files"
+    cc_refuse metagone cc_metagone "detached metadata files"
+    cc_refuse metaplant cc_metaplant "detached metadata files"
+    cc_refuse unlisted cc_unlisted "did not describe"
+    # a commit object stored twice, A then B with A+B the real commit: tar -xO prints both and the hash fits, tar -x keeps B
+    cc_make dup :
+    rm -rf "$rt/dup"
+    mkdir -p "$rt/dup"
+    tar -C "$rt/dup" -xf "$d/checked/flatpak-checked-repo.tar"
+    dup_id=$(kv "$d/checked/prepared.txt" prepared_app_commit)
+    dup_f=repo/objects/$(printf '%s' "$dup_id" | cut -c1-2)/$(printf '%s' "$dup_id" | cut -c3-).commit
+    dup_n=$(stat -c %s "$rt/dup/$dup_f")
+    cp "$rt/dup/$dup_f" "$rt/dup/full"
+    chmod u+w "$rt/dup/$dup_f"
+    head -c $((dup_n / 2)) "$rt/dup/full" > "$rt/dup/$dup_f"
+    tar -C "$rt/dup" --owner=0 --group=0 --numeric-owner -cf "$d/cc.dup/flatpak-checked-repo.tar" repo
+    tail -c +$((dup_n / 2 + 1)) "$rt/dup/full" > "$rt/dup/$dup_f"
+    tar -C "$rt/dup" --owner=0 --group=0 --numeric-owner -rf "$d/cc.dup/flatpak-checked-repo.tar" "$dup_f"
+    assert_eq "tar -xO prints the real commit object" "$dup_id" "$(tar -xOf "$d/cc.dup/flatpak-checked-repo.tar" "$dup_f" | sha256sum | cut -d' ' -f1)"
+    sed -i "s/^checked_tar_sha256=.*/checked_tar_sha256=$(sha256sum "$d/cc.dup/flatpak-checked-repo.tar" | cut -d' ' -f1)/" "$d/cc.dup/flatpak-check-result.txt"
+    run "$d/cc.dup.log" cc_unpack dup
+    assert_rc "unpack with a commit object stored twice" 2
+    assert_log "$d/cc.dup.log" "twice"
+    [ ! -e "$rt/sw.dup/repo" ] || fail "dup: a repository was unpacked"
+    # the preparation's pin, empty or foreign
+    run "$d/cc.pin1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="" sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/checked" --work "$rt/sw.pin1"
+    assert_rc "unpack with no pin of the preparation" 2
+    assert_log "$d/cc.pin1.log" "pinned"
+    assert_eq "keyrings left" 0 "$(leftover_gnupg)"
 }
 
 # the checks of the library, on their own
@@ -1741,7 +2379,7 @@ empty_pin identity_change prerelease main_moved tag_not_on_main build_failure co
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
 pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
-pages_hostile_config sign_hostile_prepared sign_hostile_result sign_pins"
+pages_hostile_config sign_hostile_prepared sign_hostile_result signed_deltas sign_pins check_split check_compromised forged_skip replay_pages"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 
 FAILFILE=$SIM/fails

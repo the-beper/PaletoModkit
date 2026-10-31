@@ -1180,19 +1180,20 @@ fn the_leftovers_scan_lists_temporary_names_and_never_touches_them() {
     let game = game_folder(dir.path(), Edition::Enhanced);
     std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
     std::fs::create_dir_all(game.root.join("mods_snapshots")).unwrap();
-    for rel in ["mods/x64/.paleto-0123456789abcdef-0.old", "mods_snapshots/.paleto-fedcba9876543210.partial", ".paleto-aaaaaaaaaaaaaaaa.new"] {
+    // `.paleto-save-<6 random characters>` is what a killed `ArchiveEditor::save` leaves beside the archive.
+    for rel in ["mods/x64/.paleto-0123456789abcdef-0.old", "mods/x64/.paleto-save-aB3x9Q", "mods_snapshots/.paleto-fedcba9876543210.partial", ".paleto-aaaaaaaaaaaaaaaa.new"] {
         std::fs::write(game.root.join(rel), b"orphan").unwrap();
     }
     let before = snapshot(&game.root);
     let found: Vec<String> = crate::txn::leftovers(&game).iter().map(|p| p.strip_prefix(&game.root).unwrap().to_string_lossy().into_owned()).collect();
-    assert_eq!(found, [".paleto-aaaaaaaaaaaaaaaa.new", "mods/x64/.paleto-0123456789abcdef-0.old", "mods_snapshots/.paleto-fedcba9876543210.partial"]);
+    assert_eq!(found, [".paleto-aaaaaaaaaaaaaaaa.new", "mods/x64/.paleto-0123456789abcdef-0.old", "mods/x64/.paleto-save-aB3x9Q", "mods_snapshots/.paleto-fedcba9876543210.partial"]);
     assert_unchanged(&before, &snapshot(&game.root));
     // They are not mods: the listings of the mods folder skip them.
     assert!(crate::loader::modded_files(&game, None).is_empty());
     assert!(crate::vfs::local_files(&game.root.join("mods")).unwrap().is_empty());
     let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\a.asi</add>"#, &[("content/x", b"new")], false);
     install(&game, &package).unwrap();
-    assert_eq!(crate::txn::leftovers(&game).len(), 3);
+    assert_eq!(crate::txn::leftovers(&game).len(), 4);
 }
 
 #[test]
@@ -1336,4 +1337,542 @@ fn a_path_reached_through_a_link_into_a_game_never_opened_takes_that_games_lock(
     let held = crate::txn::guard(&roots, "a test holds the lock").unwrap();
     crate::vfs::locked_in_game(&free, "renaming a file", || Ok(())).unwrap();
     drop(held);
+}
+
+// ---- the snapshot copy goes through open folders ----
+
+/// A game whose mods folder holds `x64/m.rpf`, `sub/deep/a.txt` and a link, and a snapshot of it; then `x64/m.rpf` changes.
+fn restore_setup(dir: &Path) -> (Game, crate::snapshots::Snapshot) {
+    let game = game_folder(dir, Edition::Enhanced);
+    std::fs::create_dir_all(game.root.join("mods/x64")).unwrap();
+    std::fs::create_dir_all(game.root.join("mods/sub/deep")).unwrap();
+    std::fs::write(game.root.join("mods/x64/m.rpf"), b"snapshotted").unwrap();
+    std::fs::write(game.root.join("mods/sub/deep/a.txt"), b"deep").unwrap();
+    symlink("x64/m.rpf", game.root.join("mods/sub/link")).unwrap();
+    let snap = crate::snapshots::create(&game, "s").unwrap();
+    std::fs::write(game.root.join("mods/x64/m.rpf"), b"current").unwrap();
+    (game, snap)
+}
+
+type Tree = std::collections::BTreeMap<String, Entry>;
+
+/// The mods folder and what is in it.
+fn mods_tree(game: &Game) -> Tree {
+    snapshot(&game.root).into_iter().filter(|(k, _)| k == "mods" || k.starts_with("mods/")).collect()
+}
+
+/// A snapshot's copy of the mods folder, named as the mods folder is in `mods_tree`.
+fn saved_tree(snap: &crate::snapshots::Snapshot) -> Tree {
+    snapshot(&snap.dir.join("mods")).into_iter().map(|(k, v)| (format!("mods/{k}"), v)).chain([("mods".to_string(), Entry::Dir)]).collect()
+}
+
+/// The folder a restore is filling, found by its name.
+fn incoming(root: &Path) -> PathBuf {
+    let found = std::fs::read_dir(root).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().ends_with("-mods.new"));
+    found.expect("a restore is filling a folder")
+}
+
+/// Runs `hook` with the place of the folder `x64` the first time a copy reaches it.
+fn when_copy_reaches_x64(hook: impl FnOnce(&Path) + 'static) {
+    let mut hook = Some(hook);
+    crate::snapshots::DURING_COPY.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |at: &Path| {
+            if at.file_name().is_some_and(|n| n == "x64")
+                && let Some(hook) = hook.take()
+            {
+                hook(at)
+            }
+        }))
+    });
+}
+
+fn assert_nothing_left(game: &Game) {
+    assert!(crate::txn::pending(game).is_empty() && crate::txn::leftovers(game).is_empty(), "{:?} {:?}", crate::txn::pending(game), crate::txn::leftovers(game));
+}
+
+#[test]
+fn a_restore_never_writes_through_a_folder_swapped_for_a_link_to_the_originals() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+    let root = game.root.clone();
+    // While `x64` of the new folder is being filled, it is put aside and a link to the game's own `x64` takes its name.
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root).join("x64");
+        let _ = std::fs::rename(&at, at.with_extension("aside"));
+        symlink(root.join("x64"), &at).unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert_unchanged(&originals, &snapshot(&game.root.join("x64")));
+    assert!(result.is_err(), "the restore went on over a folder that was swapped");
+    assert_unchanged(&mods, &mods_tree(&game));
+    // What was found moved into the new folder is kept, with the folder, for the user to look at.
+    assert!(crate::txn::pending(&game).is_empty());
+}
+
+#[test]
+fn a_restore_refuses_a_snapshot_folder_swapped_for_a_link_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+    let (before_outside, mods) = (snapshot(&outside), mods_tree(&game));
+    // After the copy has seen `x64` as a folder, it is replaced by a link to a folder outside the game.
+    let target = outside.clone();
+    when_copy_reaches_x64(move |at| {
+        std::fs::remove_dir_all(at).unwrap();
+        symlink(target, at).unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert!(result.is_err(), "the copy followed a link to a folder outside the game");
+    assert_unchanged(&before_outside, &snapshot(&outside));
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert_nothing_left(&game);
+}
+
+#[test]
+fn a_folder_put_in_place_of_the_incoming_one_never_becomes_mods() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let mods = mods_tree(&game);
+    let root = game.root.clone();
+    // Another folder takes the name of the one being filled, with a file of its own.
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root);
+        std::fs::rename(&at, at.with_extension("aside")).unwrap();
+        std::fs::create_dir(&at).unwrap();
+        std::fs::write(at.join("evil.txt"), b"evil").unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert!(result.is_err() && !game.root.join("mods/evil.txt").exists(), "a folder that is not the one the restore made became the mods folder");
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert!(crate::txn::pending(&game).is_empty());
+}
+
+#[test]
+fn links_in_the_mods_folder_come_back_as_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, _) = restore_setup(dir.path());
+    symlink("/somewhere/else/entirely", game.root.join("mods/sub/absolute")).unwrap();
+    symlink("nowhere", game.root.join("mods/dangling")).unwrap();
+    symlink("../x64", game.root.join("mods/sub/up")).unwrap();
+    let want = mods_tree(&game);
+    let snap = crate::snapshots::create(&game, "links").unwrap();
+    assert_unchanged(&want, &saved_tree(&snap));
+    std::fs::remove_dir_all(game.root.join("mods/sub")).unwrap();
+    std::fs::remove_file(game.root.join("mods/dangling")).unwrap();
+    crate::snapshots::restore(&game, &snap.id).unwrap();
+    assert_unchanged(&want, &mods_tree(&game));
+    assert_nothing_left(&game);
+}
+
+/// Runs `f` on another thread and fails if it has not finished in time; `fifo` is opened to let a copy stuck on it go.
+fn finishes<T: Send + 'static>(fifo: &Path, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || tx.send(f()));
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(value) => {
+            handle.join().unwrap().unwrap();
+            value
+        }
+        Err(_) => {
+            let _release = std::fs::OpenOptions::new().read(true).write(true).open(fifo);
+            panic!("the copy is stuck on a pipe");
+        }
+    }
+}
+
+fn make_fifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+}
+
+#[test]
+fn a_pipe_a_linked_snapshot_folder_and_a_name_that_is_not_utf8_are_refused_at_once() {
+    use std::os::unix::ffi::OsStrExt;
+    let odd = || std::ffi::OsStr::from_bytes(b"bad\xff.rpf").to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let mods = mods_tree(&game);
+    // A pipe in the mods folder: a snapshot cannot be taken, and does not wait for a writer.
+    let fifo = game.root.join("mods/sub/pipe");
+    make_fifo(&fifo);
+    let g = game.clone();
+    let err = finishes(&fifo, move || crate::snapshots::create(&g, "pipe").unwrap_err().to_string());
+    assert!(err.contains("not a file, folder or link"), "{err}");
+    // (The folder scan of the helpers would read the pipe too.)
+    std::fs::remove_file(&fifo).unwrap();
+    assert_eq!(crate::snapshots::list(&game).len(), 1);
+    assert_nothing_left(&game);
+
+    // A pipe inside a snapshot: the restore stops and the mods folder stays.
+    let fifo = snap.dir.join("mods/sub/pipe");
+    make_fifo(&fifo);
+    let (g, id) = (game.clone(), snap.id.clone());
+    let err = finishes(&fifo, move || crate::snapshots::restore(&g, &id).unwrap_err().to_string());
+    assert!(err.contains("not a file, folder or link"), "{err}");
+    std::fs::remove_file(&fifo).unwrap();
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert_nothing_left(&game);
+
+    // A name that is not UTF-8, in the snapshot and in the mods folder.
+    std::fs::write(snap.dir.join("mods").join(odd()), b"odd").unwrap();
+    let err = crate::snapshots::restore(&game, &snap.id).unwrap_err().to_string();
+    assert!(err.contains("UTF-8"), "{err}");
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert_nothing_left(&game);
+    std::fs::remove_file(snap.dir.join("mods").join(odd())).unwrap();
+    std::fs::write(game.root.join("mods").join(odd()), b"odd").unwrap();
+    let err = crate::snapshots::create(&game, "odd").unwrap_err().to_string();
+    assert!(err.contains("UTF-8"), "{err}");
+    assert_eq!(crate::snapshots::list(&game).len(), 1);
+    assert_nothing_left(&game);
+    std::fs::remove_file(game.root.join("mods").join(odd())).unwrap();
+
+    // The snapshot's `mods` is a link: it is not followed.
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("x64")).unwrap();
+    std::fs::write(elsewhere.join("x64/m.rpf"), b"elsewhere").unwrap();
+    std::fs::remove_dir_all(snap.dir.join("mods")).unwrap();
+    symlink(&elsewhere, snap.dir.join("mods")).unwrap();
+    assert!(crate::snapshots::restore(&game, &snap.id).is_err(), "a link in place of the snapshot's mods folder was followed");
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert_nothing_left(&game);
+}
+
+#[test]
+fn a_restore_is_whole_or_not_at_all_at_every_fault_point() {
+    for mode in [Fault::Fail(std::io::ErrorKind::Other), Fault::Crash] {
+        for point in [Point::Create, Point::Mkdir, Point::SyncFile, Point::Rename, Point::Sync] {
+            let mut reached = 0;
+            for k in 1..300 {
+                let dir = tempfile::tempdir().unwrap();
+                let (game, snap) = restore_setup(dir.path());
+                let (old, new) = (mods_tree(&game), saved_tree(&snap));
+                faults::arm_at(point, k, mode);
+                let result = crate::snapshots::restore(&game, &snap.id);
+                if !faults::disarm() {
+                    result.unwrap();
+                    assert_same(&format!("{point:?} {mode:?} {k}: no fault"), &new, &mods_tree(&game));
+                    break;
+                }
+                reached = k;
+                let what = format!("{point:?} {mode:?} at {k}");
+                if matches!(mode, Fault::Crash) {
+                    let report = crate::txn::recover(&game).unwrap();
+                    assert!(report.failures.is_empty(), "{what}: {report:?}");
+                    let now = mods_tree(&game);
+                    assert!(now == old || now == new, "{what}: the mods folder is neither as it was nor the snapshot");
+                } else {
+                    match result {
+                        Ok(()) => assert_same(&what, &new, &mods_tree(&game)),
+                        // The swap is in place but not confirmed on disk: the next change finishes it.
+                        Err(e) if e.to_string().contains("not yet confirmed") => assert_same(&what, &new, &mods_tree(&game)),
+                        Err(_) => assert_same(&what, &old, &mods_tree(&game)),
+                    }
+                    crate::txn::recover(&game).unwrap();
+                }
+                assert_nothing_left(&game);
+            }
+            assert!(reached > 0, "{point:?} {mode:?}: no call of this kind was reached");
+        }
+    }
+}
+
+#[test]
+fn a_snapshot_is_whole_or_not_taken_at_every_fault_point() {
+    for point in [Point::Create, Point::Mkdir, Point::SyncFile, Point::Rename, Point::Sync] {
+        for k in 1..300 {
+            let dir = tempfile::tempdir().unwrap();
+            let (game, _) = restore_setup(dir.path());
+            let want = mods_tree(&game);
+            faults::arm_at(point, k, Fault::Fail(std::io::ErrorKind::Other));
+            let result = crate::snapshots::create(&game, "second");
+            if !faults::disarm() {
+                result.unwrap();
+                break;
+            }
+            let what = format!("{point:?} at {k}");
+            assert_unchanged(&want, &mods_tree(&game));
+            let listed = crate::snapshots::list(&game);
+            match result {
+                Ok(_) => assert_eq!(listed.len(), 2, "{what}"),
+                Err(_) => assert_eq!(listed.len(), 1, "{what}"),
+            }
+            assert!(listed.iter().all(|s| s.dir.join("mods/sub/deep/a.txt").is_file()), "{what}: a snapshot that lists is incomplete");
+            assert_nothing_left(&game);
+        }
+    }
+}
+
+// ---- names that differ only in case ----
+
+/// A game with `scripts/Foo` and `scripts/foo`, which the game's own (case-insensitive) filesystem would not have.
+fn case_game(dir: &Path) -> Game {
+    let game = game_folder(dir, Edition::Enhanced);
+    std::fs::create_dir_all(game.root.join("scripts/Foo")).unwrap();
+    std::fs::create_dir_all(game.root.join("scripts/foo")).unwrap();
+    game
+}
+
+fn warnings(log: &[String]) -> Vec<&String> {
+    log.iter().filter(|l| l.starts_with("warning:")).collect()
+}
+
+#[test]
+fn an_install_into_a_name_with_two_spellings_warns_once_and_uses_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\FOO\a.asi</add><add source="x">scripts\FOO\b.asi</add>"#, &[("content/x", b"new")], false);
+    let log = install(&game, &package).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/Foo/a.asi")).unwrap(), b"new");
+    assert!(!game.root.join("scripts/foo/a.asi").exists());
+    let found = warnings(&log);
+    assert_eq!(found.len(), 1, "{log:?}");
+    assert!(found[0].contains("scripts") && found[0].contains("\"Foo\" and \"foo\"") && found[0].contains("differ only in case") && found[0].contains("\"Foo\" was used"), "{}", found[0]);
+}
+
+#[test]
+fn an_exact_spelling_is_no_guess_and_warns_of_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    for spelling in ["Foo", "foo"] {
+        let package = oiv(dir.path(), "x.oiv", &format!(r#"<add source="x">scripts\{spelling}\a.asi</add>"#), &[("content/x", b"new")], false);
+        let log = install(&game, &package).unwrap();
+        assert!(warnings(&log).is_empty(), "{spelling}: {log:?}");
+        assert!(game.root.join("scripts").join(spelling).join("a.asi").is_file());
+    }
+}
+
+#[test]
+fn a_failed_install_reports_the_names_it_guessed_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    // The second command cannot be applied, after the first resolved a name that has two spellings.
+    let package = oiv(dir.path(), "x.oiv", r#"<add source="x">scripts\FOO\a.asi</add><xml path="update\missing.xml"><remove xpath="/a" /></xml>"#, &[("content/x", b"new")], false);
+    let before = snapshot(&game.root);
+    let Error::Txn(failure) = install(&game, &package).unwrap_err() else { panic!("not a transaction failure") };
+    assert!(failure.log.iter().any(|l| l.starts_with("warning:") && l.contains("differ only in case")), "{:?}", failure.log);
+    assert_unchanged(&before, &snapshot(&game.root));
+}
+
+#[test]
+fn a_pack_into_a_name_with_two_spellings_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    for name in ["Piccolo", "PICCOLO"] {
+        std::fs::create_dir_all(game.root.join("mods/update/x64/dlcpacks").join(name)).unwrap();
+    }
+    let packs = dlc_sources(dir.path(), &["piccolo"]);
+    let log = install_packs(&game, &packs).unwrap();
+    let found = warnings(&log);
+    assert_eq!(found.len(), 1, "{log:?}");
+    assert!(found[0].contains("dlcpacks") && found[0].contains("\"PICCOLO\" and \"Piccolo\""), "{}", found[0]);
+    assert!(game.root.join("mods/update/x64/dlcpacks/PICCOLO/dlc.rpf").is_file());
+}
+
+#[test]
+fn an_extraction_into_a_name_with_two_spellings_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = case_game(dir.path());
+    let (_, log) = crate::vfs::write_into(&game.root.join("scripts/FOO"), "extracting", |o| o.write("a.txt", b"x").map(drop)).unwrap();
+    assert_eq!(std::fs::read(game.root.join("scripts/Foo/a.txt")).unwrap(), b"x");
+    assert_eq!(warnings(&log).len(), 1, "{log:?}");
+}
+
+// ---- follow-ups of the review of the snapshot copy ----
+
+#[test]
+fn a_foreign_folder_at_the_incoming_name_is_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+    let root = game.root.clone();
+    // The game's own `x64` is moved onto the name of the folder being filled.
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root);
+        std::fs::rename(&at, at.with_extension("aside")).unwrap();
+        std::fs::rename(root.join("x64"), &at).unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("left in place"), "{err}");
+    assert_unchanged(&originals, &snapshot(&incoming(&game.root)));
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert!(crate::txn::pending(&game).is_empty());
+}
+
+#[test]
+fn a_foreign_folder_moved_into_the_incoming_one_is_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+    let root = game.root.clone();
+    // The game's own `x64` takes the place of the subfolder being filled.
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root).join("x64");
+        std::fs::rename(&at, at.with_extension("aside")).unwrap();
+        std::fs::rename(root.join("x64"), &at).unwrap();
+    });
+    let result = crate::snapshots::restore(&game, &snap.id);
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert!(result.is_err());
+    assert_unchanged(&originals, &snapshot(&incoming(&game.root).join("x64")));
+    assert_unchanged(&mods, &mods_tree(&game));
+    assert!(crate::txn::pending(&game).is_empty());
+}
+
+#[test]
+fn a_snapshot_of_a_mods_link_into_the_games_data_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = game_folder(dir.path(), Edition::Enhanced);
+    symlink("x64", game.root.join("mods")).unwrap();
+    assert!(crate::snapshots::create(&game, "x").is_err(), "the game's own x64 was copied through a mods link");
+    assert!(crate::snapshots::list(&game).is_empty());
+    assert_nothing_left(&game);
+}
+
+#[test]
+fn copied_folders_keep_the_permissions_of_their_source() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode_of = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().unwrap();
+    let (game, _) = restore_setup(dir.path());
+    std::fs::set_permissions(game.root.join("mods/sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(game.root.join("mods/x64"), std::fs::Permissions::from_mode(0o750)).unwrap();
+    let snap = crate::snapshots::create(&game, "modes").unwrap();
+    assert_eq!((mode_of(snap.dir.join("mods/sub")), mode_of(snap.dir.join("mods/x64"))), (0o700, 0o750));
+    std::fs::set_permissions(game.root.join("mods/sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::snapshots::restore(&game, &snap.id).unwrap();
+    assert_eq!((mode_of(game.root.join("mods/sub")), mode_of(game.root.join("mods/x64"))), (0o700, 0o750));
+}
+
+#[test]
+fn a_mods_link_planted_to_the_incoming_folder_does_not_make_recovery_remove_the_old_mods() {
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    // The restore stops between its two renames: `mods` is only under its aside name.
+    faults::arm_at(Point::Rename, 2, Fault::Crash);
+    assert!(crate::snapshots::restore(&game, &snap.id).is_err());
+    assert!(faults::disarm());
+    let named = |end: &str| std::fs::read_dir(&game.root).unwrap().flatten().map(|e| e.file_name()).find(|n| n.to_string_lossy().ends_with(end)).unwrap();
+    let (new, old) = (named("-mods.new"), named("-mods.old"));
+    assert!(!game.root.join("mods").exists());
+    symlink(&new, game.root.join("mods")).unwrap();
+    let _ = crate::txn::recover(&game).unwrap();
+    assert_eq!(std::fs::read(game.root.join(&old).join("x64/m.rpf")).unwrap(), b"current", "the old mods folder was removed");
+}
+
+// ---- round 2 of the review of the snapshot copy ----
+
+#[test]
+fn a_kept_folder_is_never_removed_by_a_later_recovery_and_the_failures_are_told() {
+    let (mut told, mut stuck) = (0, 0);
+    for k in 1..400 {
+        let dir = tempfile::tempdir().unwrap();
+        let (game, snap) = restore_setup(dir.path());
+        let originals = snapshot(&game.root.join("x64"));
+        let root = game.root.clone();
+        // The game's own `x64` is moved onto the name of the folder being filled; then a look at a name fails.
+        when_copy_reaches_x64(move |_| {
+            let at = incoming(&root);
+            std::fs::rename(&at, at.with_extension("aside")).unwrap();
+            std::fs::rename(root.join("x64"), &at).unwrap();
+        });
+        faults::arm_at(Point::Stat, k, Fault::Fail(std::io::ErrorKind::Other));
+        let result = crate::snapshots::restore(&game, &snap.id);
+        let fired = faults::disarm();
+        crate::snapshots::DURING_COPY.with(|h| h.take());
+        let left = !crate::txn::pending(&game).is_empty();
+        if left {
+            stuck += 1;
+            let err = result.as_ref().unwrap_err().to_string();
+            assert!(err.contains("journal") && err.contains("left in place"), "k={k}: the failures of the recovery are not told: {err}");
+            told += 1;
+        }
+        // Whatever happened, the next change recovers, and the game's `x64` is still somewhere.
+        let _ = crate::txn::recover(&game);
+        let safe = snapshot(&game.root.join("x64")) == originals || std::fs::read_dir(&game.root).unwrap().flatten().any(|e| e.file_name().to_string_lossy().ends_with("-mods.new") && snapshot(&e.path()) == originals);
+        assert!(safe, "k={k}: the game's x64 was deleted by a recovery");
+        if !fired {
+            break;
+        }
+    }
+    assert!(stuck > 0 && told == stuck, "no look failed during the recovery of a kept folder");
+}
+
+#[test]
+fn the_folders_of_a_copy_are_private_while_it_is_filled() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode_of = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().unwrap();
+    let (game, snap) = restore_setup(dir.path());
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let (root, slot) = (game.root.clone(), seen.clone());
+    when_copy_reaches_x64(move |_| {
+        let at = incoming(&root);
+        slot.set(Some((mode_of(at.clone()), mode_of(at.join("x64")))));
+    });
+    crate::snapshots::restore(&game, &snap.id).unwrap();
+    crate::snapshots::DURING_COPY.with(|h| h.take());
+    assert_eq!(seen.get(), Some((0o700, 0o700)), "a folder was open to the group and others while it was filled");
+}
+
+// ---- round 3 of the review of the snapshot copy ----
+
+/// Whether the game's own `x64` is still somewhere: where it was, or at the name of the folder being filled, or in it.
+fn x64_survives(game: &Game, originals: &Tree) -> bool {
+    let news: Vec<PathBuf> = std::fs::read_dir(&game.root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with("-mods.new")).map(|e| e.path()).collect();
+    snapshot(&game.root.join("x64")) == *originals || news.iter().any(|n| snapshot(n) == *originals || snapshot(&n.join("x64")) == *originals)
+}
+
+/// A restore that finds the game's `x64` in the place of what it made (`inside`: in it, as its `x64`), and is made to crash
+/// at the `k`-th call of `point`, for every `k`: whatever the recovery does, the `x64` survives and the old mods folder is
+/// as it was. A folder moved into the one being filled is only known by the `kept` record, so there the `x64` must survive
+/// only where the crash left that record. Gives whether a journal with it was ever left behind.
+fn kept_folder_survives_crashes(point: Point, inside: bool) -> bool {
+    let mut left_kept = false;
+    for k in 1..400 {
+        let dir = tempfile::tempdir().unwrap();
+        let (game, snap) = restore_setup(dir.path());
+        let (originals, mods) = (snapshot(&game.root.join("x64")), mods_tree(&game));
+        let root = game.root.clone();
+        when_copy_reaches_x64(move |_| {
+            let at = if inside { incoming(&root).join("x64") } else { incoming(&root) };
+            std::fs::rename(&at, at.with_extension("aside")).unwrap();
+            std::fs::rename(root.join("x64"), &at).unwrap();
+        });
+        faults::arm_at(point, k, Fault::Crash);
+        let _ = crate::snapshots::restore(&game, &snap.id);
+        let fired = faults::disarm();
+        crate::snapshots::DURING_COPY.with(|h| h.take());
+        let has_kept = journals(&game).iter().any(|n| std::fs::read_to_string(game.root.join(".paleto/journal").join(n)).unwrap_or_default().lines().any(|l| l == "kept"));
+        left_kept |= has_kept;
+        // Before the `made` record the identity of the folder is not known: that case stays as agreed (a follow-up).
+        let has_made = journals(&game).iter().any(|n| std::fs::read_to_string(game.root.join(".paleto/journal").join(n)).unwrap_or_default().lines().any(|l| l.starts_with("made ")));
+        let report = crate::txn::recover(&game).unwrap();
+        assert!(report.failures.is_empty(), "{point:?} {k}: {report:?}");
+        assert!(!(has_kept || (has_made && !inside)) || x64_survives(&game, &originals), "{point:?} {k}: the game's x64 was deleted by a recovery");
+        assert_unchanged(&mods, &mods_tree(&game));
+        assert!(crate::txn::pending(&game).is_empty(), "{point:?} {k}");
+        if !fired {
+            return left_kept;
+        }
+    }
+    panic!("more than 400 fault points")
+}
+
+#[test]
+fn a_crash_around_the_kept_record_never_lets_recovery_remove_the_foreign_folder() {
+    // The folder at the incoming name is not the one that was made: its identity says so, whether or not `kept` was written.
+    kept_folder_survives_crashes(Point::Journal, false);
+    kept_folder_survives_crashes(Point::SyncFile, false);
+    // Something moved into the incoming folder: only the `kept` record tells, so a crash just after it must leave the folder alone.
+    assert!(kept_folder_survives_crashes(Point::SyncFile, true), "no crash left the kept record behind");
 }
