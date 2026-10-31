@@ -106,6 +106,7 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 | `packaging/release-check-env.sh` | Pre-flight check of the signing environment: exit 3 unless `flatpak-signing` exists with a required reviewer and restricted deployment refs, exit 5 when GitHub cannot be read. The release workflow runs it in `check-signing-env`, a job without the environment; `packaging/tests/check-env-test.sh` tests it. |
 | `packaging/tests/tarball-test.sh` | Tests `reproducible_tar`: a fixture tree packed twice with other file times, creation order and umask gives the same hash; another epoch or content does not (needs GNU tar; no network). |
 | `packaging/clean-dist.sh` | Used by `build-release.sh`: removes from `dist/` the tarball, AppImage, `.zsync`, `linux-build.txt` and the two working folders, and nothing else; `packaging/tests/clean-dist-test.sh` tests it (a foreign file, folder or link in `dist/` survives). |
+| `packaging/version-bump.sh` | Sets the version of a release in `Cargo.toml`, `Cargo.lock` and the metainfo ([release.md](release.md#cutting-a-release)); `packaging/tests/version-bump-test.sh` tests it. |
 | `packaging/ci-changes.sh` | Says from the list of changed files (stdin) whether CI has code to check or only documentation and repository files; `packaging/tests/ci-changes-test.sh` tests it. |
 | `packaging/install.sh` | Installs into `~/.local` (or `$PREFIX`) from a release tarball or from a source tree; `--uninstall` removes it. |
 | `packaging/build-cwconv.sh` | Builds `paleto-cwconv`, self-contained. |

@@ -31,4 +31,5 @@ The screenshot tests read the installed game read-only through links in a tempor
 - Tests must not need game files or the user's home: build small archives and game folders of their own.
 - Never edit or write inside an original game folder, and do not put game files or keys in the repository. Modified archives go to the `mods/` copy. A symlinked copy of a game once let an original get edited: test write paths on a fake first.
 - `TODO.md` is the user's local to-do list: add each new request there first, remove it when done, and do not commit changes to it.
+- Change the version only with `packaging/version-bump.sh X.Y.Z[-rc.N] NOTES` (it checks the version and writes `Cargo.toml`, `Cargo.lock` and the metainfo `<release>`), never by hand; see Cutting a release in `docs/release.md`.
 - There is no Flathub submission and none is planned. The Flathub remote and image are only where the Flatpak runtime and builder come from; keep them.

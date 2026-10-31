@@ -91,6 +91,20 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.7.0" date="2026-10-31">
+      <description>
+        <p>Safer snapshot restores, a warning for names that differ only in case, and smaller Flatpak updates.</p>
+        <ul>
+          <li>Restoring or saving a snapshot copies from one open folder to the next and never follows a link, so a folder swapped for a link while it runs cannot redirect it. Every file is flushed to disk before the swap, and folders keep their permissions.</li>
+          <li>A restore that finds something it did not make in its place keeps it and names it in the error, instead of deleting it.</li>
+          <li>Pipes, sockets, devices and names that are not valid UTF-8 in a snapshot or in the mods folder are refused with a message that names them.</li>
+          <li>When a game folder has names that differ only in case (x64 and X64, say), installs, add-on packs and extractions say which one they used.</li>
+          <li>Converting and the OIV export skip an archive entry whose name is empty or not a plain path.</li>
+          <li>Flatpak updates from the previous release download one small delta: about 3 MB instead of about 21 MB of changed files (measured from 1.5.1 to 1.6.0).</li>
+          <li>The Flatpak repository is checked on a machine without the signing key before it is signed.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.6.0" date="2026-10-30">
       <description>
         <p>Installs, archive edits and file operations are recoverable changes, and packages are read within limits.</p>
