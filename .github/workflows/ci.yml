@@ -1,7 +1,7 @@
 name: CI
 
 # Pull requests and pushes to main. There is no path filter on the triggers: a workflow skipped by one leaves the
-# required checks (`check`, `release-tooling`) pending for ever. Both jobs always run and report; a pull request that is
+# required checks (`check`, `release-tooling`, `msrv`) pending for ever. They always run and report; a pull request that is
 # only documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
 # The weekly run (Monday, on main) is only for `deny`: new advisories appear without any change here.
 on:
@@ -79,8 +79,8 @@ jobs:
           xmllint --noout packaging/io.github.the_beper.PaletoModkit.mime.xml
 
   # The oldest compiler the workspace claims to support: `rust-version` of Cargo.toml, read from there so that the
-  # claim and the test cannot drift. Not a required check: a dependency update may raise the minimum, and then the
-  # answer is to raise `rust-version` (and the docs) in the same pull request, or to hold the update back.
+  # claim and the test cannot drift. A required check: when code or a dependency update needs a newer compiler, raise
+  # `rust-version` (and the docs) in the same pull request, or hold the change back.
   msrv:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
