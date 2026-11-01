@@ -10,7 +10,8 @@ use paleto_core::ArchivePath;
 use paleto_formats::{MetaFile, TextureDictionary};
 use paleto_rpf::Keys;
 
-use crate::app::{Action, App, Info, Location, MAX_TEXT, Status};
+use crate::actions::Action;
+use crate::app::{App, Info, Location, MAX_TEXT, Status};
 use crate::menus::add_info;
 use crate::audio::{AudioRequest, AudioView};
 use crate::export::is_ytd;

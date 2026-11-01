@@ -7,7 +7,8 @@ use eframe::egui;
 use paleto_core::{ArchivePath, vfs};
 use paleto_rpf::Keys;
 
-use crate::app::{Action, App};
+use crate::actions::Action;
+use crate::app::App;
 use crate::audio::AudioRequest;
 use crate::export_window::ExportWindow;
 use crate::textures::Export;

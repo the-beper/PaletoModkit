@@ -8,6 +8,7 @@ mod export;
 mod browser;
 mod preview;
 mod menus;
+mod actions;
 mod audio;
 mod hex_view;
 mod highlight;

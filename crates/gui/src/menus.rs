@@ -8,7 +8,8 @@ use paleto_core::vfs;
 use paleto_core::ArchivePath;
 use paleto_formats::Format;
 
-use crate::app::{Action, App, Info, Location, Status, right_width, INSTALL, INSTALL_SHORT, MODS_COPY, MODS_LINK, MODS_LINK_HOVER, ORIGINAL, REPO_URL, TWEAKS, TWEAKS_SHORT};
+use crate::actions::Action;
+use crate::app::{App, Info, Location, Status, right_width, INSTALL, INSTALL_SHORT, MODS_COPY, MODS_LINK, MODS_LINK_HOVER, ORIGINAL, REPO_URL, TWEAKS, TWEAKS_SHORT};
 use crate::browser::{Browser, filter_box};
 use crate::preview::PreviewSource;
 use crate::settings::{Density, FileClass, Grouping, TextSize, Theme};
