@@ -461,7 +461,6 @@ Remaining lanes of the split map: none — all seven lanes landed; the shell is 
 | commit | 01f3282 | "gui: extract actions.rs from app.rs", the last code commit of the item |
 
 ## H1–H5 group V6-equivalent (2026-11-01, v1.7.0; Fedora 45 native, 16 threads / 31 GiB)
-
 The group's one full local regression — the gate the TODO puts before any Fxx, CP or P1-A item ("F01 may start" when this row is green).
 
 | Check | Result | Note |
@@ -475,3 +474,23 @@ The group's one full local regression — the gate the TODO puts before any Fxx,
 | resources | VERIFIED | every command ran under the session's user-imposed caps: `taskset` on 12 logical CPUs, `cargo --jobs 6`, `RUST_TEST_THREADS=6`, nice 10; the machine kept 20+ GiB available throughout (90% limit respected) |
 
 No pre-existing failures to record: the suite is green from end to end, and the H group closed here (H1–H5 rows above). Notes for the next group: the `msrv` required check already covers the MSRV watch item; the two user decisions of the group (H1 keep `gh-pages-previous` + run the host gc once — done; H2 the Register at `docs/implementation-status.md`) are recorded in their sections.
+
+## F01 — Hash Generator & Name Resolver (2026-11-01, v1.7.0; branch `feature/f01-hash-generator`)
+
+The first item after the H block, from the ranking. GUI + CLI over the same core service; read-only, no game needed anywhere. The synthetic joaat collision pair was found by a one-off search over six-letter words (the temp test was removed after pinning: the built-in dictionary has none, per the item card).
+
+| Check | Result | Note |
+|---|---|---|
+| modes | VERIFIED | `Mode::{Lower,Exact,Awc}` in `crates/core/src/hashes.rs`: `joaat_lower`, `joaat`, `joaat_lower & 0x1FFF_FFFF` (the awc stream id); known vectors pinned (exact `CMapData` 3545841574, lower `ADDER` 0xB779A091 — from `crates/formats/src/hash.rs`'s own test; awc ADDER 0x1779A091 = the two low bits masked); empty string = 0; non-ASCII hashed as UTF-8 bytes with only ASCII lowercased |
+| `parse_value` | VERIFIED | hex (`0x…`, `hash_…` case-insensitive, bare ≤ 8 hex digits with a letter), unsigned and signed decimal, all modulo 2³² (`-1` = 0xFFFFFFFF); `Names::hash`'s trim and `hash_` handling live in resolve only, as the card asks |
+| `Names::lookup` / `Names::candidates` | VERIFIED | in `crates/formats/src/names.rs`: lookup gives None instead of the `hash_XXXXXXXX` fallback; candidates give every distinct name for one hash (both builtin maps — plain-line names live only in the first map, which the first draft missed and the tests caught), case-insensitive deduped, first kept; the no-collision-of-builtin claim stays, with the synthetic pair `puwaaa`/`thaeaa` standing in |
+| user names store | VERIFIED | `crates/core/src/names_store.rs`: `$XDG_DATA_HOME/paleto/names.txt`, one name per line, `#` and empty lines skipped; `import` reads a list bounded ([`Budget::read`], 16 MiB cap) and saves the store atomically (temp + rename, the `ForeignCache` precedent); `import_text` for the GUI paste box; `seed` feeds a `Names` |
+| CLI | VERIFIED | `paleto hash generate NAMES… [-m exact\|lower\|awc]` and `paleto hash resolve VALUES…` (`allow_negative_numbers` on resolve, the leading `-` of a signed decimal); one line per value: hex, unsigned, signed, then the input or the names; unknown keeps exit 0; the negative-value parse error is the only failure path |
+| GUI | VERIFIED | `crates/gui/src/hashes.rs` (new window): Tools > Hash generator…, enabled with no game (the first Tools entry that needs none); mode radios re-stamp the hashed rows; the generate rows copy each of the three forms (`ctx().copy_text`, the prefix_window pattern); the resolve pane shows the names or `unknown`; save/import updates the store, the names and the open rows (`reload`, no per-frame store reads) |
+| actions | VERIFIED | `Action::Hashes(bool)`, in the non-mutating list (exhaustive match keeps the classification), no task; `open_hashes` for tests like the other windows |
+| V4 tests | VERIFIED | core: 6 new unit tests in `hashes.rs` (vectors per mode, empty, non-ASCII, all value forms with wrap, not-a-value table) + 3 in `names_store.rs` (normalize, no file, import dedupe, resolve through seed, path name) + 2 in `names.rs` (candidates collisions with the synthetic pair, lookup-unknown); CLI `crates/cli/tests/hash.rs` (5: the three forms from the real binary, resolve in every form, unknown stays an answer, not-a-value refused, the store the app saved resolves); GUI `crates/gui/tests/hashes.rs` (1 kittest: opens from the Tools menu with no game, hashes per mode switch, resolves builtin/unknown/not-a-value, saves names from the paste box and the rows that name them, closes) |
+| suites | VERIFIED | whole tree: 649 passed, 0 failed, 1 ignored (the network .NET test), exit 0 — the same with an empty `HOME`; clippy `-D warnings` clean; on the branch under the decision-19 caps |
+| docs | VERIFIED | `docs/cli.md`: a "Hashes" section (generate/resolve, the three modes, the store at `~/.local/share/paleto/names.txt`, no inversion claim) + the reference row; `docs/user-guide.md`: "Hash generator" section + the Tools row of the table |
+| screenshots | N/A | a new window now exists that has no committed screenshot (per the repo rule, said instead of added); the committed pictures of the main window do not show the open Tools menu (verified: `screenshots/game-folder.png`, `archive-browser.png`), so none of them is stale |
+| must-not | VERIFIED | read-only everywhere (no game or mods writes); no claim of mathematical inversion in code or docs; the store file never enters a game folder; no new dependencies |
+
