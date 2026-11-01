@@ -42,6 +42,9 @@ impl App {
                 if ui.button("Open archive…").on_hover_text("Browse an .rpf archive, also outside the game folder").clicked() {
                     actions.push(Action::PickArchive);
                 }
+                if ui.button("Favorites and recent locations…").on_hover_text("The places of the game you come back to, kept between sessions").clicked() {
+                    actions.push(Action::Favorites(true));
+                }
                 ui.separator();
                 if ui
                     .add_enabled(can_install, egui::Button::new("Export mods as an OIV package…"))

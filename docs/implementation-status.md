@@ -21,7 +21,8 @@ Newest first.
 
 | When | Mandate | Done | In progress | Next step | Open questions | Commit |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 2026-11-01 (H group closed) | H1–H5 (blocker for Fxx/CP/P1-A) | H1 ✅, H2 ✅, H3 ✅ (`c542999`), H4 ✅ (`a7cbf93`), H5 ✅ (7 lanes, `01f3282`, `app.rs` 5,383 → 1,212) + group V6-equivalent: 631 passed / 0 failed / 1 ignored, empty `HOME` the same, clippy clean, release build ok | — | F01 on `feature/f01-hash-generator` (branch per feature, decision 19) | — | this commit |
+| 2026-11-02 (F02 done) | M3 first features | F02 Favorites & Recent Locations on `feature/f02-favorites`: a place per game folder (rel + inner + kind, `%`-escaped keep of non-UTF-8 names), favorites + recents in the eframe storage, three validation states, prune of recents only on NotFound, re-point on a moved install, File menu window; suites 652 passed / 0 failed / 1 ignored (empty `HOME` the same), clippy clean | — | the user opens PRs for `feature/f01-hash-generator` and `feature/f02-favorites` (stacked: F02 branched on F01); the session stopped here at the user's word | pushed, see the branch |
+| 2026-11-01 (H group closed) | H1–H5 (blocker for Fxx/CP/P1-A) | H1 ✅, H2 ✅, H3 ✅ (`c542999`), H4 ✅ (`a7cbf93`), H5 ✅ (7 lanes, `01f3282`, `app.rs` 5,383 → 1,212) + group V6-equivalent: 631 passed / 0 failed / 1 ignored, empty `HOME` the same, clippy clean, release build ok; the Flatpak build after it: `exit: 0`, bundle 23.7 MB | — | F01 on `feature/f01-hash-generator` (branch per feature, decision 19) | this commit |
 | 2026-10-31 (1.7.0 ready) | after M1 | `packaging/version-bump.sh` (new; `tests/version-bump-test.sh` in `release-tooling`, also run under dash and mawk); version 1.7.0 set with it (`Cargo.toml`, `Cargo.lock`, metainfo with the notes of the M1 follow-ups; `release-notes.py` reads them); `appstreamcli validate` ok; workspace tests 625 passed, 0 failed, 1 ignored, the same with an empty `HOME`; clippy clean; pre-flight on the real gh-pages at `b801244` (the release scripts unchanged since): 0 failures | — | the user merges `release/1.7.0`, tags `v1.7.0` and approves `sign-flatpak`: the first GitHub run of `check-flatpak` and of the static delta | — | `b76e06f` |
 | 2026-10-31 (follow-ups) | after M1 | the Follow-ups of M1 and of the signing review, on branch `followups/m1` (local, on `origin/main` `f115355`): signing follow-ups, app follow-ups, snapshots + case warning, j1 (keyless `check-flatpak`), D3 (static delta in `finish-flatpak`), the release docs aligned with the code; final code review: no blocker, its findings fixed | — | the user pushes the branch and opens the PR; the next stable tag runs `check-flatpak` and the static delta on GitHub for the first time; then M2, when the user asks | `msrv` as a required check (Pending actions) | `07f54d2` |
 | 2026-10-30 (1.6.0 released) | after M1 | PR #11 merged (`cf29ea8`), tag `v1.6.0` pushed by the user, `sign-flatpak` approved; run 41111924334: 9/9 jobs green; the first stable release and the first gh-pages write of the new graph, checked read-only (Gates V5) | — | none for 1.6.0; next: the Follow-ups (signing Low, KuickShare items 5–7) or M2, when the user asks | — | `cf29ea8` |
@@ -171,8 +172,8 @@ From the M3–M4 mandates; none started.
 
 | ID | Feature | Mandate | State | Commit |
 | :--- | :--- | :--- | :--- | :--- |
-| F01 | Hash Generator & Name Resolver | M3 | not started | |
-| F02 | Favorites & Recent Locations | M3 | not started | |
+| F01 | Hash Generator & Name Resolver | M3 | done (branch `feature/f01-hash-generator`) | |
+| F02 | Favorites & Recent Locations | M3 | done (branch `feature/f02-favorites`) | |
 | F03 | CodeWalker / Sollumz / Blender integration | M3 | not started | |
 | F04 | Diff original vs modified | M3 | not started | |
 | F05 | Thumbnail Generator & Preview Cache | M3 | not started | |
@@ -476,7 +477,6 @@ The group's one full local regression — the gate the TODO puts before any Fxx,
 No pre-existing failures to record: the suite is green from end to end, and the H group closed here (H1–H5 rows above). Notes for the next group: the `msrv` required check already covers the MSRV watch item; the two user decisions of the group (H1 keep `gh-pages-previous` + run the host gc once — done; H2 the Register at `docs/implementation-status.md`) are recorded in their sections.
 
 ## F01 — Hash Generator & Name Resolver (2026-11-01, v1.7.0; branch `feature/f01-hash-generator`)
-
 The first item after the H block, from the ranking. GUI + CLI over the same core service; read-only, no game needed anywhere. The synthetic joaat collision pair was found by a one-off search over six-letter words (the temp test was removed after pinning: the built-in dictionary has none, per the item card).
 
 | Check | Result | Note |
@@ -493,4 +493,23 @@ The first item after the H block, from the ranking. GUI + CLI over the same core
 | docs | VERIFIED | `docs/cli.md`: a "Hashes" section (generate/resolve, the three modes, the store at `~/.local/share/paleto/names.txt`, no inversion claim) + the reference row; `docs/user-guide.md`: "Hash generator" section + the Tools row of the table |
 | screenshots | N/A | a new window now exists that has no committed screenshot (per the repo rule, said instead of added); the committed pictures of the main window do not show the open Tools menu (verified: `screenshots/game-folder.png`, `archive-browser.png`), so none of them is stale |
 | must-not | VERIFIED | read-only everywhere (no game or mods writes); no claim of mathematical inversion in code or docs; the store file never enters a game folder; no new dependencies |
+
+## F02 — Favorites & Recent Locations (2026-11-02, v1.7.0; branch `feature/f02-favorites`)
+
+GUI only, as the item card has it (no CLI part). Built on the existing eframe storage (`App::save`/`restore`), the browser's navigation funnel (`show_listed`) and its `opened`/`original_of` mapping; no Owner module is extended. The Flatpak build of the end-of-F01 tree finished meanwhile (`exit: 0`, bundle 23.7 MB): the build graph holds over F01 too.
+
+| Check | Result | Note |
+|---|---|---|
+| `Place` and its storage form | VERIFIED | `crates/gui/src/favorites_window.rs`: the game folder, the kind (`folder`/`archive`), the item's path relative to the game and the inner path — one line per place, every field `%`-escaped (`OsStrExt` bytes, so a non-UTF-8 name survives; unit tests pin the `old%F6` round trip and that newlines/tabs inside a name cannot break the rows). Unix for now; revisited with the Windows backend (P1-A), like the `std::os::unix` notes of M1 |
+| eframe storage strings | VERIFIED | `App::save`/`restore` carry the two keys `favorites` and `recents` (encoded places), every session, not gated by `remember_open_folders` |
+| what a place is | VERIFIED | the game root + game-relative path (`vfs::in_game`) + inner path + kind; **not** the edition (`Game::open` derives it); a place on a mods copy and on its original are one entry — recorded from the original's path when the original exists (`place_of_location` strips a `mods/` prefix only when the original is there; `mods`-only items keep their `mods/…` path) |
+| recents | VERIFIED | `App::record_recent` from `show_listed` (a successfully listed view): in-game only, never the game folder itself, never twice (a revisit moves it to the front), newest first, `RECENTS_CAP` = 24, saved with the favorites |
+| validation, three states | VERIFIED | the favorites are checked at the window's open, at a change of the list and at the keys loading (`revalidate`, never per frame; the recents per frame): `Valid` / `Missing` with the reason / `Unverified` = "cannot verify yet" when only the keys are missing; **pruning only on NotFound** — a recent whose item (both copies) is gone is retained away, favorites are never pruned and show the reason instead |
+| direct reopen | VERIFIED | a click opens stored game root + rel (the original's path first, its standing mods copy when the original is gone), with the inner path as an archive location; when the remembered game folder is gone the place **re-points** to the item of the same rel in the game now shown (the card's "so a moved install can be re-pointed") |
+| add/remove | VERIFIED | **Add the shown place…** (enabled with a place of a game shown; an already-saved place reads "It is a favorite already"), **Forget** per row, **Forget them all** for the recents |
+| window and actions | VERIFIED | `crates/gui/src/favorites_window.rs` (`FavoritesWindow` + `Request`), `Action::{Favorites, AddFavorite, ForgetFavorite, ForgetRecent, ClearRecents}` in the not-mutating list (the lists live in `App`, the window only asks); File menu entry "Favorites and recent locations…" — the first File entry that is useful with no package and no game chosen (the hash window in Tools needs no game either) |
+| V4 tests | VERIFIED | `crates/gui/tests/favorites.rs`, one kittest run over the card's cases: the recents of a nested archive and of a plain folder (newest first, no duplicate), the favorite added from the window, saved and read back (the exact storage row asserted; the non-UTF-8 name kept as `old%F6`), reopened byte-equal (`Location::Folder`/`Archive` equality), the file gone → the reason shown, the favorite kept and a click opens nothing, a favorite pinned to its own install while another game is selected, and the moved install re-pointed (the item at the same rel of the game now shown); unit tests in the module (encode/decode round trips, escapes, the lines of no such form dropped). The kittest harness runs with `allow_missing_glyphs()`: the non-UTF-8 name renders as a tofu box in the app (egui's own default), which kittest reads as a panic by default — the app itself is untouched |
+| suites | VERIFIED | whole tree: 652 passed, 0 failed, 1 ignored (the network .NET test), exit 0 — the same with an empty `HOME`; clippy `-D warnings` clean; on the branch under the decision-19 caps |
+| docs | VERIFIED | `docs/user-guide.md`: the "Favorites and recent locations" section (kept by game folder, one entry per the mods/original pair, the states, favorites never pruned) + the File row of the menus table; `docs/cli.md` untouched (the card has no CLI part) |
+| must-not | VERIFIED | nothing writes into a game (the recents read what the listing already read); nothing stored as valid while it cannot be verified (the `Unverified` state is for it); a favorite is never deleted because the keys are not loaded yet; no new dependencies |
 

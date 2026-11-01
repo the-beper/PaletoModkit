@@ -14,6 +14,7 @@ use crate::crash_window::CrashWindow;
 use crate::dialogs::{AddonDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, edit_message, install_failure};
 use crate::export::{ExportDest, extract, with_notes};
 use crate::export_window::ExportWindow;
+use crate::favorites_window::{FavoritesWindow, Place};
 use crate::hashes;
 use crate::mods_check::ModsCheck;
 use crate::prefix_window::PrefixWindow;
@@ -64,6 +65,11 @@ impl Action {
                 | Action::ScriptHook(..)
                 | Action::Snapshots(..)
                 | Action::Hashes(..)
+                | Action::AddFavorite(_)
+                | Action::Favorites(..)
+                | Action::ForgetFavorite(_)
+                | Action::ForgetRecent(_)
+                | Action::ClearRecents
                 | Action::PrefixTweaks(..)
                 | Action::Export(..)
                 | Action::WriteExport(..)
@@ -171,6 +177,16 @@ pub(crate) enum Action {
     Snapshots(bool),
     /// Open the "Hash generator" window, or close it (no game needed).
     Hashes(bool),
+    /// Keep this place among the favorites (F02).
+    AddFavorite(Place),
+    /// Open the "Favorites and recent locations" window, or close it.
+    Favorites(bool),
+    /// Take a favorite out (its position in the list).
+    ForgetFavorite(usize),
+    /// Take one recent location out (its position).
+    ForgetRecent(usize),
+    /// Take every recent location out.
+    ClearRecents,
     /// Open the "Prefix tweaks" window, or close it.
     PrefixTweaks(bool),
     SaveSnapshot(String),
@@ -1024,6 +1040,29 @@ impl App {
                     false => None,
                 };
             }
+            Action::AddFavorite(place) => {
+                self.favorites.retain(|p| p != &place);
+                self.favorites.push(place);
+                self.prune_recents();
+            }
+            Action::Favorites(open) => {
+                self.favorites_window = match open {
+                    true => Some(FavoritesWindow::new()),
+                    false => None,
+                };
+            }
+            Action::ForgetFavorite(i) => {
+                if i < self.favorites.len() {
+                    self.favorites.remove(i);
+                    self.prune_recents();
+                }
+            }
+            Action::ForgetRecent(i) => {
+                if i < self.recents.len() {
+                    self.recents.remove(i);
+                }
+            }
+            Action::ClearRecents => self.recents.clear(),
             Action::PrefixTweaks(open) => {
                 self.prefix_tweaks = match (&self.game, open) {
                     (Some(game), true) => Some(PrefixWindow::gather(game)),

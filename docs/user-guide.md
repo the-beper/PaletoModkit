@@ -15,6 +15,7 @@ How to browse the game files and change them with the desktop app. For installin
 - [Other files](#other-files)
 - [Keyboard and mouse](#keyboard-and-mouse)
 - [Hash generator](#hash-generator)
+- [Favorites and recent locations](#favorites-and-recent-locations)
 - [Appearance](#appearance)
 - [Menus at a glance](#menus-at-a-glance)
 
@@ -170,10 +171,19 @@ Dropping on the window:
 - Write one value per line to resolve it: the names that hold the hash. The game gives no way back from a hash, so resolution is only a lookup in the built-in metadata names and the names you saved; an unknown value stays unknown, and the same hash may be held by several names.
 - **Save these names…** (from the paste box) and **Import a text file…** add names to the store of the app, one name per line — the CLI's `hash resolve` resolves against them too. The store is a plain-text file at `~/.local/share/paleto/names.txt`.
 
+## Favorites and recent locations
+
+**File → Favorites and recent locations…** keeps the places of the game you come back to: folders, `.rpf` archives and paths inside an archive (see [browsing](#browsing)). Every place is kept by its path *inside its game folder*, so an install that moved still resolves, and a place on a mods copy and on its original are one entry:
+
+- **Add the shown place…** keeps the place you are looking at, if it is of a game (the two lists open from this one window); **Forget** takes one out, and **Forget them all** empties the recents.
+- The **recent locations** are kept by themselves as you visit them (newest first, 24 at most; places whose files are simply gone are taken out).
+- A click reopens the place: the archive shows its mods copy when the game has one, or the original when it does not, like browsing does. The list says why an entry cannot open now (`the file is gone…`) or not yet (`cannot verify yet`, the path inside an archive of the encrypted kind, checked when the keys load); a favorite is kept even then, but nothing opens from it.
+
+Favorites are saved with the other settings of the app and survive the restart (they are not tied to a chosen game: each pins its own game folder).
+
 ## Appearance
 
 The **View** menu:
-
 - **Theme**: light, dark, or the same as the desktop (followed live, also on Wayland; light when the desktop states no preference).
 - **Text and icon size** and **Density** (row spacing).
 - **Folders and files**: folders first, grouped by type, or mixed.
@@ -183,7 +193,7 @@ The **View** menu:
 
 | Menu | Entries |
 | :--- | :--- |
-| **File** | Open archive… · Export mods as an OIV package… · Quit |
+| **File** | Favorites and recent locations… · Open archive… · Export mods as an OIV package… · Quit |
 | **Game** | The installed games (pick one) · Choose the game folder… |
 | **Tools** | Hash generator… · Mods in game… · Snapshots of the mods folder… · Crash detection… · Script Hook V… |
 | **View** | Theme · Text and icon size · Density · Folders and files (grouping) · Coloured icons · Side tree · Show all files in the side tree · Remember open folders · Show original files · Expand all / Collapse all folders · Refresh (F5) |

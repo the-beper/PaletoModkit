@@ -14,6 +14,7 @@ use crate::notices::{self, Startup};
 use crate::scripthook_window::{self, ScriptHookWindow};
 use crate::snapshots_window::{self, SnapshotsWindow};
 use crate::hashes;
+use crate::favorites_window::{self, FavoritesWindow, Place};
 use crate::crash_window::{self, CrashWindow};
 use crate::export_window::{self, ExportWindow};
 use crate::settings::Settings;
@@ -122,6 +123,10 @@ pub struct App {
     pub(crate) snapshots: Option<SnapshotsWindow>,
     /// The "Hash generator" window: no game needed (F01, dist/future-works).
     pub(crate) hashes: Option<hashes::HashesWindow>,
+    ///Saved places (F02): the favorites and the recent in-game locations.
+    pub(crate) favorites: Vec<Place>,
+    pub(crate) recents: Vec<Place>,
+    pub(crate) favorites_window: Option<FavoritesWindow>,
     pub(crate) prefix_tweaks: Option<PrefixWindow>,
     pub(crate) crash: Option<CrashWindow>,
     pub(crate) export: Option<ExportWindow>,
@@ -226,6 +231,9 @@ impl App {
             interrupted: Vec::new(),
             snapshots: None,
             hashes: None,
+            favorites: Vec::new(),
+            recents: Vec::new(),
+            favorites_window: None,
             prefix_tweaks: None,
             crash: None,
             export: None,
@@ -279,6 +287,8 @@ impl App {
             let saved = storage.get_string("open_dirs").unwrap_or_default();
             self.open_dirs = saved.lines().map(PathBuf::from).filter(|p| p.is_dir()).collect();
         }
+        self.favorites = favorites_window::decode(&storage.get_string("favorites").unwrap_or_default());
+        self.recents = favorites_window::decode(&storage.get_string("recents").unwrap_or_default());
     }
 
     // ---- API used by tests -------------------------------------------------
@@ -340,6 +350,55 @@ impl App {
         match &self.listing_task {
             Some((pending, _)) => Some(pending.requested.clone()),
             None => self.browser.as_ref().map(|b| self.opened(b)),
+        }
+    }
+
+    /// The place of a location as it is kept: relative to its game folder,
+    /// with the inner path and the kind of the browser's view (None: it is not
+    /// under any game folder). A favorites on a mods copy and on its original
+    /// are the same place: the original's path is kept when there is one.
+    pub(crate) fn place_of_location(&self, location: &Location) -> Option<Place> {
+        let game = self.game.as_ref()?;
+        let (disk, inner, archive) = match location {
+            Location::Folder(p) => (p.clone(), String::new(), false),
+            Location::Archive(a) => (a.disk.clone(), a.inner_str(), true),
+        };
+        let rel = paleto_core::vfs::in_game(&disk, game)?;
+        let rel = match (rel.strip_prefix("mods"), rel.as_os_str().len() > "mods".len()) {
+            (Ok(stripped), true) if game.root.join(stripped).exists() => PathBuf::from(stripped),
+            _ => rel,
+        };
+        Some(Place::new(&game.root, &rel, &inner, archive))
+    }
+
+    /// What the browser looks at, as a kept place, for the window's add button.
+    fn current_place(&self) -> Option<Place> {
+        let location = self.current()?;
+        self.place_of_location(&location)
+    }
+
+    /// Keeps where the user went (in-game places only), newest first, for the
+    /// "Recent locations" list. The same place never twice: a revisit moves it
+    /// to the front; the game folder itself is not a location.
+    pub(crate) fn record_recent(&mut self, location: &Location) {
+        let Some(place) = self.place_of_location(location) else { return };
+        if place.headline().is_empty() {
+            return;
+        }
+        self.recents.retain(|p| p != &place);
+        self.recents.insert(0, place);
+        self.recents.truncate(favorites_window::RECENTS_CAP);
+    }
+
+    /// The recents whose item is simply gone are taken out; favorites are
+    /// never pruned, they may come back with their file. Only the checks that
+    /// data say so prune; a favourite without keys stays as it is.
+    pub(crate) fn prune_recents(&mut self) {
+        let game = self.game.as_ref();
+        let keys = self.keys.as_deref();
+        self.recents.retain(|p| !matches!(p.check(keys, game), favorites_window::Status::Missing(_)));
+        if let Some(w) = self.favorites_window.as_mut() {
+            w.revalidate(keys, game, &self.favorites);
         }
     }
 
@@ -413,6 +472,22 @@ impl App {
 
     pub fn open_hashes(&mut self, ctx: &egui::Context) {
         self.apply(Action::Hashes(true), ctx);
+    }
+
+    /// Opens the "Favorites and recent locations" window.
+    pub fn open_favorites(&mut self, ctx: &egui::Context) {
+        self.apply(Action::Favorites(true), ctx);
+    }
+
+    /// The favorites, as "game-relative path (inner path)" (the inner brackets
+    /// only when there is one), for the tests.
+    pub fn favorite_places(&self) -> Vec<String> {
+        self.favorites.iter().map(|p| p.headline()).collect()
+    }
+
+    /// The recent locations the same way, newest first, for the tests.
+    pub fn recent_places(&self) -> Vec<String> {
+        self.recents.iter().map(|p| p.headline()).collect()
     }
 
     pub fn open_prefix_tweaks(&mut self, ctx: &egui::Context) {
@@ -674,6 +749,8 @@ impl App {
                 Ok((keys, shared)) => {
                     (self.keys, self.shared) = (Some(Arc::new(keys)), Arc::new(shared));
                     self.start_legacy_scan(ctx);
+                    // The places whose inside could not be checked until now can be now.
+                    self.prune_recents();
                 }
                 Err(e) => {
                     self.status = Status::Error(format!("keys: {e}"));
@@ -1098,6 +1175,25 @@ impl eframe::App for App {
                 hashes::Request::Close => actions.push(Action::Hashes(false)),
             }
         }
+        // Favorites and recent locations: the lists live here, the window only asks.
+        let current = self.current_place();
+        let mut from_favorites = None;
+        if let Some(w) = self.favorites_window.as_mut() {
+            let favorites = std::mem::take(&mut self.favorites);
+            let recents = std::mem::take(&mut self.recents);
+            from_favorites = w.show(&ctx, busy, self.keys.as_deref(), self.game.as_ref(), &favorites, &recents, current.as_ref());
+            self.favorites = favorites;
+            self.recents = recents;
+        }
+        match from_favorites {
+            Some(favorites_window::Request::Close) => actions.push(Action::Favorites(false)),
+            Some(favorites_window::Request::Open(location)) => actions.push(Action::Go(location)),
+            Some(favorites_window::Request::Add(place)) => actions.push(Action::AddFavorite(place)),
+            Some(favorites_window::Request::ForgetFavorite(i)) => actions.push(Action::ForgetFavorite(i)),
+            Some(favorites_window::Request::ForgetRecent(i)) => actions.push(Action::ForgetRecent(i)),
+            Some(favorites_window::Request::ClearRecents) => actions.push(Action::ClearRecents),
+            None => {}
+        }
         if self.prefix_tweaks.as_mut().is_some_and(|w| w.show(&ctx)) {
             actions.push(Action::PrefixTweaks(false));
         }
@@ -1166,6 +1262,9 @@ impl eframe::App for App {
         } else {
             storage.remove_string("open_dirs");
         }
+        // The saved places survive a moved install by being relative to their game folder.
+        storage.set_string("favorites", favorites_window::encode(&self.favorites));
+        storage.set_string("recents", favorites_window::encode(&self.recents));
     }
 }
 

@@ -207,6 +207,8 @@ impl App {
                 return;
             }
         };
+        // A place the user reached, counted in "Recent locations" (in-game only).
+        self.record_recent(&pending.requested);
         let PendingListing { location, from_mods, redirected, after, .. } = pending;
         sort_rows(&mut rows, &self.settings);
         // In a mods copy, mark what differs from the original game files.
