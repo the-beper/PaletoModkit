@@ -12,7 +12,8 @@ use crate::scripthook_window::ScriptHookWindow;
 use crate::theme;
 use crate::textures::TextureEdit;
 
-use crate::app::{App, Action, Info, Status, Unsaved, about, format_combo, getting_started, shortcuts};
+use crate::app::{App, Action, Info, Status, Unsaved};
+use crate::menus::{about, format_combo, getting_started, shortcuts};
 use crate::preview::{PreviewSource, load_icon};
 
 
