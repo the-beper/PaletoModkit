@@ -395,3 +395,20 @@ Remaining lanes of the split map: browser (4) → preview (5) → menus (6) → 
 | commit | 5384d92 | "gui: extract browser.rs from app.rs" |
 
 Remaining lanes of the split map: preview (5) → menus (6) → actions (7), then the shell ≤ ~1,500.
+
+## H5, lane 5 — preview.rs (2026-11-01, v1.7.0; commit 281f56a)
+
+`crates/gui/src/preview.rs` (new, 663 lines): the preview panel — the data (`PreviewSource`, `Preview`, `ModelSource`, `PreviewRequest`, `Loaded`, `Content`), the glue (`preview`, `set_instance`/`take_requests` (Linux, cfg'd), `open_path`, `edit_texture`, `edit_preview`, `close_preview`, `preview_text`, `format_preview`, `save_preview`, `preview_textures`, `preview_info`, `show_info`, `previewing`, `clear_preview`, `show_loaded`, `preview_dirty`, `discards_preview`), `preview_ui`, and the free fns (`load_preview`, `sibling_textures`, `subfolders`, `binary_preview`, `as_text`, `read_start`, `load_icon`, `extension`). `app.rs` 3,668 → 3,029 lines (639 moved).
+
+| Check | Result | Note |
+|---|---|---|
+| ranges re-verified at lane start | VERIFIED | membership from the map, located fresh in the post-lane-4 file by markers: D 179–241, A 695–787, B 857–859, C 953–1028, UI 2636–2849, F1 3314–3455, F2 3570–3607 (the map's "show/preview-dirty…" run is `clear_preview`+`show_loaded`+`preview_dirty`+`discards_preview`; `edit_texture` sits inside the map's set_instance…preview_textures run) |
+| moved code byte-identical | VERIFIED | the seven blocks diffed against `git show 5384d92:crates/gui/src/app.rs` with `pub(crate) ` stripped on both sides: identical (D already carried seven `pub(crate)`, hence the both-sides strip as in lane 4) |
+| `pub(crate)` set | VERIFIED | compiler-driven; in preview.rs: the methods `take_requests`, `clear_preview`, `show_loaded`, `preview_dirty`, `discards_preview`, `preview_ui`, the free fns `load_preview`/`subfolders`, `PreviewRequest` + all seven fields (constructed from app.rs's run), `Preview` fields `codec`, `model_source`, `audio` (read by the export run handlers), `ModelSource` + `data`/`dictionaries` (the ExportModel run); the `pub fn`s stay `pub` (tests call them: `preview`, `open_path`, `edit_preview`, `close_preview`, `preview_text`, `format_preview`, `save_preview`, `preview_textures`, `previewing`); `Content` stays private (only `show_loaded`/`load_preview` name it). In app.rs: fields `instance`, `activator` (from `take_requests`), `const MAX_TEXT`, `fn add_info` (from `show_loaded`) |
+| imports | VERIFIED | preview.rs: `std::{path, sync::Arc}`, `egui::{self, RichText}`, `paleto_core::{ArchivePath, shared_textures::SharedTextures}`, `paleto_formats::{MetaFile, TextureDictionary}`, `paleto_rpf::Keys`, `crate::app::{Action, App, Info, Location, Status, add_info, MAX_TEXT}`, `crate::audio::{AudioRequest, AudioView}`, `crate::export::is_ytd`, `crate::find::{Codec, Find}`, `crate::hex_view::{self, HexView}`, `crate::highlight::{self, Syntax}`, `crate::model::ModelView`, `crate::theme`, `crate::task::Cancel`, `crate::textures::{Request, TextureEdit, TextureView}`; app.rs gains `use crate::preview::{Loaded, Preview, PreviewRequest, PreviewSource, load_preview, subfolders};` and prunes the imports the move orphaned (`MetaFile`, `TextureDictionary`, `AudioView`, `hex_view`, `highlight`, `ModelView`, `Cancel`, `Request`, `TextureView`, `Codec`, `is_ytd`); dialogs.rs and browser.rs switch `PreviewSource`/`load_icon`/`extension` to `crate::preview::…` |
+| `lib.rs` | VERIFIED | `mod preview;` after `mod browser;` (the H5 extractions grouped in lane order) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo test -p paleto-modkit --all-features` | VERIFIED | 106 passed, 0 failed, 1 ignored (the network test), all suites: kittest snapshots identical — zero UI diffs |
+| commit | 281f56a | "gui: extract preview.rs from app.rs" |
+
+Remaining lanes of the split map: menus (6) → actions (7), then the shell ≤ ~1,500.
