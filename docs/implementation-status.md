@@ -412,3 +412,20 @@ Remaining lanes of the split map: preview (5) → menus (6) → actions (7), the
 | commit | 281f56a | "gui: extract preview.rs from app.rs" |
 
 Remaining lanes of the split map: menus (6) → actions (7), then the shell ≤ ~1,500.
+
+## H5, lane 6 — menus.rs (2026-11-01, v1.7.0; commit 5c1a76d)
+
+`crates/gui/src/menus.rs` (new, 673 lines): the menus and bars — `icon` and the `// ---- UI ----` section header (the map does not list them, but `icon`'s only callers are `side_tree`/`tree_dir`, so it moves with them or goes dead), `menu_bar`, `side_tree`, `tree_dir`, `breadcrumbs`, `location_bar`, `disk_folder`, `original_data`, `refuse_original`, `archive_folder`, `drop_overlay`, `welcome`, and the free fns `menu_title`, `switch_menus`, `add_info` (the map's menu_title…add_info run), `getting_started`, `shortcuts`, `about`, `format_combo`. `app.rs` 3,027 → 2,371 lines (656 moved).
+
+| Check | Result | Note |
+|---|---|---|
+| ranges re-verified at lane start | VERIFIED | membership from the map, located fresh in the post-lane-5 file by markers: M1 1999–2198 (UI comment + `icon` + `menu_bar`), M2 2200–2487 (`side_tree`…`welcome`, the tail of the `impl App` block), F1 2811–2852, F2 2856–2966, F3 2978–2987; the map's two ranges (3069–3262, 3759–3821) sit contiguous after lanes 1–5 |
+| moved code byte-identical | VERIFIED | the five blocks diffed against `git show 281f56a:crates/gui/src/app.rs` with `pub(crate) ` stripped on both sides: identical |
+| `pub(crate)` set | VERIFIED | compiler-driven; in menus.rs: the methods `menu_bar`, `side_tree`, `location_bar`, `refuse_original`, `archive_folder`, `drop_overlay`, `welcome` (all called from the `eframe::App::ui` shell in app.rs); `breadcrumbs`, `disk_folder`, `original_data` were already pub(crate) (lane 4); the free fns `getting_started`/`shortcuts`/`about`/`format_combo` stay pub(crate) for dialogs.rs, `add_info` for preview.rs; `icon`, `menu_title`, `switch_menus` stay private (only callers live in menus.rs). In app.rs: the consts `INSTALL`, `INSTALL_SHORT`, `TWEAKS`, `TWEAKS_SHORT`, `ORIGINAL`, `MODS_COPY`, `REPO_URL`, `fn right_width`, and the fields `installs`, `reveal`, `open_dirs` (`MODS_LINK`/`MODS_LINK_HOVER` were already pub(crate) from lane 4) |
+| imports | VERIFIED | menus.rs: `std::path`, `egui::{self, Color32, RichText}`, `paleto_core::{vfs, ArchivePath}`, `paleto_formats::Format`, `crate::app::{Action, App, Info, Location, Status, right_width, INSTALL, INSTALL_SHORT, MODS_COPY, MODS_LINK, MODS_LINK_HOVER, ORIGINAL, REPO_URL, TWEAKS, TWEAKS_SHORT}`, `crate::browser::{Browser, filter_box}`, `crate::preview::PreviewSource`, `crate::settings::{Density, FileClass, Grouping, TextSize, Theme}`, `crate::theme`; app.rs prunes `Color32`, `Format`, `Density`/`FileClass`/`Grouping`/`TextSize`/`Theme` (settings → `Settings` alone) and `filter_box`; dialogs.rs switches `about`/`format_combo`/`getting_started`/`shortcuts` to `crate::menus`, preview.rs switches `add_info` |
+| `lib.rs` | VERIFIED | `mod menus;` after `mod preview;` (the H5 extractions grouped in lane order) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo test -p paleto-modkit --all-features` | VERIFIED | 106 passed, 0 failed, 1 ignored (the network test), all suites: kittest snapshots identical — zero UI diffs |
+| commit | 5c1a76d | "gui: extract menus.rs from app.rs" |
+
+Remaining lanes of the split map: actions (7), then the shell ≤ ~1,500.
