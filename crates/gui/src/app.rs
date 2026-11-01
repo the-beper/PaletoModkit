@@ -2498,7 +2498,13 @@ impl App {
             }
             Action::ConvertMods(paths) => {
                 let Some(game) = self.game.clone() else { return };
-                let Some(tool) = paleto_core::convert::converter() else { return };
+                let tool = match paleto_core::convert::converter_checked() {
+                    Ok(tool) => tool,
+                    Err(e) => {
+                        self.status = Status::Note(format!("{} (the converter) is not installed", paleto_core::convert::TOOL), e.to_string());
+                        return;
+                    }
+                };
                 let keys = self.keys.clone();
                 self.task = Some(Task::spawn("Converting to Enhanced", ctx, move || {
                     use paleto_core::convert;

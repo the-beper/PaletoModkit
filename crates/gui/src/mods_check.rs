@@ -430,7 +430,7 @@ impl ModsCheck {
                         }
                     });
                 } else {
-                    crate::widgets::hint(ui, format!("{} (the converter) is not installed: convert the Legacy files with CodeWalker's Asset Converter.", paleto_core::convert::TOOL));
+                    crate::widgets::hint(ui, format!("{} (the converter) is not installed: convert the Legacy files with CodeWalker's Asset Converter, or set ${} to point at the converter installed with Paleto.", paleto_core::convert::TOOL, paleto_core::convert::ENV));
                 }
                 ui.collapsing("Legacy files", |ui| {
                     egui::ScrollArea::vertical().id_salt("foreign-files").max_height(crate::widgets::dialog_list_height(ui.ctx()) / 2.0).show(ui, |ui| {

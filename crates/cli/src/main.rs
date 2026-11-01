@@ -713,6 +713,9 @@ fn main() -> Result<()> {
                         for f in &legacy {
                             println!("    {f}");
                         }
+                        if !no_convert {
+                            println!("    the converter {} is not installed: set ${} to point to it (docs/troubleshooting.md)", convert::TOOL, convert::ENV);
+                        }
                     }
                     local.iter().map(|(p, _)| std::fs::read(p)).collect::<Result<_, _>>()?
                 }
@@ -808,6 +811,9 @@ fn main() -> Result<()> {
                             println!("! {} files in the package were made for Legacy and are installed as they are:", legacy.len());
                             for f in &legacy {
                                 println!("    {f}");
+                            }
+                            if !no_convert {
+                                println!("    the converter {} is not installed: set ${} to point to it (docs/troubleshooting.md)", paleto_core::convert::TOOL, paleto_core::convert::ENV);
                             }
                         }
                     }
@@ -1096,9 +1102,7 @@ fn main() -> Result<()> {
         }
         Command::Convert { files, output, no_backup, undo: None } => {
             use paleto_core::convert;
-            let tool = convert::converter().with_context(|| {
-                format!("{} not found: build it with packaging/build-cwconv.sh, or set PALETO_CWCONV", convert::TOOL)
-            })?;
+            let tool = convert::converter_checked()?;
             if files.is_empty() {
                 let game = find_game(cli.game.as_deref(), None)?;
                 anyhow::ensure!(game.edition == paleto_core::Edition::Enhanced, "only the Enhanced edition needs converted files");

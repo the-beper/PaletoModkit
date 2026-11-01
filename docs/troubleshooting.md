@@ -120,6 +120,8 @@ The `.paleto` folder in the game folder holds the lock (`lock`) and the records 
 
 **The Enhanced game crashes when a modded car or object appears.** Usually a model or texture made for Legacy. **Mods in game** marks them and converts them.
 
+**Legacy files stay unconverted: "paleto-cwconv not found".** The converter (`paleto-cwconv`, with its own .NET runtime) comes in every package of Paleto and sits next to the program; `PALETO_CWCONV` names it wherever it is. The error and the **Mods in game** window say every place they looked: copy the converter back next to the program, point `PALETO_CWCONV` at it, or build it from source ([installation.md](installation.md#build-from-source); [mods.md](mods.md#legacy-files-on-the-enhanced-edition)).
+
 **An add-on pack does not show up in game.** It must be in the DLC list: **Mods in game** marks the packs that are not. Check also that the log shows its archive was read.
 
 **ScriptHookVDotNet mods (a `scripts` folder with `.dll` files) do nothing, or the game stops at startup.** They need the real .NET Framework 4.8 in the game's Wine prefix: **Mods in game** says whether it is there, and **Prefix tweaks…** (the wine-red button at the top right) installs it ([mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). If the game says "Support for Windows XP and Vista has ended", the prefix was left on an old Windows version; the same tool sets it back.

@@ -5,6 +5,7 @@
 //! hands it the files and puts the results back into the mods folder.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,20 +26,95 @@ use crate::{Error, Game};
 /// The file name of the converter.
 pub const TOOL: &str = "paleto-cwconv";
 
+/// The environment variable that names the converter instead of the search
+/// next to this program. Every report about a missing converter says it.
+pub const ENV: &str = "PALETO_CWCONV";
+
 /// The converter: `$PALETO_CWCONV`, or `paleto-cwconv` in `../lib/paleto-modkit/cwconv/`
 /// next to this program (installed layout), in `cwconv/` next to it (a copied
 /// program), or in `../cwconv/` (a cargo build: `packaging/build-cwconv.sh`
 /// puts it in `target/cwconv`).
 pub fn converter() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PALETO_CWCONV") {
-        return Some(PathBuf::from(path)).filter(|p| p.is_file());
+    search(std::env::var_os(ENV), this_dir()).0
+}
+
+/// The converter, or an error that says where it was searched for, why each
+/// candidate failed and what to do next: for the commands that must stop when
+/// the converter is missing, where `converter()` returning nothing can only
+/// degrade to a warning.
+pub fn converter_checked() -> Result<PathBuf, Error> {
+    let (tool, looked) = search(std::env::var_os(ENV), this_dir());
+    tool.ok_or_else(|| Error::Convert(unfound(&looked)))
+}
+
+/// The folder of this program, for the search next to it.
+fn this_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
+}
+
+/// The candidates of the search, in the order tried, with one line per
+/// rejected candidate for the report.
+fn search(env: Option<OsString>, exe_dir: Option<PathBuf>) -> (Option<PathBuf>, Vec<String>) {
+    match env {
+        Some(given) => {
+            // The environment variable decides; the other places are not looked at.
+            let path = PathBuf::from(given);
+            match unusable(&path, &format!("${ENV} ({})", path.display())) {
+                Some(line) => (None, vec![line]),
+                None => (Some(path), Vec::new()),
+            }
+        }
+        None => {
+            let Some(dir) = exe_dir else {
+                return (None, vec![format!("${ENV} is unset and the folder of this program cannot be found, so nothing is looked at")]);
+            };
+            let mut looked = Vec::new();
+            for candidate in ["../lib/paleto-modkit/cwconv", "cwconv", "../cwconv"].map(|d| dir.join(d).join(TOOL)) {
+                match unusable(&candidate, &candidate.display().to_string()) {
+                    Some(line) => looked.push(line),
+                    None => return (Some(candidate), looked),
+                }
+            }
+            (None, looked)
+        }
     }
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    [dir.join("../lib/paleto-modkit/cwconv"), dir.join("cwconv"), dir.join("../cwconv")]
-        .into_iter()
-        .map(|d| d.join(TOOL))
-        .find(|p| p.is_file())
+}
+
+/// Whatever makes a candidate not the converter, as one line of the report.
+fn unusable(at: &Path, shown: &str) -> Option<String> {
+    match std::fs::metadata(at) {
+        Err(_) => Some(format!("{shown}: not found")),
+        Ok(meta) if !meta.is_file() => Some(format!("{shown}: not a file")),
+        Ok(_) if not_runable(at) => Some(format!("{shown}: found, but not executable")),
+        Ok(_) => None,
+    }
+}
+
+/// Whether the file of this name is kept from running.
+#[cfg(not(unix))]
+fn not_runable(_at: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn not_runable(at: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(at).is_ok_and(|m| m.permissions().mode() & 0o111 == 0)
+}
+
+/// The error message when the search found nothing: every place looked at and
+/// what to do next.
+fn unfound(looked: &[String]) -> String {
+    let mut text = format!("{TOOL} not found, the Legacy -> Enhanced converter. Looked at:");
+    for line in looked {
+        text.push_str("\n  ");
+        text.push_str(line);
+    }
+    text.push_str(&format!(
+        "\nSet ${ENV} to a paleto-cwconv program file, or reinstall Paleto, which ships the converter; \
+         a cargo build makes it with packaging/build-cwconv.sh (docs/troubleshooting.md)"
+    ));
+    text
 }
 
 /// Whether a file of this name is a resource the converter handles.
@@ -619,6 +695,83 @@ pub(crate) mod tests {
         assert!(needs_conversion("a.ytd", &res(13)));
         assert!(!needs_conversion("a.txt", &res(13)));
         assert!(!needs_conversion("a.ydr", b"not a resource"));
+    }
+
+    #[test]
+    fn the_environment_names_the_converter() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("mine-cwconv");
+        crate::write_script(&tool, "#!/bin/sh\nexit 0\n");
+        // The environment candidate wins; the places next to the program are not looked at.
+        let (found, looked) = search(Some(tool.clone().into_os_string()), Some(dir.path().join("app")));
+        assert_eq!(found, Some(tool));
+        assert!(looked.is_empty(), "{looked:?}");
+    }
+
+    #[test]
+    fn an_unusable_environment_candidate_is_reported() {
+        // Nothing there.
+        let (found, looked) = search(Some("/nonexistent/paleto-cwconv".into()), None);
+        assert_eq!(found, None);
+        let report = unfound(&looked);
+        assert!(report.contains("$PALETO_CWCONV (/nonexistent/paleto-cwconv): not found"), "{report}");
+        assert!(report.contains("Set $PALETO_CWCONV"), "{report}");
+        assert!(report.contains("packaging/build-cwconv.sh"), "{report}");
+        assert!(report.contains("docs/troubleshooting.md"), "{report}");
+        // A folder of the same name is not the converter.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("this-way")).unwrap();
+        let (found, looked) = search(Some(dir.path().join("this-way").into_os_string()), None);
+        assert_eq!(found, None);
+        assert!(looked.iter().any(|l| l.contains("this-way") && l.ends_with("not a file")), "{looked:?}");
+        // A program file that is kept from running is named as such: the fix is its permissions.
+        let mine = dir.path().join("kept-from-running");
+        std::fs::write(&mine, b"#!\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let (found, looked) = search(Some(mine.into_os_string()), Some(dir.path().join("app")));
+        assert_eq!(found, None);
+        assert!(looked.iter().any(|l| l.contains("kept-from-running") && l.ends_with("found, but not executable")), "{looked:?}");
+    }
+
+    #[test]
+    fn the_next_to_the_program_candidates_are_tried_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // The program folder: the bundled layout holds a converter nobody may run, the
+        // copied-program candidate a working one.
+        let app = dir.path().join("app");
+        let bundled = app.join("../lib/paleto-modkit/cwconv").join(TOOL);
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, b"#!\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let copied = app.join("cwconv").join(TOOL);
+        std::fs::create_dir_all(copied.parent().unwrap()).unwrap();
+        crate::write_script(&copied, "#!/bin/sh\nexit 0\n");
+        let (found, looked) = search(None, Some(app));
+        assert_eq!(found, Some(copied));
+        assert!(looked.iter().any(|l| l.contains("lib/paleto-modkit/cwconv") && l.ends_with("found, but not executable")), "{looked:?}");
+        // Nothing anywhere: every place is named, in the order tried.
+        let empty = tempfile::tempdir().unwrap();
+        let (found, looked) = search(None, Some(empty.path().to_path_buf()));
+        assert_eq!(found, None);
+        let report = unfound(&looked);
+        assert!(report.contains("../lib/paleto-modkit/cwconv/") && report.contains("cwconv/") && report.contains("../cwconv/"), "{report}");
+        assert_eq!(report.matches(": not found").count(), 3, "{report}");
+    }
+
+    #[test]
+    fn without_a_program_folder_the_report_says_so() {
+        let (found, looked) = search(None, None);
+        assert_eq!(found, None);
+        let report = unfound(&looked);
+        assert!(report.contains("unset and the folder of this program"), "{report}");
     }
 
     /// A stand-in for paleto-cwconv: version 162 becomes 171, 171 is left
