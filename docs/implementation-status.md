@@ -429,3 +429,20 @@ Remaining lanes of the split map: menus (6) → actions (7), then the shell ≤ 
 | commit | 5c1a76d | "gui: extract menus.rs from app.rs" |
 
 Remaining lanes of the split map: actions (7), then the shell ≤ ~1,500.
+
+## H5, lane 7 — actions.rs (2026-11-01, v1.7.0; commit 01f3282)
+
+`crates/gui/src/actions.rs` (new, 1,191 lines): the action machinery — `impl Action` (waits_for_task/starts_task/mutates), `Unsaved`, the `Action` enum (every variant), `apply` (the unsaved-edits gate), `refused_while_interrupted`, and `run` (the ~919-line per-action router that every other moved file reaches through `Action`). `app.rs` 2,370 → 1,212 lines (1,158 moved) — the end cap is met before the item's close checks.
+
+| Check | Result | Note |
+|---|---|---|
+| ranges re-verified at lane start | VERIFIED | membership from the map, located fresh in the post-lane-6 file by markers: D7 190–426 (`impl Action` → `Unsaved` → `Action` enum), M7 787–1705 (the `apply` doc → `run` close); the map's pre-lane-1 numbers (474–597, 598, 604–711, 1623, 1641, 1657–2544) are survey windows, not line artifacts |
+| moved code byte-identical | VERIFIED | the two blocks diffed against `git show 5c1a76d:crates/gui/src/app.rs` with `pub(crate) ` stripped on both sides: identical |
+| `pub(crate)` set | VERIFIED | compiler-driven; in actions.rs none of the `impl Action` methods needed widening (no external callers; `Action`/`Unsaved` were already pub(crate)); `apply` stays pub(crate), `refused_while_interrupted`/`run` stay private (only `apply` calls them). In app.rs: the fields `allow_close`, `task`, `after_task`, `shared`, `refresh_preview`, `saving`, `copies_task`, `select_after`, `expand_task`, `mods_check`, `snapshots`, `prefix_tweaks`, `export_task`, `crash`, and the methods `select_game`, `go_then`, `current`, `refresh`, `spawn_add`, `spawn_edit` (all named by run), plus the `extract` test import moved into `mod tests` so the lib build stays warning-clean |
+| imports | VERIFIED | actions.rs: `std::path::PathBuf`, `eframe::egui`, `paleto_core::{texture_batch, vfs, ArchivePath, Game}`, `paleto_rpf::Keys`, `crate::app::{App, Info, Location, Status}`, `crate::audio::{self, AudioRequest}`, `crate::browser::{AfterListing, HistoryMove, RowKind, sort_rows}`, `crate::crash_window::CrashWindow`, `crate::dialogs::{AddonDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, edit_message, install_failure}`, `crate::export::{ExportDest, extract, with_notes}`, `crate::export_window::ExportWindow`, `crate::mods_check::ModsCheck`, `crate::prefix_window::PrefixWindow`, `crate::preview::{PreviewRequest, PreviewSource, load_preview, subfolders}`, `crate::scripthook_window::ScriptHookWindow`, `crate::settings::Settings`, `crate::snapshots_window::SnapshotsWindow`, `crate::task::Task`, `crate::textures::{self, Export, TextureEdit}` (the `self` is needed by run's `textures::encode`/`texture_batch::match_files`); app.rs gains `use crate::actions::Action;` and prunes `texture_batch`, `audio`, `textures`, `edit_message`/`install_failure`, `ExportDest`/`with_notes`, `RowKind`/`sort_rows`, `PreviewRequest`/`PreviewSource`/`load_preview`/`subfolders` (kept only what still lives in app.rs: `extract`, `AfterListing`, `mark_changes`, `Loaded`, `Preview`); every other module (dialogs, export, browser, preview, menus) switches `Action` from `crate::app` to `crate::actions` |
+| `lib.rs` | VERIFIED | `mod actions;` after `mod menus;` (the H5 extractions grouped in lane order) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo test -p paleto-modkit --all-features` | VERIFIED | 106 passed, 0 failed, 1 ignored (the network test), all suites: kittest snapshots identical — zero UI diffs |
+| commit | 01f3282 | "gui: extract actions.rs from app.rs" |
+
+Remaining lanes of the split map: none — all seven lanes landed; the shell is 1,212 lines (target ≤ ~1,500) and the item close checks follow.
