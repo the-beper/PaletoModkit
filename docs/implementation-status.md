@@ -21,6 +21,7 @@ Newest first.
 
 | When | Mandate | Done | In progress | Next step | Open questions | Commit |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 2026-11-01 (H group closed) | H1–H5 (blocker for Fxx/CP/P1-A) | H1 ✅, H2 ✅, H3 ✅ (`c542999`), H4 ✅ (`a7cbf93`), H5 ✅ (7 lanes, `01f3282`, `app.rs` 5,383 → 1,212) + group V6-equivalent: 631 passed / 0 failed / 1 ignored, empty `HOME` the same, clippy clean, release build ok | — | F01 on `feature/f01-hash-generator` (branch per feature, decision 19) | — | this commit |
 | 2026-10-31 (1.7.0 ready) | after M1 | `packaging/version-bump.sh` (new; `tests/version-bump-test.sh` in `release-tooling`, also run under dash and mawk); version 1.7.0 set with it (`Cargo.toml`, `Cargo.lock`, metainfo with the notes of the M1 follow-ups; `release-notes.py` reads them); `appstreamcli validate` ok; workspace tests 625 passed, 0 failed, 1 ignored, the same with an empty `HOME`; clippy clean; pre-flight on the real gh-pages at `b801244` (the release scripts unchanged since): 0 failures | — | the user merges `release/1.7.0`, tags `v1.7.0` and approves `sign-flatpak`: the first GitHub run of `check-flatpak` and of the static delta | — | `b76e06f` |
 | 2026-10-31 (follow-ups) | after M1 | the Follow-ups of M1 and of the signing review, on branch `followups/m1` (local, on `origin/main` `f115355`): signing follow-ups, app follow-ups, snapshots + case warning, j1 (keyless `check-flatpak`), D3 (static delta in `finish-flatpak`), the release docs aligned with the code; final code review: no blocker, its findings fixed | — | the user pushes the branch and opens the PR; the next stable tag runs `check-flatpak` and the static delta on GitHub for the first time; then M2, when the user asks | `msrv` as a required check (Pending actions) | `07f54d2` |
 | 2026-10-30 (1.6.0 released) | after M1 | PR #11 merged (`cf29ea8`), tag `v1.6.0` pushed by the user, `sign-flatpak` approved; run 41111924334: 9/9 jobs green; the first stable release and the first gh-pages write of the new graph, checked read-only (Gates V5) | — | none for 1.6.0; next: the Follow-ups (signing Low, KuickShare items 5–7) or M2, when the user asks | — | `cf29ea8` |
@@ -210,6 +211,7 @@ Precedence per the common rules (§2): safety > user > data integrity > release 
 | 16 | Two pushes of `main` not made by Claude sessions (2026-10-29 12:26, `24d13f5` → `ea48aab`, the first Register before the fixes were public; 2026-10-30 00:51, `ea48aab` → `3819669`) | pending actions — asked the user | **user decision**: closed; the fixes have been public since, every later push was the user's, and a local `pre-push` hook refuses pushes while `CLAUDECODE` is set |
 | 17 | The pre-key checks of prepare's data ran on the VM that then received the key (design review finding j1, both PaletoModkit and KuickShare) | release security — asked the user | **user decision**: a keyless `check-flatpak` job before the signing job, pinned through job outputs (design note `.claude/m1/design-j1-keyless-check.md`, local), in both repositories; download by artifact id; no approval skip on `skip=1` |
 | 18 | `msrv` (`cargo check` with the `rust-version` of `Cargo.toml`) was optional, so the stated minimum could drift unnoticed; as a required check, code or an update that needs a newer compiler blocks the merge until `rust-version` and the docs are raised | repository settings — asked the user | **user decision 2026-10-31**: required in the `main` ruleset (with `check`, `release-tooling`, `deny`; maintainer bypass unchanged), set through the API; 7 of 7 runs green before, about 30 s with cache |
+| 19 | Sessions of 2026-11-01 after the assessment: the H group closed and feature work (F01…) starts | user instruction in session ✓2 of §2 | **user decision**: every macro-feature gets its own branch (`feature/fXX-…`), pushed to origin so the user opens and merges the PRs (the `pre-push` guard stays; these pushes are explicitly authorized, `main` is never pushed); and all cargo runs are capped at 12 logical CPUs / 6 cargo jobs / 6 test threads and within 90% of the machine's RAM, recorded per gate |
 
 ## Agents and escalations
 
@@ -446,3 +448,30 @@ Remaining lanes of the split map: actions (7), then the shell ≤ ~1,500.
 | commit | 01f3282 | "gui: extract actions.rs from app.rs" |
 
 Remaining lanes of the split map: none — all seven lanes landed; the shell is 1,212 lines (target ≤ ~1,500) and the item close checks follow.
+
+## H5, item close (2026-11-01, v1.7.0)
+
+| Check | Result | Note |
+|---|---|---|
+| end cap | VERIFIED | `app.rs` 1,212 lines ≤ ~1,500; the seven extracted files at their lane sizes (dialogs 825, find 90, export 102, browser 770, preview 663, menus 673, actions 1,191) |
+| gui suite at every lane | VERIFIED | per-lane rows above (106 passed, 0 failed, 1 ignored, zero kittest UI diffs, clippy clean) |
+| core suites once at the end | VERIFIED | covered by the group V6-equivalent below (its first run: 631 passed, 0 failed, 1 ignored) |
+| empty-HOME run before closing | VERIFIED | the same V6-equivalent run with an empty `HOME`: 631 passed, 0 failed, 1 ignored, exit 0 |
+| behaviour | VERIFIED | move-only: every lane diffed byte-identical against the pre-move tree with `pub(crate)` stripped; no screenshot or doc change (the item forbids them) |
+| commit | 01f3282 | "gui: extract actions.rs from app.rs", the last code commit of the item |
+
+## H1–H5 group V6-equivalent (2026-11-01, v1.7.0; Fedora 45 native, 16 threads / 31 GiB)
+
+The group's one full local regression — the gate the TODO puts before any Fxx, CP or P1-A item ("F01 may start" when this row is green).
+
+| Check | Result | Note |
+|---|---|---|
+| `cargo test --locked --workspace --all-features --jobs 6` | VERIFIED | 42 suites: 631 passed, 0 failed, 1 ignored (the network .NET test), exit 0 |
+| same with an empty `HOME` | VERIFIED | 631 passed, 0 failed, 1 ignored, exit 0 (`CARGO_HOME` and `RUSTUP_HOME` kept at their originals, `RUSTUP_TOOLCHAIN=stable` per the H3 note) |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo build --locked --release --jobs 6` | VERIFIED | binary `target/release/paleto` 19.1 MB |
+| git state at the gate | — | HEAD `a80acc4`, working tree clean |
+| Windows rows | N/A | until P1-A |
+| resources | VERIFIED | every command ran under the session's user-imposed caps: `taskset` on 12 logical CPUs, `cargo --jobs 6`, `RUST_TEST_THREADS=6`, nice 10; the machine kept 20+ GiB available throughout (90% limit respected) |
+
+No pre-existing failures to record: the suite is green from end to end, and the H group closed here (H1–H5 rows above). Notes for the next group: the `msrv` required check already covers the MSRV watch item; the two user decisions of the group (H1 keep `gh-pages-previous` + run the host gc once — done; H2 the Register at `docs/implementation-status.md`) are recorded in their sections.
