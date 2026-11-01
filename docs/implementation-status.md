@@ -377,3 +377,21 @@ Remaining lanes of the split map: export (3) → browser (4) → preview (5) →
 | commit | e1103fa | "gui: extract export.rs from app.rs" |
 
 Remaining lanes of the split map: browser (4) → preview (5) → menus (6) → actions (7), then the shell ≤ ~1,500.
+
+## H5, lane 4 — browser.rs (2026-11-01, v1.7.0; commit 5384d92)
+
+`crates/gui/src/browser.rs` (new, 770 lines): the file browser — the data (`FsEntry`, `AfterListing`, `HistoryMove`, `PendingListing`, `Listed`, `TreeRead`, `Browser`, `Row`, `RowKind`, `impl Row`), `tree_selection`, the navigation run (`show`, `show_then`, `show_moving`, `undo_history`, `show_listed`, `original_of`, `opened`, `within`, `original_archive`), the side tree (`listing`, `read_tree`, `clear_tree`), `browser_ui`, and the free fns (`folder_rows`, `archive_rows`, `has_mods_copy`, `tree_entries`, the `FILTER_ID` + `filter_box`, `mark_changes`, `sort_rows`). `app.rs` 4,417 → 3,668 lines (749 moved).
+
+| Check | Result | Note |
+|---|---|---|
+| ranges re-verified at lane start | VERIFIED | membership from the map, located fresh in the post-lane-3 file by markers: M0 178–268, TS 752–758, C 1033–1225, LS 2536–2568, BU 2966–3243, R1 3920–3995, R2 4257–4317 |
+| moved code byte-identical | VERIFIED | the seven blocks diffed against `git show 8a9fcb4:crates/gui/src/app.rs` with `pub(crate) ` stripped on both sides: identical (the pre-move M0 already carried four `pub(crate)`: `Browser`, `rows`, `Row`, `name` — so the strip applies to both sides, unlike lanes 1–3) |
+| `pub(crate)` set | VERIFIED | compiler-driven; in browser.rs: the data types `AfterListing` (+ `select`, `reload_preview`, constructed from app.rs), `HistoryMove`, `PendingListing` (+ `requested`), `FsEntry` (all four fields: `path`, `name`, `is_dir`, `modded` — named by `tree_dir`), `Browser` fields `location`, `from_mods`, `encryption`, `selected`, `filter` (`rows` and `name` were already widened), `Row` fields `kind`, `size`, `modded`, `added`, `impl Row::is_container`, the nav methods `show`…`original_archive`, `listing`/`read_tree`/`clear_tree`, `browser_ui`, and the free fns `filter_box`, `mark_changes`, `sort_rows`; `folder_rows`/`archive_rows`/`has_mods_copy`/`tree_entries` stay private (no callers outside the module); `RowKind` variants bare (lane 2 lesson). In app.rs: fields `peek_original`, `show_originals`, `load_delay`, `ctx`, `listing_task`, `back`, `forward`, `settings`, `changes_cache`, `changes_task`, `preview_task`, `preview_select`, `tree`, `tree_loading`, `tree_queue`, `tree_task`, the consts `LOADING_SHOWN`, `MODS_LINK`, `MODS_LINK_HOVER`, `type Changes`, `fn extension`, `fn dialog_open`, `fn breadcrumbs`, and `struct Loaded` (the type behind `preview_task`, assigned from browser.rs — the `private_interfaces` warning named it, so the widening went on the type, not the field) |
+| cascades dissolved | VERIFIED | the expected E0308 (`archive_folder`) and E0277 pair (`tree_dir`) were secondary effects of the field-privacy errors (the lane-1 `texture_window` precedent): they cleared with the widenings, no hand-edits to moved code |
+| imports | VERIFIED | browser.rs header: `std::collections::BTreeSet`, `std::path`, `egui`, `egui_extras::{Column, TableBuilder}`, `paleto_core::{ArchivePath, Game, game, vfs}`, `paleto_rpf::{Encryption, EntryKind, Keys}`, `crate::app::{Action, App, Changes, Location, Status, PreviewSource, extension, size, LOADING_SHOWN, MODS_LINK, MODS_LINK_HOVER}`, `crate::settings::{FileClass, Grouping, Settings, SortBy}`, `crate::task::Task`, `crate::theme`; app.rs pruned `Column`/`TableBuilder`, `Encryption`/`EntryKind`, `SortBy` and gains `use crate::browser::{AfterListing, Browser, FsEntry, HistoryMove, Listed, PendingListing, RowKind, TreeRead, filter_box, mark_changes, sort_rows};` after the export line |
+| `lib.rs` | VERIFIED | `mod browser;` after `mod export;` (the H5 extractions grouped in lane order) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo test -p paleto-modkit --all-features` | VERIFIED | 106 passed, 0 failed, 1 ignored (the network test), all suites: kittest snapshots identical — zero UI diffs |
+| commit | 5384d92 | "gui: extract browser.rs from app.rs" |
+
+Remaining lanes of the split map: preview (5) → menus (6) → actions (7), then the shell ≤ ~1,500.
