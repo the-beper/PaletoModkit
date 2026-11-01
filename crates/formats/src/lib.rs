@@ -23,6 +23,7 @@ mod ytd_write;
 pub use dds::{Image, read as read_dds};
 pub use encode::{compress, load as load_image};
 pub use meta::MetaFile;
+pub use names::Names;
 pub use ytd::{Format, Texture, TextureDictionary};
 pub use ytd_write::{Edit, edit_textures, replace_textures};
 
