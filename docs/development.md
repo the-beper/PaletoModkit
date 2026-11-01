@@ -52,6 +52,16 @@ The tests must not depend on your computer either: on yours the app finds your i
 HOME=$(mktemp -d) CARGO_HOME=~/.cargo RUSTUP_HOME=~/.rustup cargo test
 ```
 
+## Panics in the code
+
+A `.unwrap()`, `expect()` or `panic!` reachable from the data the tool is given (a package, an archive, a game folder, a text file) would end a session that must survive bad input: diagnosing a crash, a long install. The policy in `crates/core`:
+
+- Anything the data at hand shapes — a ZIP/OIV record, an XML node, a registry value — goes through `Result`, the module's own error type.
+- `expect("why")` for non-local invariants an earlier step guarantees: a folder a `create` call above already made, a name that a path of parts cannot run out of, an `Option` created with `create: true` above.
+- A bare `.unwrap()` only for what was built right there: a fixed-size slice of a local buffer, a path taken from a listing over the same folder it is stripped of, a map entry the lines before inserted, a guard that proved the `Some` a line above.
+
+`crates/core/tests/policy.rs` keeps the count honest in `cargo test`: it counts the sites in the production code (test modules and `*_tests.rs` files aside) and fails on any `panic!(` in production code, and on a count over the cap (32; 29 on 2026-11-01). Raise the cap only with a note in the register, one justification per new site.
+
 ## Screenshots
 
 The screenshots are rendered by tests from a real game install, and are skipped unless `PALETO_SCREENS` names the output folder. They run against a clean copy of the game, made of links to the game's own files in a temporary folder, so they never touch the real game folder and show none of your mods.
