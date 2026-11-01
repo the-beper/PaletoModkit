@@ -344,3 +344,19 @@ Lane order is lowest-coupling first: dialogs and find go before the browser/prev
 | `cargo test -p paleto-modkit` | VERIFIED | all suites green, kittest snapshots identical — zero UI diffs |
 | commit | 6053c83 | "gui: extract dialogs.rs from app.rs" |
 | `lib.rs` | VERIFIED | `mod dialogs;` added after `pub mod appimage;` (grouped like its siblings) |
+
+## H5, lane 2 — find.rs (2026-11-01, v1.7.0; commit 1a2d914)
+
+`crates/gui/src/find.rs` (new, 90 lines): `Find` — the search of a text preview (fields query, matches, current, found_with, stale, focus, jump; methods `new`, `refresh`, `step`) — `Codec` — what the text of a preview is (Plain / Gxt2 / Meta / Summary, with `encode`) — and `App::search_preview` (opens the search bar, the entry used by the tests). `app.rs` 4,584 → 4,503 lines.
+
+| Check | Result | Note |
+|---|---|---|
+| moved code byte-identical | VERIFIED | the two ranges of the lane 2 map, diffed against `git show 260cdbe:` lines 334–396 and 917–931 with `pub(crate)` stripped: identical (the lane boundaries had not shifted from lane 1: the moved blocks sat before the dialog structs the lane 1 move took out) |
+| `pub(crate)` set | VERIFIED | compiler-driven; in find.rs: `Find` + the fields `query`, `matches`, `current`, `stale`, `focus`, `jump` (all touched from app.rs's preview UI/actions; `found_with` stays private, only `refresh` reads it), `new`/`refresh`/`step`, `Codec` and `encode` (reached from the save action); in app.rs: `Preview.text` and `Preview.find` widened for `search_preview` (`App.preview` was already `pub(crate)`). One correction the compile forced: Rust does not take visibility on enum variants — the lane map's "widened pub(crate)" for the moved enum is understood as on the type, so `Plain`/`Gxt2`/`Meta`/`Summary` stay bare under `pub(crate) enum Codec` |
+| imports | VERIFIED | find.rs header: `std::sync::Arc`, `paleto_formats::MetaFile`, `crate::app::App`, `crate::highlight` (the map's `Preview` candidate proved unused: `search_preview` reaches the preview through the field without naming the type — dropped); app.rs: added `use crate::find::{Codec, Find};` after the dialogs line and kept `crate::highlight::{self, Syntax}` (`is_tidy`/`layout`/`layout_marked` stay in app.rs); `MetaFile` and `gxt2` remain in app.rs's own uses (lines 4172–4179, now 4091–4098) |
+| `lib.rs` | VERIFIED | `mod find;` directly after `mod dialogs;`, the two H5 extractions grouped |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo test -p paleto-modkit --all-features` | VERIFIED | 106 passed, 0 failed, 1 ignored (the network test), all suites: kittest snapshots identical — zero UI diffs |
+| commit | 1a2d914 | "gui: extract find.rs from app.rs" |
+
+Remaining lanes of the split map: export (3) → browser (4) → preview (5) → menus (6) → actions (7), then the shell ≤ ~1,500.
