@@ -9,7 +9,8 @@ use egui_extras::{Column, TableBuilder};
 use paleto_core::{ArchivePath, Game, game, vfs};
 use paleto_rpf::{Encryption, EntryKind, Keys};
 
-use crate::app::{Action, App, Changes, Location, Status, PreviewSource, extension, size, LOADING_SHOWN, MODS_LINK, MODS_LINK_HOVER};
+use crate::app::{Action, App, Changes, Location, Status, size, LOADING_SHOWN, MODS_LINK, MODS_LINK_HOVER};
+use crate::preview::{PreviewSource, extension};
 use crate::settings::{FileClass, Grouping, Settings, SortBy};
 use crate::task::Task;
 use crate::theme;

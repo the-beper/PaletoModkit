@@ -6,6 +6,7 @@ mod dialogs;
 mod find;
 mod export;
 mod browser;
+mod preview;
 mod audio;
 mod hex_view;
 mod highlight;
