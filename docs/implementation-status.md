@@ -360,3 +360,20 @@ Lane order is lowest-coupling first: dialogs and find go before the browser/prev
 | commit | 1a2d914 | "gui: extract find.rs from app.rs" |
 
 Remaining lanes of the split map: export (3) → browser (4) → preview (5) → menus (6) → actions (7), then the shell ≤ ~1,500.
+
+## H5, lane 3 — export.rs (2026-11-01, v1.7.0; commit e1103fa)
+
+`crates/gui/src/export.rs` (new, 102 lines): the export glue `export_textures`, `export_model`, `replace_sound`, `extract_to`, `export_sounds` (the map's "export_textures…export_sounds" run: `export_model` and `replace_sound` sit inside it), `export_counts` and `open_export` (queries into the export window), and the free fns `extract` (the extraction into a folder, one transaction inside a game), `with_notes`, `ExportDest` (+ impl, `folder_and_name`) and `is_ytd`. `app.rs` 4,504 → 4,416 lines.
+
+| Check | Result | Note |
+|---|---|---|
+| ranges re-verified at lane start | VERIFIED | the map's line numbers predate lane 1; the membership is the map's symbol list, located fresh in the post-lane-2 file (M1 879–901, M2 924–931, free fns 4352–4404) — the survey's own row warned the offsets were window artifacts |
+| moved code byte-identical | VERIFIED | the three ranges diffed against `git show 260cdbe:`—equivalent (pre-commit HEAD) lines with `pub(crate)` stripped: identical |
+| `pub(crate)` set | VERIFIED | compiler-driven; in export.rs: `extract`, `with_notes`, `ExportDest` and its `folder_and_name`, `is_ytd` (all kept in use by app.rs's run handlers and the texture parse); the enum's `File`/`Folder` variants stay bare (lane 2's lesson: no visibility on variants); in app.rs `App.export` widened for `export_counts` (`App` field, read from export.rs). The moved `pub fn`s stay `pub` (tests call them) and need nothing of app.rs beyond `apply` (pub(crate) since lane 1) |
+| imports | VERIFIED | export.rs: `std::path`, `egui`, `paleto_core::{ArchivePath, vfs}`, `paleto_rpf::Keys` (not `paleto_core` — first compile caught it), `crate::app::{Action, App}`, `crate::audio::AudioRequest`, `crate::export_window::ExportWindow`, `crate::textures::Export`; app.rs keeps every import it had (`Export`, `AudioRequest`, `vfs`, `ExportWindow` still live in the `Action` enum, the run handlers and the field) and gains `use crate::export::{ExportDest, extract, is_ytd, with_notes};` after the find line |
+| `lib.rs` | VERIFIED | `mod export;` after `mod find;` (the H5 extractions grouped in lane order) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo test -p paleto-modkit --all-features` | VERIFIED | 106 passed, 0 failed, 1 ignored (the network test), all suites: kittest snapshots identical — zero UI diffs |
+| commit | e1103fa | "gui: extract export.rs from app.rs" |
+
+Remaining lanes of the split map: browser (4) → preview (5) → menus (6) → actions (7), then the shell ≤ ~1,500.
