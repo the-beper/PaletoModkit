@@ -5,6 +5,7 @@
 - [Paths and the game folder](#paths-and-the-game-folder)
 - [Archives](#archives)
 - [Metadata, text tables and audio](#metadata-text-tables-and-audio)
+- [Hashes](#hashes)
 - [Textures](#textures)
 - [Models](#models)
 - [Installing mods](#installing-mods)
@@ -106,6 +107,26 @@ paleto textures update/update.rpf/x64/textures/fxdecal.ytd --replace-matching ~/
 ```
 
 New textures from PNG pictures become BC1, or BC3 when they have transparency. `--format` picks another one: `bc1`, `bc2`, `bc3`, `bc4`, `bc5`, `bc7`, `a8r8g8b8`, `x8r8g8b8`, `a8b8g8r8`, `a1r5g5b5`, `a8` or `l8`. Mipmaps are generated when the size is a power of two. Cube maps are listed as such; `--png` writes their first face only, DDS files keep all six, and a cube map DDS can replace a texture.
+
+## Hashes
+
+Names and hashes, as the game itself hashes them (Jenkins one-at-a-time). No game needed:
+
+```bash
+# Hash a name: hexadecimal, then unsigned and signed decimal. Lowercase is the
+# default (the way the game hashes asset names and text labels)
+paleto hash generate ADDER
+paleto hash generate --mode exact CMapData
+paleto hash generate --mode awc my_sound
+
+# Resolve a value to the names that hold it: hexadecimal (with or without 0x or
+# hash_), unsigned or signed decimal
+paleto hash resolve 0xB779A091
+paleto hash resolve -1216765807
+paleto hash resolve hash_3545841574
+```
+
+The resolution is only a lookup: the game gives no way back from a hash, so an unknown value stays `unknown`. `resolve` looks in the built-in metadata names (about 20 thousand of them, the metadata the app shows as XML) and in the names added with the app's **Tools > Hash generator…** (a plain-text list, one name per line, kept at `~/.local/share/paleto/names.txt`; harvested names of your own install may be added there too). Several names can hold the same hash; when one does, all are printed, separated by `, `.
 
 ## Models
 
@@ -218,6 +239,7 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `xml PATH [-o FILE] [--import FILE]` | Binary metadata as XML |
 | `text PATH [-o FILE] [--import FILE]` | Text tables as lines |
 | `audio PATH [-o DIR] [--replace ID=FILE…]` | Sounds of an audio container |
+| `hash generate NAMES… [--mode exact\|lower\|awc]` / `hash resolve VALUES…` | The hashes of names and the names of hashes; [see above](#hashes) |
 | `textures PATH [options]` | Textures of a dictionary |
 | `model PATH -o DIR [--dictionary YTD…]` | A model or collision as CodeWalker XML with its textures |
 

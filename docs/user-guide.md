@@ -14,6 +14,7 @@ How to browse the game files and change them with the desktop app. For installin
 - [Audio](#audio)
 - [Other files](#other-files)
 - [Keyboard and mouse](#keyboard-and-mouse)
+- [Hash generator](#hash-generator)
 - [Appearance](#appearance)
 - [Menus at a glance](#menus-at-a-glance)
 
@@ -161,6 +162,14 @@ Dropping on the window:
 - an `.oiv` package: opens the installer;
 - a `dlc.rpf`, or a mod's folder holding one: installs it as an add-on pack (see [mods.md](mods.md#add-on-packs)).
 
+## Hash generator
+
+**Tools → Hash generator…** says what the names and their hashes look like, with or without a game chosen (see [the CLI's `hash` command](cli.md#hashes) for the same from a terminal):
+
+- Write one name per line to hash it: each row shows the hash as hexadecimal, unsigned decimal and signed decimal (click one to copy). The mode picks how the game reads the name: lowercase (asset names and text labels), exact bytes (metadata names such as `CMapData`), or the 29-bit id of an audio stream.
+- Write one value per line to resolve it: the names that hold the hash. The game gives no way back from a hash, so resolution is only a lookup in the built-in metadata names and the names you saved; an unknown value stays unknown, and the same hash may be held by several names.
+- **Save these names…** (from the paste box) and **Import a text file…** add names to the store of the app, one name per line — the CLI's `hash resolve` resolves against them too. The store is a plain-text file at `~/.local/share/paleto/names.txt`.
+
 ## Appearance
 
 The **View** menu:
@@ -176,7 +185,7 @@ The **View** menu:
 | :--- | :--- |
 | **File** | Open archive… · Export mods as an OIV package… · Quit |
 | **Game** | The installed games (pick one) · Choose the game folder… |
-| **Tools** | Mods in game… · Snapshots of the mods folder… · Crash detection… · Script Hook V… |
+| **Tools** | Hash generator… · Mods in game… · Snapshots of the mods folder… · Crash detection… · Script Hook V… |
 | **View** | Theme · Text and icon size · Density · Folders and files (grouping) · Coloured icons · Side tree · Show all files in the side tree · Remember open folders · Show original files · Expand all / Collapse all folders · Refresh (F5) |
 | **Help** | Getting started · Keyboard and mouse shortcuts · Online documentation · Report a problem · About |
 
