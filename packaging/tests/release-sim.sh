@@ -1185,6 +1185,25 @@ sc_pages_symlink() {
     [ ! -e "$SIM/rt/1/pages" ] || fail "the clone was left behind"
 }
 
+# the gh-pages commit cannot grow past a bound (PAGES_MB, MB of the working tree that the site will serve; the
+# fixture store is under 1 MB, so only 0 refuses for sure): the publish refuses before anything is pushed, and
+# without the cap the same files go through
+sc_pages_budget() {
+    commit_release 1.6.0
+    tag_release v1.6.0
+    pipeline 1 v1.6.0 release push sign
+    assert_eq "failed job" "" "$PIPE_FAIL"
+    # a refusal after the draft release was made leaves the draft (above, sd_try): gh-pages is what must not change
+    queued=$(git ls-remote "$REMOTE" refs/heads/gh-pages)
+    PAGES_MB=0 job_publish 1 release
+    assert_rc "publish over the budget" 2
+    assert_log "$LIVE/runs/1/publish.log" "budget"
+    assert_eq "gh-pages unchanged" "$queued" "$(git ls-remote "$REMOTE" refs/heads/gh-pages)"
+    job_publish 1 release
+    assert_rc "publish under the budget" 0
+    assert_eq "gh-pages tag" v1.6.0 "$(kv "$LIVE/site/release.txt" tag)"
+}
+
 # the secret in the environment of the jobs: only --sign accepts it, and none of its child processes sees it
 sc_sign_secret_env() {
     commit_release 1.6.0
@@ -2378,7 +2397,7 @@ SCENARIOS="valid_stable invalid_tag mismatch_cargo mismatch_lock mismatch_metain
 empty_pin identity_change prerelease main_moved tag_not_on_main build_failure converter_failure missing_zsync zsync_length flipped_appimage tool_pin build_flatpak_script sim_guard
 gpg_missing gpg_wrong_key gpg_corrupt tampered_signed interrupted_upload listing_lag interrupted_edit interrupted_push pages_wait rerun_same_tag same_tag_new_content downgrade concurrent
 gh_pages_missing another_writer tag_moved legacy_record publish_flatpak sign_fresh_and_verify
-pages_second_key pages_other_key pages_record_unreadable pages_symlink sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
+pages_second_key pages_other_key pages_record_unreadable pages_symlink pages_budget sign_secret_env gpg_two_keys lib_checks check_head pages_key_bytes sign_prepared_checks
 pages_hostile_config sign_hostile_prepared sign_hostile_result signed_deltas sign_pins check_split check_compromised forged_skip replay_pages"
 if [ "${1:-}" = -l ]; then echo "$SCENARIOS" | tr '\n' ' '; echo; exit 0; fi
 

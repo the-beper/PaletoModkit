@@ -277,6 +277,20 @@ A delta carries the signature of its commit, so it is made after signing, by `fi
 
 `gh-pages` is replaced by one commit each release, so OSTree objects do not pile up in git history. Old OSTree commits are pruned to a depth of 3.
 
+## The size of the repository and of `gh-pages`
+
+Measured on v1.7.0 (2026-11-01) with pack experiments on the checkout:
+
+| Part of the pack | Weight |
+| :--- | :--- |
+| `main` | 7 MB |
+| `gh-pages` alone (with `main`) | 108 MB |
+| `gh-pages` and `gh-pages-previous` together (with `main`) | 129 MB |
+
+`gh-pages` is the store itself: a first install downloads about the same volume, and a release adds only the objects that changed (a ~3 MB delta for a release that changes the two Rust binaries, above). The extra weight beyond the live store is the rotation snapshot of [Broken gh-pages](#broken-gh-pages) (mostly byte-identical with `gh-pages`, 21 MB more in the pack) and, on a checkout that is a release or more old, specimen stores that no branch references any more (about 32 MB on the v1.7.0 checkout, older than the squash of the branch): `git reflog expire --expire-unreachable=now --all && git gc --prune=now` on the host drops those.
+
+`publish` checks the size before anything is pushed: a `gh-pages` commit whose working tree weighs more than `PAGES_MB` (MB, default 150) is refused with exit 2. The working tree is what the site serves and what every clone carries, and the store grows by the objects a release touches, so a run that fails this check means something moved into the store that should not be there (usually a blob made by the build and exported with the repository): see what made the commit with `git ls-tree -r -l origin/gh-pages`, fix the cause, and sign and publish again. The budget is not a target: the store of v1.7.0 weighs about 102 MB.
+
 ## Bumping pins
 
 All are bumped by hand, in a pull request, and then tried with `build-only` (see [Cutting a release](#cutting-a-release)). Actions are pinned to commit SHAs and updated by Dependabot.

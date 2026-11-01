@@ -9,7 +9,8 @@
 #       publish-flatpak  only Pages, for the highest published release with all its files
 # Environment: GH_TOKEN, GH_REPO (the gh CLI; the token is also handed to git by a credential helper that reads
 # it, never in a URL), REMOTE, RELEASE_WAIT (seconds to wait for the list of releases to show a change, default 60)
-# and RELEASE_POLL (3), PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), GITHUB_RUN_ID
+# and RELEASE_POLL (3), PAGES_WAIT (seconds to wait for the site, default 600) and PAGES_POLL (10), PAGES_MB (the
+# size budget in MB of the gh-pages commit that is about to be pushed, default 150), GITHUB_RUN_ID
 # and GITHUB_RUN_ATTEMPT (recorded), MANIFEST_SHA256 and SIGNED_SHA256 (the hashes that the jobs verify and finish-flatpak pinned
 # as job outputs: both are needed, exit 2 otherwise). Exit codes: see release-lib.sh (5: the remote is not as it was when signing).
 set -eu
@@ -235,6 +236,13 @@ push_pages() {
     git -C "$g" add --all
     git -C "$g" -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -q -m "Flatpak repository for $TAG"
     NEW=$(git -C "$g" rev-parse HEAD)
+    # The branch is the clone of every contributor and the store of every client: it may not grow without a bound
+    # (H1 of dist/future-works). The measure is the bytes of the working tree of the commit about to be pushed,
+    # the same thing the site serves.
+    PAGES_MB=${PAGES_MB:-150}
+    sized=$(git -C "$g" archive --format=tar HEAD | wc -c)
+    mb=$(( (sized + 1048575) / 1048576 ))
+    [ "$mb" -le "$PAGES_MB" ] || die 2 "the new gh-pages commit weighs ${mb} MB, over the PAGES_MB budget of $PAGES_MB MB: find what bloated the store before signing anything else (docs/release.md)"
     # One commit, both branches together, and only if nobody else wrote since we looked.
     if [ -n "$PG_HEAD" ]; then
         git_auth -C "$g" push -q --atomic --force-with-lease="refs/heads/gh-pages:$PG_HEAD" --force-with-lease="refs/heads/gh-pages-previous:$PG_PREV" \
