@@ -276,3 +276,18 @@ Decision (user, 2026-11-01, option a): the Register is tracked at `docs/implemen
 | `TODO.md` Register path updated (2 sites: §How to work intro, §rules table) | VERIFIED | TODO.md is local-only, never committed |
 | first tracked commit | see the commit that follows this row | carries the register as-is plus the checkpoints |
 | going forward | process rule | group exits and item checkpoints land here as commits |
+
+## H3 — converter discovery diagnostics (2026-11-01, v1.7.0; hygiene group)
+
+`crates/core/src/convert.rs`: `converter()` keeps its signature, search order and locations; the new `converter_checked()` returns `Result<PathBuf, Error::Convert>` whose message names every candidate tried with the reason (not found / not a file / found but not executable) and the fix (`$PALETO_CWCONV`, reinstall — packages ship the converter — `packaging/build-cwconv.sh`, `docs/troubleshooting.md`). Deliberate change on the failure path only: a candidate that exists but cannot be run is rejected by the search instead of being found and failing later with "cannot run: Permission denied" (the item's "found but not executable" reason). Healthy machines: byte-identical behaviour.
+
+| Check | Result | Note |
+|---|---|---|
+| `paleto convert` with a missing converter | VERIFIED | non-zero exit, stderr lists the candidates, the build script and the docs (`crates/cli/tests/convert.rs`, `PALETO_CWCONV=/nonexistent`) |
+| `paleto add` / `install --oiv` degradation notes | VERIFIED | one `!` line naming `$PALETO_CWCONV`, only when not `--no-convert` (files still added/installed as-is; no output change when the tool is there or `--no-convert` was given) |
+| GUI `ConvertMods` with a missing converter | VERIFIED | was a silent `return`; now `Status::Note("paleto-cwconv (the converter) is not installed", the report on hover)`; the Mods-in-game hint names `$PALETO_CWCONV` too |
+| unit tests | VERIFIED | 5 new in `convert::tests` (env candidate wins; env candidates: missing/not-a-file/not-executable with the report's parts; three bundle candidates in order, keep looking past a not-executable one; no program folder) |
+| suites | VERIFIED | all 41 suites, 630 tests green; `cargo clippy --all-targets --all-features -- -D warnings` clean |
+| empty HOME | VERIFIED | 630 green, exit 0 (CI parity; the proxy needs `RUSTUP_TOOLCHAIN=stable` on a host with an empty HOME for rustup's default lookup, toolchain itself unchanged) |
+| `docs/troubleshooting.md` | VERIFIED | paragraph "Legacy files stay unconverted: …" in Common problems, linking `installation.md#build-from-source` and `mods.md` |
+| commit | c542999 | "core: a missing converter reports where it was searched for" |
