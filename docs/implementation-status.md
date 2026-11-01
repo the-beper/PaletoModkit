@@ -291,3 +291,24 @@ Decision (user, 2026-11-01, option a): the Register is tracked at `docs/implemen
 | empty HOME | VERIFIED | 630 green, exit 0 (CI parity; the proxy needs `RUSTUP_TOOLCHAIN=stable` on a host with an empty HOME for rustup's default lookup, toolchain itself unchanged) |
 | `docs/troubleshooting.md` | VERIFIED | paragraph "Legacy files stay unconverted: …" in Common problems, linking `installation.md#build-from-source` and `mods.md` |
 | commit | c542999 | "core: a missing converter reports where it was searched for" |
+
+## H4 — the panic policy of the core (2026-11-01, v1.7.0; hygiene group)
+
+**The assessment's 934 `.unwrap()` was a measurement error** — the filter excluded only files named `*test*`, so it counted every module's inline `#[cfg(test)]` block and the `*_tests.rs` files. The production surface of `crates/core` (before the first `#[cfg(test)]`, `*_tests.rs`/`fixtures.rs` excluded): **29 sites — 21 `.unwrap()`, 8 `expect(`, 0 `panic!`**. Every site was read in context and classified; none is reachable from untrusted input, so no remediation batch was needed (the item card's module-by-module plan was written against the wrong numbers and is obsolete).
+
+| Class | Sites |
+|---|---|
+| Fixed-size byte decode of local buffers (len and bounds are constants of the code, not of the input) | `budget.rs` 282, 299, 331, 375; `convert.rs` 127 (`len >= 8` guard in the same expression) |
+| Paths from listings of the same root they are stripped of (`strip_prefix`) | `cleanup.rs` 28, `crash_hunt.rs` 94, 179, 347, 377, 495, `export.rs` 60, `vfs.rs` 507 |
+| Tool-written journals and maps / guarded branch | `export.rs` 139 + `loader.rs` 386 (`get_mut` of a key inserted on the header line), `crash_report.rs` 185 (the `.asi`/danikv branch above proves `Some`) |
+| Paths built by the tool (`download_path` has a parent) | `game.rs` 219, `prefix.rs` 849 |
+| The crate's own xot tree | `xml.rs` 99 (document node of a parsed doc), 223 (`text_str` behind `is_blank`, which proves it) |
+| Constructed non-empty (`RelPath`) | `vfs.rs` 84 (`last()` behind the `parent()` guard above) |
+| `expect` that already names its guarantor | `crash_hunt.rs` 424, 525 ("a path has a name"), 536 ("made above"); `snapshots.rs` 113, 173, 451, 454, 456 |
+
+| Check | Result | Note |
+|---|---|---|
+| policy section | VERIFIED | `docs/development.md` "Panics in the code" (untrusted → Result; non-local → explained `expect`; in-place → bare unwrap) |
+| guard test | VERIFIED | `crates/core/tests/policy.rs`: same counting method, fails on a `panic!(` in production code and over the cap 32 (29 today); runs in every `cargo test` incl. CI and empty HOME; the cap rises only with a register note |
+| suites after the guard | VERIFIED | core suites green incl. the guard; clippy `-D warnings` clean |
+| commit | a7cbf93 | "core: the panic policy, counted in a test" |
