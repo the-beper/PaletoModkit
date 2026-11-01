@@ -16,6 +16,7 @@ mod model;
 mod crash_window;
 mod export_window;
 mod hashes;
+mod favorites_window;
 mod mods_check;
 mod notices;
 mod prefix_window;
