@@ -27,6 +27,7 @@ use crate::theme::{self, SystemTheme};
 use crate::textures::{self, Export, Request, TextureEdit, TextureView};
 use crate::dialogs::{AddonDialog, InstallDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, desktop_notify, edit_message, install_failure, install_summary};
 use crate::find::{Codec, Find};
+use crate::export::{ExportDest, extract, is_ytd, with_notes};
 
 /// Text files up to this size can be edited in the preview panel.
 const MAX_TEXT: usize = 8 << 20;
@@ -126,7 +127,7 @@ pub struct App {
     snapshots: Option<SnapshotsWindow>,
     prefix_tweaks: Option<PrefixWindow>,
     crash: Option<CrashWindow>,
-    export: Option<ExportWindow>,
+    pub(crate) export: Option<ExportWindow>,
     /// The comparison of the mods folder for the export window.
     export_task: Option<Task<Result<Vec<paleto_core::export::Changed>, String>>>,
     pub(crate) browser: Option<Browser>,
@@ -875,31 +876,6 @@ impl App {
         self.apply(Action::EditTexture(edit), ctx);
     }
 
-
-    pub fn export_textures(&mut self, export: Export, dest: &Path, ctx: &egui::Context) {
-        self.apply(Action::ExportTextures(export, Some(dest.to_path_buf())), ctx);
-    }
-
-    /// Exports the previewed model as CodeWalker XML with its textures into a folder.
-    pub fn export_model(&mut self, dest: &Path, ctx: &egui::Context) {
-        self.apply(Action::ExportModel(Some(dest.to_path_buf())), ctx);
-    }
-
-    /// Replaces a sound of the previewed audio container with a WAV or MP3 file.
-    pub fn replace_sound(&mut self, id: u32, file: &Path, ctx: &egui::Context) {
-        self.apply(Action::ReplaceSound(id, Some(file.to_path_buf())), ctx);
-    }
-
-    /// Extracts the named entries of the open archive folder into `dir`, as the toolbar does.
-    pub fn extract_to(&mut self, names: Vec<String>, dir: &Path, ctx: &egui::Context) {
-        self.apply(Action::Extract(names, Some(dir.to_path_buf())), ctx);
-    }
-
-    /// Exports every sound of the previewed audio container into `dir`.
-    pub fn export_sounds(&mut self, dir: &Path, ctx: &egui::Context) {
-        self.apply(Action::ExportSounds(AudioRequest::ExportAll, Some(dir.to_path_buf())), ctx);
-    }
-
     /// The details line of the preview panel.
     pub fn preview_info(&self) -> Option<&str> {
         self.preview.as_ref().map(|p| p.info.as_str())
@@ -919,15 +895,6 @@ impl App {
     /// The notes of the snapshots listed in the "Snapshots" window, if open.
     pub fn snapshot_labels(&self) -> Option<Vec<String>> {
         self.snapshots.as_ref().map(SnapshotsWindow::labels)
-    }
-
-    /// Changes listed and selected in the export window, if open.
-    pub fn export_counts(&self) -> Option<(usize, usize)> {
-        self.export.as_ref().map(ExportWindow::counts)
-    }
-
-    pub fn open_export(&mut self, ctx: &egui::Context) {
-        self.apply(Action::Export(true), ctx);
     }
 
     /// What the "Crash detection" window shows (verdict, causes, hunt state), if open.
@@ -4347,60 +4314,6 @@ fn sort_rows(rows: &mut [Row], settings: &Settings) {
         let within = if settings.descending { within.reverse() } else { within };
         group(a).cmp(&group(b)).then(within)
     });
-}
-
-/// Extracts the named entries (folders with all they hold) of `location` into `dest`: into a game folder one
-/// transaction for all of them, through the checks of every other change to a game (see [`vfs::write_into`]).
-/// Returns how many files, and what the writer noted.
-fn extract(location: &ArchivePath, keys: Option<&Keys>, names: &[String], dest: &Path) -> Result<(usize, Vec<String>), String> {
-    let (archive, dir) = location.open(keys).map_err(|e| e.to_string())?;
-    let mut files: Vec<(String, usize)> = Vec::new();
-    for name in names {
-        let idx = archive.children(dir).find(|&i| &archive.entries[i].name == name).ok_or(format!("{name} not found"))?;
-        if archive.entries[idx].is_dir() {
-            files.extend(archive.walk(idx).into_iter().filter(|(_, i)| !archive.entries[*i].is_dir()).map(|(p, i)| (format!("{name}/{p}"), i)));
-        } else {
-            files.push((name.clone(), idx));
-        }
-    }
-    // Every name is checked before anything is written: the archive is not trusted.
-    for (rel, _) in &files {
-        vfs::extract_path(dest, rel).map_err(|e| e.to_string())?;
-    }
-    let (_, notes) = vfs::write_into(dest, "extracting files", |out| {
-        for (rel, i) in &files {
-            let data = archive.read(*i, keys).map_err(|e| paleto_core::Error::Io(std::io::Error::other(format!("{rel}: {e}"))))?;
-            out.write(rel, &data)?;
-        }
-        Ok(())
-    })
-    .map_err(|e| e.to_string())?;
-    Ok((files.len(), notes))
-}
-
-/// `message` with what the writer noted when it finished (a backup it could not remove), if anything.
-fn with_notes(message: String, notes: &[String]) -> String {
-    if notes.is_empty() { message } else { format!("{message} ({})", notes.join("; ")) }
-}
-
-/// The file as editable text, if it looks like text.
-enum ExportDest {
-    File(PathBuf),
-    Folder(PathBuf),
-}
-
-impl ExportDest {
-    /// The folder written into, and the name of the file if the user picked one.
-    fn folder_and_name(&self) -> (&Path, Option<String>) {
-        match self {
-            ExportDest::File(path) => (path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")), Some(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
-            ExportDest::Folder(dir) => (dir, None),
-        }
-    }
-}
-
-fn is_ytd(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".ytd")
 }
 
 /// Binary files with a preview of their own, read whatever their size.

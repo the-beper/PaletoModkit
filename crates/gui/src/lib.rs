@@ -4,6 +4,7 @@ pub mod app;
 pub mod appimage;
 mod dialogs;
 mod find;
+mod export;
 mod audio;
 mod hex_view;
 mod highlight;
