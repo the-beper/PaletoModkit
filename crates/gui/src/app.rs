@@ -26,6 +26,7 @@ use crate::task::{Cancel, Task};
 use crate::theme::{self, SystemTheme};
 use crate::textures::{self, Export, Request, TextureEdit, TextureView};
 use crate::dialogs::{AddonDialog, InstallDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, desktop_notify, edit_message, install_failure, install_summary};
+use crate::find::{Codec, Find};
 
 /// Text files up to this size can be edited in the preview panel.
 const MAX_TEXT: usize = 8 << 20;
@@ -277,7 +278,7 @@ pub(crate) struct Preview {
     syntax: Syntax,
     info: String,
     /// Text content (edited in place) and the saved version.
-    text: Option<(String, String)>,
+    pub(crate) text: Option<(String, String)>,
     /// How the text is turned back into the file.
     codec: Codec,
     pub(crate) textures: Option<TextureView>,
@@ -288,7 +289,7 @@ pub(crate) struct Preview {
     /// Files with no other preview: their bytes.
     hex: Option<HexView>,
     /// The search bar of a text preview, while it is open.
-    find: Option<Find>,
+    pub(crate) find: Option<Find>,
 }
 
 /// A previewed model's file and the texture dictionaries found for it, kept for exporting it.
@@ -330,71 +331,6 @@ enum Content {
     Hex(Vec<u8>, Option<u64>),
     Nothing,
 }
-
-/// The search of a text preview.
-#[derive(Default)]
-struct Find {
-    query: String,
-    matches: Vec<std::ops::Range<usize>>,
-    /// The match shown: an index of `matches`.
-    current: usize,
-    /// What `matches` was found with: the query and the length of the text.
-    found_with: (String, usize),
-    /// The text was edited since: look again.
-    stale: bool,
-    /// Give the search field the keyboard on the next frame.
-    focus: bool,
-    /// Scroll the current match into view on the next frame.
-    jump: bool,
-}
-
-impl Find {
-    fn new() -> Self {
-        Find { focus: true, ..Find::default() }
-    }
-
-    /// Looks again when the query or the text changed.
-    fn refresh(&mut self, text: &str) {
-        if self.stale || self.found_with.0 != self.query || self.found_with.1 != text.len() {
-            self.matches = highlight::find_all(text, &self.query);
-            self.found_with = (self.query.clone(), text.len());
-            self.stale = false;
-            self.current = self.current.min(self.matches.len().saturating_sub(1));
-        }
-    }
-
-    /// Moves to the next (or previous) match, wrapping round.
-    fn step(&mut self, forward: bool) {
-        let n = self.matches.len();
-        if n > 0 {
-            self.current = if forward { (self.current + 1) % n } else { (self.current + n - 1) % n };
-            self.jump = true;
-        }
-    }
-}
-
-/// What the text of a preview is: the file itself, or a conversion of it.
-enum Codec {
-    Plain,
-    /// A text table (`.gxt2`) as "0xHASH = text" lines.
-    Gxt2,
-    /// Metadata (PSO or resource) as XML.
-    Meta(Arc<MetaFile>),
-    /// A summary of a file that has no text form (`.ycd`): read-only.
-    Summary,
-}
-
-impl Codec {
-    fn encode(&self, text: &str) -> Result<Vec<u8>, String> {
-        match self {
-            Codec::Plain => Ok(text.as_bytes().to_vec()),
-            Codec::Gxt2 => paleto_formats::gxt2::from_text(text).map_err(|e| e.to_string()),
-            Codec::Meta(meta) => meta.rebuild_from_xml(text).map_err(|e| e.to_string()),
-            Codec::Summary => Err("this is a summary of the file, not its text".into()),
-        }
-    }
-}
-
 
 pub(crate) enum Status {
     Info(String),
@@ -912,22 +848,6 @@ impl App {
     /// Closes the preview panel.
     pub fn close_preview(&mut self, ctx: &egui::Context) {
         self.apply(Action::ClosePreview, ctx);
-    }
-
-    /// The text shown in the preview editor.
-    /// Opens the search bar of the text preview with `query`, as typing it would; the
-    /// number of matches found (for tests).
-    pub fn search_preview(&mut self, query: &str) -> Option<usize> {
-        let p = self.preview.as_mut()?;
-        let text = &p.text.as_ref()?.0;
-        let mut find = Find::new();
-        find.focus = false;
-        find.jump = true;
-        find.query = query.to_string();
-        find.refresh(text);
-        let n = find.matches.len();
-        p.find = Some(find);
-        Some(n)
     }
 
     pub fn preview_text(&self) -> Option<&str> {
