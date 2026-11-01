@@ -13,6 +13,7 @@ use crate::prefix_window::PrefixWindow;
 use crate::notices::{self, Startup};
 use crate::scripthook_window::{self, ScriptHookWindow};
 use crate::snapshots_window::{self, SnapshotsWindow};
+use crate::hashes;
 use crate::crash_window::{self, CrashWindow};
 use crate::export_window::{self, ExportWindow};
 use crate::settings::Settings;
@@ -119,6 +120,8 @@ pub struct App {
     /// Changes an earlier run left interrupted in the chosen game: mutating actions are refused until they are settled.
     pub(crate) interrupted: Vec<paleto_core::txn::Pending>,
     pub(crate) snapshots: Option<SnapshotsWindow>,
+    /// The "Hash generator" window: no game needed (F01, dist/future-works).
+    pub(crate) hashes: Option<hashes::HashesWindow>,
     pub(crate) prefix_tweaks: Option<PrefixWindow>,
     pub(crate) crash: Option<CrashWindow>,
     pub(crate) export: Option<ExportWindow>,
@@ -222,6 +225,7 @@ impl App {
             startup: Startup::default(),
             interrupted: Vec::new(),
             snapshots: None,
+            hashes: None,
             prefix_tweaks: None,
             crash: None,
             export: None,
@@ -405,6 +409,10 @@ impl App {
 
     pub fn open_snapshots(&mut self, ctx: &egui::Context) {
         self.apply(Action::Snapshots(true), ctx);
+    }
+
+    pub fn open_hashes(&mut self, ctx: &egui::Context) {
+        self.apply(Action::Hashes(true), ctx);
     }
 
     pub fn open_prefix_tweaks(&mut self, ctx: &egui::Context) {
@@ -1084,6 +1092,11 @@ impl eframe::App for App {
                 snapshots_window::Request::Restore(id, save_first) => Action::RestoreSnapshot(id, save_first),
                 snapshots_window::Request::Delete(id) => Action::DeleteSnapshot(id),
             });
+        }
+        if let Some(request) = self.hashes.as_mut().and_then(|w| w.show(&ctx)) {
+            match request {
+                hashes::Request::Close => actions.push(Action::Hashes(false)),
+            }
         }
         if self.prefix_tweaks.as_mut().is_some_and(|w| w.show(&ctx)) {
             actions.push(Action::PrefixTweaks(false));

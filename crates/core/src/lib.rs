@@ -11,7 +11,9 @@ pub mod export;
 #[macro_use]
 pub mod fsroot;
 pub mod game;
+pub mod hashes;
 pub mod loader;
+pub mod names_store;
 pub mod oiv;
 pub mod prefix;
 pub mod relpath;

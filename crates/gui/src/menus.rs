@@ -72,6 +72,10 @@ impl App {
                 }
             });
             let tools = menu_title(ui, "Tools", |ui| {
+                if ui.button("Hash generator…").on_hover_text("The hashes of names and the names of hashes, with or without a game open").clicked() {
+                    actions.push(Action::Hashes(true));
+                }
+                ui.separator();
                 if ui
                     .add_enabled(has_game, egui::Button::new("Mods in game…"))
                     .on_hover_text("Every mod the game folder holds, whether the game loads it, and what is wrong with the setup")

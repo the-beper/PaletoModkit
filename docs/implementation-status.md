@@ -21,6 +21,7 @@ Newest first.
 
 | When | Mandate | Done | In progress | Next step | Open questions | Commit |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 2026-11-01 (H group closed) | H1–H5 (blocker for Fxx/CP/P1-A) | H1 ✅, H2 ✅, H3 ✅ (`c542999`), H4 ✅ (`a7cbf93`), H5 ✅ (7 lanes, `01f3282`, `app.rs` 5,383 → 1,212) + group V6-equivalent: 631 passed / 0 failed / 1 ignored, empty `HOME` the same, clippy clean, release build ok | — | F01 on `feature/f01-hash-generator` (branch per feature, decision 19) | — | this commit |
 | 2026-10-31 (1.7.0 ready) | after M1 | `packaging/version-bump.sh` (new; `tests/version-bump-test.sh` in `release-tooling`, also run under dash and mawk); version 1.7.0 set with it (`Cargo.toml`, `Cargo.lock`, metainfo with the notes of the M1 follow-ups; `release-notes.py` reads them); `appstreamcli validate` ok; workspace tests 625 passed, 0 failed, 1 ignored, the same with an empty `HOME`; clippy clean; pre-flight on the real gh-pages at `b801244` (the release scripts unchanged since): 0 failures | — | the user merges `release/1.7.0`, tags `v1.7.0` and approves `sign-flatpak`: the first GitHub run of `check-flatpak` and of the static delta | — | `b76e06f` |
 | 2026-10-31 (follow-ups) | after M1 | the Follow-ups of M1 and of the signing review, on branch `followups/m1` (local, on `origin/main` `f115355`): signing follow-ups, app follow-ups, snapshots + case warning, j1 (keyless `check-flatpak`), D3 (static delta in `finish-flatpak`), the release docs aligned with the code; final code review: no blocker, its findings fixed | — | the user pushes the branch and opens the PR; the next stable tag runs `check-flatpak` and the static delta on GitHub for the first time; then M2, when the user asks | `msrv` as a required check (Pending actions) | `07f54d2` |
 | 2026-10-30 (1.6.0 released) | after M1 | PR #11 merged (`cf29ea8`), tag `v1.6.0` pushed by the user, `sign-flatpak` approved; run 41111924334: 9/9 jobs green; the first stable release and the first gh-pages write of the new graph, checked read-only (Gates V5) | — | none for 1.6.0; next: the Follow-ups (signing Low, KuickShare items 5–7) or M2, when the user asks | — | `cf29ea8` |
@@ -210,6 +211,7 @@ Precedence per the common rules (§2): safety > user > data integrity > release 
 | 16 | Two pushes of `main` not made by Claude sessions (2026-10-29 12:26, `24d13f5` → `ea48aab`, the first Register before the fixes were public; 2026-10-30 00:51, `ea48aab` → `3819669`) | pending actions — asked the user | **user decision**: closed; the fixes have been public since, every later push was the user's, and a local `pre-push` hook refuses pushes while `CLAUDECODE` is set |
 | 17 | The pre-key checks of prepare's data ran on the VM that then received the key (design review finding j1, both PaletoModkit and KuickShare) | release security — asked the user | **user decision**: a keyless `check-flatpak` job before the signing job, pinned through job outputs (design note `.claude/m1/design-j1-keyless-check.md`, local), in both repositories; download by artifact id; no approval skip on `skip=1` |
 | 18 | `msrv` (`cargo check` with the `rust-version` of `Cargo.toml`) was optional, so the stated minimum could drift unnoticed; as a required check, code or an update that needs a newer compiler blocks the merge until `rust-version` and the docs are raised | repository settings — asked the user | **user decision 2026-10-31**: required in the `main` ruleset (with `check`, `release-tooling`, `deny`; maintainer bypass unchanged), set through the API; 7 of 7 runs green before, about 30 s with cache |
+| 19 | Sessions of 2026-11-01 after the assessment: the H group closed and feature work (F01…) starts | user instruction in session ✓2 of §2 | **user decision**: every macro-feature gets its own branch (`feature/fXX-…`), pushed to origin so the user opens and merges the PRs (the `pre-push` guard stays; these pushes are explicitly authorized, `main` is never pushed); and all cargo runs are capped at 12 logical CPUs / 6 cargo jobs / 6 test threads and within 90% of the machine's RAM, recorded per gate |
 
 ## Agents and escalations
 
@@ -446,3 +448,49 @@ Remaining lanes of the split map: actions (7), then the shell ≤ ~1,500.
 | commit | 01f3282 | "gui: extract actions.rs from app.rs" |
 
 Remaining lanes of the split map: none — all seven lanes landed; the shell is 1,212 lines (target ≤ ~1,500) and the item close checks follow.
+
+## H5, item close (2026-11-01, v1.7.0)
+
+| Check | Result | Note |
+|---|---|---|
+| end cap | VERIFIED | `app.rs` 1,212 lines ≤ ~1,500; the seven extracted files at their lane sizes (dialogs 825, find 90, export 102, browser 770, preview 663, menus 673, actions 1,191) |
+| gui suite at every lane | VERIFIED | per-lane rows above (106 passed, 0 failed, 1 ignored, zero kittest UI diffs, clippy clean) |
+| core suites once at the end | VERIFIED | covered by the group V6-equivalent below (its first run: 631 passed, 0 failed, 1 ignored) |
+| empty-HOME run before closing | VERIFIED | the same V6-equivalent run with an empty `HOME`: 631 passed, 0 failed, 1 ignored, exit 0 |
+| behaviour | VERIFIED | move-only: every lane diffed byte-identical against the pre-move tree with `pub(crate)` stripped; no screenshot or doc change (the item forbids them) |
+| commit | 01f3282 | "gui: extract actions.rs from app.rs", the last code commit of the item |
+
+## H1–H5 group V6-equivalent (2026-11-01, v1.7.0; Fedora 45 native, 16 threads / 31 GiB)
+The group's one full local regression — the gate the TODO puts before any Fxx, CP or P1-A item ("F01 may start" when this row is green).
+
+| Check | Result | Note |
+|---|---|---|
+| `cargo test --locked --workspace --all-features --jobs 6` | VERIFIED | 42 suites: 631 passed, 0 failed, 1 ignored (the network .NET test), exit 0 |
+| same with an empty `HOME` | VERIFIED | 631 passed, 0 failed, 1 ignored, exit 0 (`CARGO_HOME` and `RUSTUP_HOME` kept at their originals, `RUSTUP_TOOLCHAIN=stable` per the H3 note) |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | VERIFIED | clean |
+| `cargo build --locked --release --jobs 6` | VERIFIED | binary `target/release/paleto` 19.1 MB |
+| git state at the gate | — | HEAD `a80acc4`, working tree clean |
+| Windows rows | N/A | until P1-A |
+| resources | VERIFIED | every command ran under the session's user-imposed caps: `taskset` on 12 logical CPUs, `cargo --jobs 6`, `RUST_TEST_THREADS=6`, nice 10; the machine kept 20+ GiB available throughout (90% limit respected) |
+
+No pre-existing failures to record: the suite is green from end to end, and the H group closed here (H1–H5 rows above). Notes for the next group: the `msrv` required check already covers the MSRV watch item; the two user decisions of the group (H1 keep `gh-pages-previous` + run the host gc once — done; H2 the Register at `docs/implementation-status.md`) are recorded in their sections.
+
+## F01 — Hash Generator & Name Resolver (2026-11-01, v1.7.0; branch `feature/f01-hash-generator`)
+
+The first item after the H block, from the ranking. GUI + CLI over the same core service; read-only, no game needed anywhere. The synthetic joaat collision pair was found by a one-off search over six-letter words (the temp test was removed after pinning: the built-in dictionary has none, per the item card).
+
+| Check | Result | Note |
+|---|---|---|
+| modes | VERIFIED | `Mode::{Lower,Exact,Awc}` in `crates/core/src/hashes.rs`: `joaat_lower`, `joaat`, `joaat_lower & 0x1FFF_FFFF` (the awc stream id); known vectors pinned (exact `CMapData` 3545841574, lower `ADDER` 0xB779A091 — from `crates/formats/src/hash.rs`'s own test; awc ADDER 0x1779A091 = the two low bits masked); empty string = 0; non-ASCII hashed as UTF-8 bytes with only ASCII lowercased |
+| `parse_value` | VERIFIED | hex (`0x…`, `hash_…` case-insensitive, bare ≤ 8 hex digits with a letter), unsigned and signed decimal, all modulo 2³² (`-1` = 0xFFFFFFFF); `Names::hash`'s trim and `hash_` handling live in resolve only, as the card asks |
+| `Names::lookup` / `Names::candidates` | VERIFIED | in `crates/formats/src/names.rs`: lookup gives None instead of the `hash_XXXXXXXX` fallback; candidates give every distinct name for one hash (both builtin maps — plain-line names live only in the first map, which the first draft missed and the tests caught), case-insensitive deduped, first kept; the no-collision-of-builtin claim stays, with the synthetic pair `puwaaa`/`thaeaa` standing in |
+| user names store | VERIFIED | `crates/core/src/names_store.rs`: `$XDG_DATA_HOME/paleto/names.txt`, one name per line, `#` and empty lines skipped; `import` reads a list bounded ([`Budget::read`], 16 MiB cap) and saves the store atomically (temp + rename, the `ForeignCache` precedent); `import_text` for the GUI paste box; `seed` feeds a `Names` |
+| CLI | VERIFIED | `paleto hash generate NAMES… [-m exact\|lower\|awc]` and `paleto hash resolve VALUES…` (`allow_negative_numbers` on resolve, the leading `-` of a signed decimal); one line per value: hex, unsigned, signed, then the input or the names; unknown keeps exit 0; the negative-value parse error is the only failure path |
+| GUI | VERIFIED | `crates/gui/src/hashes.rs` (new window): Tools > Hash generator…, enabled with no game (the first Tools entry that needs none); mode radios re-stamp the hashed rows; the generate rows copy each of the three forms (`ctx().copy_text`, the prefix_window pattern); the resolve pane shows the names or `unknown`; save/import updates the store, the names and the open rows (`reload`, no per-frame store reads) |
+| actions | VERIFIED | `Action::Hashes(bool)`, in the non-mutating list (exhaustive match keeps the classification), no task; `open_hashes` for tests like the other windows |
+| V4 tests | VERIFIED | core: 6 new unit tests in `hashes.rs` (vectors per mode, empty, non-ASCII, all value forms with wrap, not-a-value table) + 3 in `names_store.rs` (normalize, no file, import dedupe, resolve through seed, path name) + 2 in `names.rs` (candidates collisions with the synthetic pair, lookup-unknown); CLI `crates/cli/tests/hash.rs` (5: the three forms from the real binary, resolve in every form, unknown stays an answer, not-a-value refused, the store the app saved resolves); GUI `crates/gui/tests/hashes.rs` (1 kittest: opens from the Tools menu with no game, hashes per mode switch, resolves builtin/unknown/not-a-value, saves names from the paste box and the rows that name them, closes) |
+| suites | VERIFIED | whole tree: 649 passed, 0 failed, 1 ignored (the network .NET test), exit 0 — the same with an empty `HOME`; clippy `-D warnings` clean; on the branch under the decision-19 caps |
+| docs | VERIFIED | `docs/cli.md`: a "Hashes" section (generate/resolve, the three modes, the store at `~/.local/share/paleto/names.txt`, no inversion claim) + the reference row; `docs/user-guide.md`: "Hash generator" section + the Tools row of the table |
+| screenshots | N/A | a new window now exists that has no committed screenshot (per the repo rule, said instead of added); the committed pictures of the main window do not show the open Tools menu (verified: `screenshots/game-folder.png`, `archive-browser.png`), so none of them is stale |
+| must-not | VERIFIED | read-only everywhere (no game or mods writes); no claim of mathematical inversion in code or docs; the store file never enters a game folder; no new dependencies |
+

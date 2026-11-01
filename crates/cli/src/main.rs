@@ -83,6 +83,26 @@ enum SnapshotAction {
 }
 
 #[derive(Subcommand)]
+enum HashAction {
+    /// Hash names (lowercase, the way the game hashes asset names).
+    Generate {
+        /// Names to hash. Case matters only in the exact mode.
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Which way to hash: lower (the default), exact (byte by byte) or awc (the 29-bit id an .awc names its sounds with).
+        #[arg(short = 'm', long, value_name = "MODE", default_value_t = paleto_core::hashes::Mode::Lower)]
+        mode: paleto_core::hashes::Mode,
+    },
+    /// Resolve values to known names: the built-in metadata names, and the names added with the app (Tools > Hash generator).
+    #[command(allow_negative_numbers = true)]
+    Resolve {
+        /// Values: hexadecimal (with or without 0x or hash_), unsigned or signed decimal.
+        #[arg(required = true)]
+        values: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Prepare the encryption keys (downloads CodeWalker's magic.dat once).
     Setup,
@@ -254,6 +274,11 @@ enum Command {
         /// (repeatable). Archives are edited in their mods folder copy.
         #[arg(long, value_name = "ID=FILE", conflicts_with = "output")]
         replace: Vec<String>,
+    },
+    /// Show the names of hashes and the hashes of names (Jenkins one-at-a-time, the way the game hashes names).
+    Hash {
+        #[command(subcommand)]
+        action: HashAction,
     },
     /// Export a model (.ydr, .ydd, .yft) or collision (.ybn) as CodeWalker XML, with its textures as DDS files.
     Model {
@@ -661,6 +686,28 @@ fn main() -> Result<()> {
                 None => print_or_save(&paleto_formats::gxt2::to_text(&entries), output.as_deref())?,
             }
         }
+        Command::Hash { action } => match action {
+            HashAction::Generate { names, mode } => {
+                for name in &names {
+                    println!("{}  {name}", paleto_core::hashes::value_line(mode.hash(name)));
+                }
+            }
+            HashAction::Resolve { values } => {
+                let mut learned = paleto_formats::Names::new();
+                paleto_core::names_store::seed(&mut learned, &paleto_core::names_store::path());
+                for value in &values {
+                    let Some(hash) = paleto_core::hashes::parse_value(value) else {
+                        bail!("{value:?} is not a hash value: hexadecimal (with or without 0x or hash_) or decimal, signed or unsigned");
+                    };
+                    let names = learned.candidates(hash);
+                    println!(
+                        "{}  {}",
+                        paleto_core::hashes::value_line(hash),
+                        if names.is_empty() { "unknown".to_string() } else { names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ") }
+                    );
+                }
+            }
+        },
         Command::Audio { path, replace, .. } if !replace.is_empty() => {
             let mut data = read_any(&path, cli.game.as_deref())?;
             let key = audio_key(&path, cli.game.as_deref());

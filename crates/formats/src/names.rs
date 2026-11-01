@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::hash::joaat;
+use crate::hash::{joaat, joaat_lower};
 
 /// Built-in names by hash, and the few names that do not hash to their value.
 struct Builtin(HashMap<u32, &'static str>, HashMap<&'static str, u32>);
@@ -72,6 +72,41 @@ impl Names {
         }
     }
 
+    /// The name for a hash, or nothing when it is unknown: the [`Self::name`]
+    /// fallback of `hash_XXXXXXXX` is not reported as a name.
+    pub fn lookup(&self, hash: u32) -> Option<Cow<'_, str>> {
+        if hash == 0 {
+            return None;
+        }
+        let known = self.extra.get(&hash).map(String::as_str).or_else(|| BUILTIN.0.get(&hash).copied());
+        known.into_iter().find(|name| self.hash(name) == hash).map(Cow::Borrowed)
+    }
+
+    /// Every distinct known name for a hash: the dictionaries collide at times, so
+    /// several names may claim one value (built-in first, then names learnt from
+    /// files or the user names store, sorted case-insensitively; names that differ
+    /// only in case are the same word for resolution, the first is kept). Terms as
+    /// text are matched in their forms that hash: the exact bytes and the lowercase
+    /// form.
+    pub fn candidates(&self, hash: u32) -> Vec<Cow<'_, str>> {
+        if hash == 0 {
+            return Vec::new();
+        }
+        // The names of both dictionaries: the odd pairs (a name and the hash it
+        // points at differ) and every built-in name — the odd map holds the names
+        // with their own hash, the first map holds all of them.
+        let mut names: Vec<(&str, String)> = BUILTIN.0.values().map(|name| (*name, name.to_lowercase())).collect();
+        names.extend(BUILTIN.1.keys().map(|name| (*name, name.to_lowercase())));
+        names.extend(self.extra.values().map(|name| (name.as_str(), name.to_lowercase())));
+        names.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+        names.dedup_by(|a, b| a.1 == b.1);
+        names
+            .into_iter()
+            .filter(|(name, _)| self.hash(name) == hash || joaat_lower(name) == hash)
+            .map(|(name, _)| Cow::Borrowed(name))
+            .collect()
+    }
+
     pub fn hash(&self, name: &str) -> u32 {
         let name = name.trim();
         if name.is_empty() {
@@ -100,5 +135,33 @@ mod tests {
         names.add("Prop_Tree");
         assert_eq!(names.name(joaat(b"prop_tree")), "prop_tree");
         assert_eq!(names.name(joaat(b"Prop_Tree")), "Prop_Tree");
+    }
+
+    // Two names of one hash ("puwaaa"/"thaeaa" collide in joaat_lower; found once by search and pinned here:
+    // the built-in dictionary has none, so the synthetic pair stands in).
+    #[test]
+    fn candidates_report_every_name_that_claims_a_hash() {
+        use crate::hash::joaat_lower;
+        assert_eq!(joaat_lower("puwaaa"), joaat_lower("thaeaa"));
+        let mut names = Names::new();
+        names.add("Puwaaa");
+        names.add("Thaeaa");
+        let hash = joaat_lower("puwaaa");
+        let found = names.candidates(hash);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|n| n == "Puwaaa") && found.iter().any(|n| n == "Thaeaa"));
+        // Names that differ only in case are one word for resolution: the first is kept.
+        names.add("pUwaaa");
+        assert_eq!(names.candidates(hash).len(), 2);
+    }
+
+    #[test]
+    fn lookup_says_unknown_when_no_name_holds_the_hash() {
+        let names = Names::new();
+        assert!(names.lookup(0x1234_5678).is_none());
+        assert!(names.candidates(0x1234_5678).is_empty());
+        assert!(names.lookup(0).is_none());
+        assert_eq!(names.candidates(joaat(b"CMapData")), ["CMapData"]);
+        assert_eq!(names.lookup(joaat(b"CMapData")).map(|n| n.into_owned()), Some("CMapData".into()));
     }
 }

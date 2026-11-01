@@ -14,6 +14,7 @@ use crate::crash_window::CrashWindow;
 use crate::dialogs::{AddonDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, edit_message, install_failure};
 use crate::export::{ExportDest, extract, with_notes};
 use crate::export_window::ExportWindow;
+use crate::hashes;
 use crate::mods_check::ModsCheck;
 use crate::prefix_window::PrefixWindow;
 use crate::scripthook_window::ScriptHookWindow;
@@ -62,6 +63,7 @@ impl Action {
                 | Action::CheckMods(..)
                 | Action::ScriptHook(..)
                 | Action::Snapshots(..)
+                | Action::Hashes(..)
                 | Action::PrefixTweaks(..)
                 | Action::Export(..)
                 | Action::WriteExport(..)
@@ -167,6 +169,8 @@ pub(crate) enum Action {
     AddDlcPacks(Vec<String>),
     /// Open the "Snapshots" window, or close it.
     Snapshots(bool),
+    /// Open the "Hash generator" window, or close it (no game needed).
+    Hashes(bool),
     /// Open the "Prefix tweaks" window, or close it.
     PrefixTweaks(bool),
     SaveSnapshot(String),
@@ -1011,6 +1015,13 @@ impl App {
                 self.snapshots = match (&self.game, open) {
                     (Some(game), true) => Some(SnapshotsWindow::gather(game)),
                     _ => None,
+                };
+            }
+            Action::Hashes(open) => {
+                self.hashes = match open {
+                    // The hash tool needs no game; F01 (dist/future-works).
+                    true => Some(hashes::HashesWindow::gather()),
+                    false => None,
                 };
             }
             Action::PrefixTweaks(open) => {
