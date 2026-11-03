@@ -49,6 +49,8 @@ pub struct Drawable {
     /// Levels of detail present, from High to Very low.
     pub lods: Vec<(&'static str, Mesh)>,
     pub textures: Vec<Picture>,
+    /// Diffuse textures the shaders name that no dictionary holds.
+    pub missing: Vec<String>,
 }
 
 /// The drawables of a model file; `extension` tells `.ydr`, `.ydd` and `.yft`
@@ -223,6 +225,7 @@ const LOD_NAMES: [&str; 4] = ["High", "Medium", "Low", "Very low"];
 /// Textures found so far for a model, and where to look for more.
 struct TextureSource<'a> {
     pictures: Vec<Picture>,
+    missing: Vec<String>,
     /// Dictionaries embedded in the drawables read so far.
     own: Vec<TextureDictionary>,
     external: &'a [TextureDictionary],
@@ -233,7 +236,12 @@ impl TextureSource<'_> {
         if let Some(i) = self.pictures.iter().position(|t| t.name.eq_ignore_ascii_case(name)) {
             return Some(i);
         }
-        let tex = self.own.iter().chain(self.external).flat_map(|d| &d.textures).find(|t| t.name.eq_ignore_ascii_case(name))?;
+        let Some(tex) = self.own.iter().chain(self.external).flat_map(|d| &d.textures).find(|t| t.name.eq_ignore_ascii_case(name)) else {
+            if !self.missing.iter().any(|m| m.eq_ignore_ascii_case(name)) {
+                self.missing.push(name.to_string());
+            }
+            return None;
+        };
         let level = (0..tex.levels).find(|&l| (tex.width >> l).max(tex.height >> l) <= PREVIEW_SIZE).unwrap_or(tex.levels - 1);
         let (width, height, rgba) = tex.rgba(level)?;
         self.pictures.push(Picture { name: tex.name.clone(), width, height, rgba });
@@ -244,7 +252,7 @@ impl TextureSource<'_> {
 /// A drawable and, for fragments, the drawables of its parts placed where
 /// they belong (vehicle wheels, doors...).
 fn drawable(res: &Resource, ptr: u64, name: String, dictionaries: &[TextureDictionary], children: &[(u64, Transform)]) -> Result<Drawable, Error> {
-    let mut textures = TextureSource { pictures: Vec::new(), own: Vec::new(), external: dictionaries };
+    let mut textures = TextureSource { pictures: Vec::new(), missing: Vec::new(), own: Vec::new(), external: dictionaries };
     let mut lods: Vec<(&'static str, Mesh)> = LOD_NAMES.into_iter().map(|n| (n, Mesh::default())).collect();
     add_drawable(res, ptr, None, &mut lods, &mut textures)?;
     for (child, place) in children {
@@ -252,7 +260,7 @@ fn drawable(res: &Resource, ptr: u64, name: String, dictionaries: &[TextureDicti
         let _ = add_drawable(res, *child, Some(place), &mut lods, &mut textures);
     }
     lods.retain(|(_, m)| !m.indices.is_empty());
-    Ok(Drawable { name, lods, textures: textures.pictures })
+    Ok(Drawable { name, lods, textures: textures.pictures, missing: textures.missing })
 }
 
 /// Adds a drawable's meshes to `lods`. Models follow their bone, or
@@ -499,6 +507,13 @@ mod tests {
     fn legacy_and_enhanced_versions() {
         assert!([160, 162, 165].into_iter().all(|v| !is_enhanced(v)));
         assert!([154, 159, 171].into_iter().all(is_enhanced));
+    }
+
+    #[test]
+    fn a_texture_no_dictionary_holds_is_reported_once() {
+        let mut source = TextureSource { pictures: Vec::new(), missing: Vec::new(), own: Vec::new(), external: &[] };
+        assert!(source.index("muscle_engine").is_none() && source.index("MUSCLE_ENGINE").is_none() && source.index("gauntlet3_belt").is_none());
+        assert_eq!(source.missing, ["muscle_engine", "gauntlet3_belt"]);
     }
 
     #[test]

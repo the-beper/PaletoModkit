@@ -53,7 +53,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Drawable>, Error> {
         return Err(Error::Format("navmesh without polygons".into()));
     }
     mesh.parts.push(Part { start: 0, count: mesh.indices.len(), texture: None });
-    Ok(vec![Drawable { name: String::new(), lods: vec![("Navmesh", mesh)], textures: Vec::new() }])
+    Ok(vec![Drawable { name: String::new(), lods: vec![("Navmesh", mesh)], textures: Vec::new(), missing: Vec::new() }])
 }
 
 /// The items of a list, its parts joined (`size` bytes each).
