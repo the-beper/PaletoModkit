@@ -91,6 +91,20 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.8.0" date="2026-11-03">
+      <description>
+        <p>Hash generator, favorites and recent locations, and a warning in the 3D preview for textures a model cannot find.</p>
+        <ul>
+          <li>Tools &gt; Hash generator… hashes names (hexadecimal, unsigned and signed decimal; lowercase, exact bytes or audio-stream mode) and resolves hashes to the names that hold them, against the built-in metadata names and a list of your own names kept in ~/.local/share/paleto/names.txt.</li>
+          <li>paleto hash generate and paleto hash resolve do the same from a terminal, with no game needed.</li>
+          <li>File &gt; Favorites and recent locations… keeps the folders, archives and paths inside archives you come back to, and your latest 24 visits. Each place is kept by its path inside its game folder, so an install that moved still resolves, and the list says why a place cannot open.</li>
+          <li>The 3D preview lists the textures a model names that none of its dictionaries holds, instead of leaving black surfaces unexplained. Some tuning parts, such as the Panoramas blowers, point to textures of another vehicle.</li>
+          <li>A missing CodeWalker converter (paleto-cwconv) now reports every place it was searched for.</li>
+          <li>The panic policy of the core library is counted by a test, and a CI check refuses a gh-pages commit over its size budget.</li>
+          <li>The GUI code moved out of one 5,000-line file into one module per window or panel, with no change in behaviour.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.0" date="2026-10-31">
       <description>
         <p>Safer snapshot restores, a warning for names that differ only in case, and smaller Flatpak updates.</p>

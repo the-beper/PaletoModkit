@@ -40,7 +40,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Drawable>, Error> {
     }
     mesh.uvs = vec![[0.0, 0.0]; mesh.positions.len()];
     mesh.parts = vec![Part { start: 0, count: mesh.indices.len(), texture: None }];
-    Ok(vec![Drawable { name: String::new(), lods: vec![("Collision", mesh)], textures: Vec::new() }])
+    Ok(vec![Drawable { name: String::new(), lods: vec![("Collision", mesh)], textures: Vec::new(), missing: Vec::new() }])
 }
 
 /// Row-vector 4x3 transformation: three rows of axes, then the translation.

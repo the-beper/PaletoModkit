@@ -86,6 +86,10 @@ impl ModelView {
             ui.label("This model has no geometry at this level of detail.");
             return;
         };
+        let missing = &self.drawables[self.selected].missing;
+        if !missing.is_empty() {
+            ui.label(RichText::new(format!("Textures not found: {}. No dictionary the game gives this model holds them.", missing.join(", "))).color(ui.visuals().warn_fg_color));
+        }
         ui.label(RichText::new(format!("{} vertices · {} triangles · drag to turn, scroll to zoom", mesh.positions.len(), mesh.indices.len() / 3)).weak());
 
         let area = ui.available_size().max(egui::vec2(64.0, 64.0));
@@ -253,10 +257,23 @@ fn render(mesh: &Mesh, textures: &[Picture], [w, h]: [usize; 2], yaw: f32, pitch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
 
     fn mesh(positions: Vec<V3>) -> Mesh {
         let n = positions.len() as u32;
         Mesh { uvs: vec![[0.0; 2]; positions.len()], indices: (0..n).collect(), positions, parts: Vec::new() }
+    }
+
+    #[test]
+    fn missing_textures_are_named() {
+        let named = |missing: Vec<String>| {
+            let drawable = Drawable { name: String::new(), lods: vec![("High", mesh(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))], textures: Vec::new(), missing };
+            let mut view = ModelView::new(vec![drawable]);
+            let harness = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui(|ui| view.ui(ui));
+            harness.query_by_label_contains("Textures not found: muscle_engine, gauntlet3_belt.").is_some()
+        };
+        assert!(named(vec!["muscle_engine".into(), "gauntlet3_belt".into()]));
+        assert!(!named(Vec::new()));
     }
 
     #[test]
