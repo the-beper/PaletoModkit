@@ -562,11 +562,10 @@ pub(crate) fn load_preview(req: PreviewRequest) -> Loaded {
     Loaded { source, name: req.name.clone(), info, content, error, select: req.select.clone() }
 }
 
-/// Texture dictionaries next to a model, named after it (`name.ytd`, and
-/// `name+hi.ytd` as vehicles have).
 /// The texture dictionaries a model draws from: those of its name next to
 /// it, then the ones its dictionary inherits from (up to vehshare.ytd).
-/// Tuning parts (in "<vehicle>_mods.rpf") use their vehicle's.
+/// Tuning parts (in "<vehicle>_mods.rpf") use their vehicle's. A dictionary
+/// is `name.ytd`, `name+hi.ytd` (vehicles) or `name+hifr.ytd` (tuning parts).
 fn sibling_textures(req: &PreviewRequest) -> Vec<TextureDictionary> {
     let model = req.name.as_str();
     let stem = model.rsplit_once('.').map_or(model, |(s, _)| s).to_ascii_lowercase();
@@ -575,7 +574,7 @@ fn sibling_textures(req: &PreviewRequest) -> Vec<TextureDictionary> {
         Location::Archive(a) => a.join(name).read(req.keys.as_deref()).ok(),
     };
     let here = |name: &str| req.rows.iter().find(|r| r.eq_ignore_ascii_case(&format!("{name}.ytd"))).cloned();
-    let mut names = vec![stem.clone(), format!("{stem}+hi")];
+    let mut names = vec![stem.clone(), format!("{stem}+hi"), format!("{stem}+hifr")];
     if let Location::Archive(a) = &req.location {
         let archive = a.inner.iter().rev().chain(a.disk.file_name().map(|n| n.to_str().unwrap_or_default().to_string()).iter()).find(|p| p.to_ascii_lowercase().ends_with("_mods.rpf")).cloned();
         if let Some(vehicle) = archive.map(|n| n.to_ascii_lowercase().trim_end_matches("_mods.rpf").to_string()) {
@@ -661,4 +660,26 @@ pub(crate) fn load_icon(ctx: &egui::Context, png: &[u8]) -> Option<egui::Texture
 
 pub(crate) fn extension(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_uppercase()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tuning_part_reads_its_hifr_dictionary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("car_blower_a+hifr.ytd"), include_bytes!("../tests/data/probe.ytd")).unwrap();
+        let req = PreviewRequest {
+            name: "car_blower_a.yft".into(),
+            location: Location::Folder(dir.path().to_path_buf()),
+            rows: vec!["car_blower_a.yft".into(), "car_blower_a+hifr.ytd".into()],
+            keys: None,
+            shared: Arc::default(),
+            select: None,
+            delay: std::time::Duration::ZERO,
+        };
+        let found = sibling_textures(&req);
+        assert!(found.iter().flat_map(|d| &d.textures).any(|t| t.name == "red_probe"));
+    }
 }
