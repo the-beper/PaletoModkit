@@ -7,3 +7,4 @@ packaging/nuget-sources.json
 tmp/
 TODO.md
 NOTES.md
+/.claude/

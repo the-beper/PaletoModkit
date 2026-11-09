@@ -4,10 +4,10 @@ Linux-native replacement for OpenIV for GTA V (Legacy and Enhanced): a Rust work
 
 ## After a change
 
-- Run `cargo clippy --all-targets --all-features -- -D warnings` and `cargo test --all-features`, and read the results before saying they pass.
+- Run the global Rust checks and read the results before saying they pass, except `cargo fmt` (see Rules of the repository).
 - Before saying CI is fixed, also run the tests with an empty home, as CI does (locally the app finds the installed game and `keys.bin`, CI has neither):
   `HOME=$(mktemp -d) CARGO_HOME=~/.cargo RUSTUP_HOME=~/.rustup cargo test --all-features`
-- Once a set of changes is done and the tests pass, start the Flatpak build in the background with `.claude/flatpak-bg.sh`. It runs at low priority on all but 4 cores (`FREE_CPUS=n` changes that), logs to `target/flatpak-build.log`, and does nothing if a build is already running. Do not start it after every small edit, and do not wait for it: carry on, and report the outcome (`exit: 0` on the last log line, or the error) when it is done or when asked. Never run `packaging/build-flatpak.sh` directly in the foreground.
+- Once a set of changes is done and the tests pass, start the Flatpak build in the background with `packaging/flatpak-bg.sh`. It runs at low priority on all but 4 cores (`FREE_CPUS=n` changes that), logs to `target/flatpak-build.log`, and does nothing if a build is already running. Do not start it after every small edit, and do not wait for it: carry on, and report the outcome (`exit: 0` on the last log line, or the error) when it is done or when asked. Never run `packaging/build-flatpak.sh` directly in the foreground.
 - A change users see needs a test, and an update of the page of `docs/` that describes it.
 
 ## Screenshots

@@ -170,7 +170,7 @@ jobs:
       - name: shellcheck
         if: steps.changes.outputs.code == 'true'
         # Warnings and errors fail the job; info and style notes differ between shellcheck versions (the runner's apt one is older).
-        run: shellcheck -s sh -S warning packaging/*.sh packaging/tests/*.sh packaging/tests/gh .claude/flatpak-bg.sh
+        run: shellcheck -s sh -S warning packaging/*.sh packaging/tests/*.sh packaging/tests/gh
       - name: Install actionlint and zizmor
         if: steps.changes.outputs.code == 'true'
         env:

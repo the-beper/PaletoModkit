@@ -609,7 +609,7 @@ ENGINE
     # what a release verify makes of the exported repository
     run "$SIM/bf.log" in_dir "$w" sh packaging/release-verify.sh builds --tag v1.5.1 --commit "$(git -C "$w" rev-parse HEAD)" --flatpak "$SIM/bfout" --out "$SIM/bfverified"
     assert_rc "verify of the exported repository" 0
-    # the default (local) build still leaves the bundle where .claude/flatpak-bg.sh expects it
+    # the default (local) build still leaves the bundle where packaging/flatpak-bg.sh expects it
     run "$SIM/bf.log" bf sh packaging/build-flatpak.sh
     assert_rc "local build" 0
     assert_file "local bundle" "$SIM/bfout/PaletoModkit-x86_64.flatpak"
