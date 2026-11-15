@@ -1166,6 +1166,11 @@ fn finish(cmd: Command) -> Command {
     host_command(&cmd, &spawn, &|name| std::env::var(name).ok())
 }
 
+/// [`host_command`] through `flatpak-spawn`, for host programs other than Wine (see [`crate::launch`]).
+pub(crate) fn on_host_command(cmd: &Command) -> Command {
+    host_command(cmd, Path::new(SPAWN), &|name| std::env::var(name).ok())
+}
+
 /// Removes the private runtime folder, here and on the host.
 fn remove_runtime() {
     let _ = std::fs::remove_dir_all(runtime_dir());

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use paleto_core::{ArchivePath, Game, Package, vfs};
-use paleto_formats::xml_export;
 use paleto_formats::{Edit, Format, MetaFile, TextureDictionary, edit_textures};
 use paleto_rpf::{Archive, ArchiveEditor, EntryKind, Keys};
 
@@ -293,7 +292,8 @@ enum Command {
     Model {
         /// A .ydr, .ydd, .yft or .ybn file, on disk or inside an archive.
         path: String,
-        /// The folder to write into: the XML as <name>.<ext>.xml, and the DDS files in <name>/.
+        /// The folder to write into: the XML as <name>.<ext>.xml, the DDS files in <name>/, and <name>.<ext>.export.txt,
+        /// which says where each texture came from and which were not found.
         #[arg(short, long)]
         output: PathBuf,
         /// A texture dictionary the model's textures may be in (repeatable).
@@ -627,19 +627,16 @@ fn main() -> Result<()> {
             let data = load(&path)?;
             let dictionaries = dictionary.iter().map(|d| TextureDictionary::parse(&load(d)?).with_context(|| format!("reading {d}"))).collect::<Result<Vec<_>>>()?;
             let file = Path::new(&path).file_name().and_then(|n| n.to_str()).with_context(|| format!("no file name in {path}"))?;
-            let (stem, ext) = file.rsplit_once('.').with_context(|| format!("{path}: not a model"))?;
-            let export = xml_export::export(&data, ext, stem, &dictionaries).with_context(|| format!("reading {path}"))?;
-            let (_, log) = vfs::write_into(&output, "exporting a model", |out| {
-                let dest = out.write(&format!("{file}.xml"), export.xml.as_bytes())?;
-                println!("wrote {}", dest.display());
-                // The textures go in a folder named after the model, where CodeWalker looks for them.
-                for (name, dds) in &export.textures {
-                    let dest = out.write(&format!("{}/{name}", xml_export::texture_folder(stem)), dds)?;
-                    println!("wrote {}", dest.display());
-                }
-                Ok(())
-            })?;
-            show_notes(log);
+            let report = paleto_core::model_export::export(&output, file, &path, &data, &dictionaries, &dictionary)?;
+            println!("wrote {}", report.xml.display());
+            if report.textures > 0 {
+                println!("wrote {} textures into {}", report.textures, report.texture_folder.display());
+            }
+            if !report.missing.is_empty() {
+                println!("! not found in the model or the dictionaries given (--dictionary): {}", report.missing.join(", "));
+            }
+            println!("wrote {} (where each texture came from)", report.note.display());
+            show_notes(report.log);
         }
         Command::Textures { path, output, png, .. } => {
             let data = if Path::new(&path).is_file() {

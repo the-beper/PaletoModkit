@@ -12,7 +12,9 @@ pub mod export;
 pub mod fsroot;
 pub mod game;
 pub mod hashes;
+pub mod launch;
 pub mod loader;
+pub mod model_export;
 pub mod names_store;
 pub mod oiv;
 pub mod prefix;
@@ -74,6 +76,9 @@ pub enum Error {
     Convert(String),
     #[error("prefix: {0}")]
     Prefix(String),
+    /// A model that cannot be exported, with the reason (see [`model_export`]).
+    #[error("{0}")]
+    Export(String),
     /// A path from a package or a caller that must not be used as a destination.
     #[error("unsafe path {path:?}: {why}")]
     UnsafePath { path: String, why: String },

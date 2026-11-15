@@ -138,7 +138,7 @@ paleto model x64e.rpf/levels/gta5/props/prop_x.rpf/prop_x.ydr -o out/
 paleto model car.ydd -o car/ --dictionary car.ytd
 ```
 
-This writes `out/prop_x.ydr.xml`, and one DDS file per texture the model names in `out/prop_x/`, where CodeWalker looks for them. Shaders of the Enhanced edition are written with the Legacy parameter names, as CodeWalker does.
+This writes `out/prop_x.ydr.xml`, one DDS file per texture the model holds or that a `--dictionary` holds in `out/prop_x/`, where CodeWalker and Sollumz look for them, and `out/prop_x.ydr.export.txt`, a note of where the model and each texture came from and which textures were found nowhere (they are also printed). The command line searches only the dictionaries given; the app finds them by itself (see [user-guide.md](user-guide.md#3d-models)). Shaders of the Enhanced edition are written with the Legacy parameter names, as CodeWalker does.
 
 ## Installing mods
 
@@ -245,6 +245,6 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `audio PATH [-o DIR] [--replace ID=FILE…]` | Sounds of an audio container |
 | `hash generate NAMES… [--mode exact\|lower\|awc]` / `hash resolve VALUES…` | The hashes of names and the names of hashes; [see above](#hashes) |
 | `textures PATH [options]` | Textures of a dictionary |
-| `model PATH -o DIR [--dictionary YTD…]` | A model or collision as CodeWalker XML with its textures |
+| `model PATH -o DIR [--dictionary YTD…]` | A model or collision as CodeWalker XML with its textures and a note of where they came from |
 
 Every command takes `--game FOLDER`. `paleto help COMMAND` shows all of its options.
