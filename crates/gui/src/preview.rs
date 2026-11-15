@@ -268,7 +268,12 @@ impl App {
 
     pub(crate) fn preview_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let busy = self.busy();
+        let mods = self.game.as_ref().map(|g| g.mods_dir());
         let Some(p) = &mut self.preview else { return };
+        let in_mods = mods.is_some_and(|mods| match &p.source {
+            PreviewSource::Archive(path) => path.disk.starts_with(&mods),
+            PreviewSource::Disk(path) => path.starts_with(&mods),
+        });
         let editable = matches!(p.source, PreviewSource::Archive(_)) && !matches!(p.codec, Codec::Summary);
         let dirty = p.text.as_ref().is_some_and(|(text, saved)| text != saved);
         let height = crate::widgets::bar_height(ui);
@@ -278,9 +283,10 @@ impl App {
         const SEARCH: &str = "🔍 Search";
         const FORMAT: &str = "⚙ Format";
         const SAVE: &str = "💾 Save";
+        const COMPARE: &str = "⬌ Compare with original";
         let padding = 2.0 * ui.ctx().global_style().spacing.button_padding.x;
         let width_of = |ui: &egui::Ui, text: &str| egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x + padding;
-        let shown: Vec<&str> = [(has_text, SEARCH), (can_format, FORMAT), (editable && has_text, SAVE)].into_iter().filter(|(on, _)| *on).map(|(_, t)| t).collect();
+        let shown: Vec<&str> = [(has_text, SEARCH), (can_format, FORMAT), (editable && has_text, SAVE), (in_mods, COMPARE)].into_iter().filter(|(on, _)| *on).map(|(_, t)| t).collect();
         let spacing = ui.spacing().item_spacing.x;
         let needed = height + shown.iter().map(|t| width_of(ui, t) + spacing).sum::<f32>() + spacing + 110.0;
         let compact = needed > ui.available_width();
@@ -318,6 +324,13 @@ impl App {
                 }
                 if has_text && crate::widgets::bar_button(ui, button(SEARCH).selected(p.find.is_some()), min).on_hover_text("Search in the file (Ctrl+F)").clicked() {
                     toggle_find = true;
+                }
+                if in_mods {
+                    let response = ui.add_enabled_ui(!busy && !dirty, |ui| crate::widgets::bar_button(ui, button(COMPARE), min)).inner;
+                    let waits = if dirty { "Save first: the comparison reads the saved file" } else { "Wait for the current operation to finish" };
+                    if response.on_hover_text("Compare this file with the game's original (nothing is changed)").on_disabled_hover_text(waits).clicked() {
+                        actions.push(Action::CompareWithOriginal);
+                    }
                 }
                 // The name takes the room left, shortened if need be.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {

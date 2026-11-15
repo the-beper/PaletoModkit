@@ -284,6 +284,8 @@ pub(crate) enum Outcome {
     Installed(InstallResult),
     /// A model was exported: what was written, and the command line that starts Blender if one was looked for and found.
     ModelExported { report: paleto_core::model_export::Report, blender: Option<String> },
+    /// A file of the mods folder was compared with its original.
+    Compared(Box<crate::compare_window::Done>),
     Failed(String),
     /// What undoing or setting aside interrupted changes did.
     Recovered(Result<paleto_core::txn::Report, String>, bool),

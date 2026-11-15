@@ -283,6 +283,14 @@ enum Command {
         #[arg(long, value_name = "ID=FILE", conflicts_with = "output")]
         replace: Vec<String>,
     },
+    /// Compare a file of the mods folder with the game's original (or with ORIGINAL): text and XML line by line, binary
+    /// metadata as XML, anything else byte by byte. Read-only.
+    Diff {
+        /// A file of the mods folder, on disk or inside an archive (mods/update/update.rpf/common/data/handling.meta).
+        path: String,
+        /// The file to compare it with, instead of the game's original.
+        original: Option<String>,
+    },
     /// Show the names of hashes and the hashes of names (Jenkins one-at-a-time, the way the game hashes names).
     Hash {
         #[command(subcommand)]
@@ -690,6 +698,61 @@ fn main() -> Result<()> {
                     write_any(&path, cli.game.as_deref(), rebuilt)?;
                 }
                 None => print_or_save(&paleto_formats::gxt2::to_text(&entries), output.as_deref())?,
+            }
+        }
+        Command::Diff { path, original } => {
+            use paleto_core::diff::{self, Op, Outcome};
+            let parse = |p: &str| ArchivePath::parse(&std::path::absolute(p).unwrap_or_else(|_| p.into()).to_string_lossy()).with_context(|| format!("{p}: not found"));
+            let modified = parse(&path)?;
+            let original = match &original {
+                Some(o) => Some(parse(o)?),
+                None => {
+                    let game = find_game(cli.game.as_deref(), Some(&modified.disk))?;
+                    anyhow::ensure!(modified.disk.starts_with(game.mods_dir()), "{path} is not in the mods folder of {}: give the file to compare it with", game.root.display());
+                    modified.original(&game)
+                }
+            };
+            // Keys are only needed for encrypted archives.
+            let keys = load_keys(cli.game.as_deref(), &modified.disk).ok().flatten();
+            let compared = diff::compare_files(original.as_ref(), &modified, keys.as_ref())?;
+            let shown = |p: &ArchivePath| if p.inner.is_empty() { p.disk.display().to_string() } else { format!("{}/{}", p.disk.display(), p.inner.join("/")) };
+            let c = compared.comparison;
+            println!("--- original: {}", original.as_ref().map_or_else(|| "none".to_string(), shown));
+            println!("+++ modified: {}", shown(&modified));
+            for note in &c.notes {
+                println!("note: {note}");
+            }
+            match &c.outcome {
+                Outcome::Identical => println!("identical"),
+                Outcome::Added => println!("added: the game has no original of this file"),
+                Outcome::Deleted => println!("deleted: only the original has this file"),
+                Outcome::Lines { same_content: true, .. } => println!("the same {}: only the formatting differs", c.kind.label()),
+                Outcome::Lines { lines, .. } => {
+                    for hunk in diff::hunks(lines, 3) {
+                        let part = &lines[hunk.clone()];
+                        let before = lines[..hunk.start].iter().rev();
+                        let start = |pick: fn(&diff::Line) -> Option<usize>| part.iter().find_map(pick).or_else(|| before.clone().find_map(pick)).unwrap_or(0);
+                        let (old, new) = (part.iter().filter(|l| l.op != Op::Added).count(), part.iter().filter(|l| l.op != Op::Removed).count());
+                        println!("@@ -{},{old} +{},{new} @@", start(|l| l.old), start(|l| l.new));
+                        for line in part {
+                            println!("{}{}", match line.op { Op::Same => ' ', Op::Removed => '-', Op::Added => '+' }, line.text);
+                        }
+                    }
+                }
+                Outcome::Bytes(d) => {
+                    println!("binary: {} bytes, sha256 {}", d.sizes[0], d.sha256[0]);
+                    println!("        {} bytes, sha256 {}", d.sizes[1], d.sha256[1]);
+                    for (offset, len) in &d.runs {
+                        println!("differ at 0x{offset:08X}, {len} bytes");
+                    }
+                    if d.more {
+                        println!("and more");
+                    }
+                }
+                Outcome::Large { sizes, same_stored } => {
+                    println!("sizes: {} and {} bytes", sizes[0], sizes[1]);
+                    println!("stored bytes: {}", match same_stored { Some(true) => "the same", Some(false) => "different", None => "not compared" });
+                }
             }
         }
         Command::Hash { action } => match action {

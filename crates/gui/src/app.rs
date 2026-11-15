@@ -15,6 +15,7 @@ use crate::scripthook_window::{self, ScriptHookWindow};
 use crate::snapshots_window::{self, SnapshotsWindow};
 use crate::hashes;
 use crate::favorites_window::{self, FavoritesWindow, Place};
+use crate::compare_window::{self, CompareWindow};
 use crate::crash_window::{self, CrashWindow};
 use crate::export_window::{self, ExportWindow};
 use crate::settings::Settings;
@@ -123,6 +124,8 @@ pub struct App {
     pub(crate) snapshots: Option<SnapshotsWindow>,
     /// The "Hash generator" window: no game needed (F01, dist/future-works).
     pub(crate) hashes: Option<hashes::HashesWindow>,
+    /// The "Compare with original" window (F04): a file of the mods folder against the game's own.
+    pub(crate) compare: Option<CompareWindow>,
     ///Saved places (F02): the favorites and the recent in-game locations.
     pub(crate) favorites: Vec<Place>,
     pub(crate) recents: Vec<Place>,
@@ -235,6 +238,7 @@ impl App {
             interrupted: Vec::new(),
             snapshots: None,
             hashes: None,
+            compare: None,
             favorites: Vec::new(),
             recents: Vec::new(),
             favorites_window: None,
@@ -579,6 +583,7 @@ impl App {
         };
         self.mods_check = None;
         self.script_hook = None;
+        self.compare = None;
         self.expand_task = None;
         self.listing_task = None;
         let root = game.root.clone();
@@ -842,7 +847,7 @@ impl App {
                     Outcome::Failed(err) => {
                         desktop_notify(&label, &format!("Failed: {err}"));
                     }
-                    Outcome::Recovered(..) => {}
+                    Outcome::Compared(..) | Outcome::Recovered(..) => {}
                 }
             }
 
@@ -885,6 +890,9 @@ impl App {
                     self.status = Status::Info(crate::export::with_notes(format!("exported {}", model_export_summary(&report)), &report.log));
                     self.model_export = Some(ModelExportDialog { report, blender, message: None });
                     self.refresh_then(AfterListing::default());
+                }
+                Outcome::Compared(done) => {
+                    self.compare = Some(CompareWindow::new(self.game.as_ref().map(|g| g.root.as_path()), *done));
                 }
                 Outcome::Installed(result) => {
                     self.clear_tree();
@@ -1191,6 +1199,11 @@ impl eframe::App for App {
         if let Some(request) = self.hashes.as_mut().and_then(|w| w.show(&ctx)) {
             match request {
                 hashes::Request::Close => actions.push(Action::Hashes(false)),
+            }
+        }
+        if let Some(request) = self.compare.as_mut().and_then(|w| w.show(&ctx)) {
+            match request {
+                compare_window::Request::Close => actions.push(Action::CloseCompare),
             }
         }
         // Favorites and recent locations: the lists live here, the window only asks.

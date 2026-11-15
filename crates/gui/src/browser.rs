@@ -285,10 +285,7 @@ impl App {
         let Some(game) = &self.game else { return location.clone() };
         match location {
             // Packs only in the mods folder (add-ons) have no original.
-            Location::Archive(a) => match a.disk.strip_prefix(game.mods_dir()) {
-                Ok(rel) if game.root.join(rel).is_file() => Location::Archive(ArchivePath { disk: game.root.join(rel), inner: a.inner.clone() }),
-                _ => location.clone(),
-            },
+            Location::Archive(a) => a.original(game).map_or_else(|| location.clone(), Location::Archive),
             Location::Folder(_) => location.clone(),
         }
     }

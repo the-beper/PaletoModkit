@@ -104,6 +104,15 @@ impl ArchivePath {
         Ok(ArchivePath { disk: dest.path(), inner: self.inner.clone() })
     }
 
+    /// The game's own file for this path in its mods folder (an archive or a loose file; the path inside an archive is
+    /// kept), found in any case: what a mods copy is compared with. `None` outside the mods folder, or when the game has
+    /// no such file (an add-on pack's).
+    pub fn original(&self, game: &Game) -> Option<Self> {
+        let rel = self.disk.strip_prefix(game.mods_dir()).ok().filter(|rel| !rel.components().any(|c| matches!(c, std::path::Component::ParentDir)))?;
+        let disk = game.original(&rel.to_string_lossy());
+        disk.is_file().then(|| ArchivePath { disk, inner: self.inner.clone() })
+    }
+
     /// The copy of this archive in the mods folder, if there is one.
     pub fn in_mods(&self, game: &Game) -> Option<Self> {
         let rel = in_game(&self.disk, game)?;

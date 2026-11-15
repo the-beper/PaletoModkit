@@ -13,6 +13,7 @@ mod audio;
 mod hex_view;
 mod highlight;
 mod model;
+mod compare_window;
 mod crash_window;
 mod export_window;
 mod hashes;

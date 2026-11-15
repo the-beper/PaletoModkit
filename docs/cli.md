@@ -56,7 +56,13 @@ paleto mkdir update/update.rpf/common/data/my_mod
 
 # Create a new, empty archive
 paleto new custom_data.rpf
+
+# Compare a file of the mods folder with the game's original (or with a second file)
+paleto diff mods/update/update.rpf/common/data/handling.meta
+paleto diff my_handling.meta update/update.rpf/common/data/handling.meta
 ```
+
+`paleto diff` is read-only. Text is compared line by line and printed as a unified diff; XML, and binary metadata (as the XML `paleto xml` prints), once the formatting is set aside, so a file that is only formatted differently is reported as such; anything else by size, SHA-256 and the offsets where the bytes differ. A file the game has no original of is reported as added. Files over 256 MiB are compared by size and stored bytes only.
 
 On the Enhanced edition, `paleto add` converts files made for Legacy on the way (the files on disk are not changed); `--no-convert` adds them as they are.
 
@@ -227,6 +233,7 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `info PATH` | Archive header and statistics |
 | `ls PATH [-r]` | List an archive or a folder inside it |
 | `extract PATH [-o DIR]` | Extract a file or folder |
+| `diff PATH [ORIGINAL]` | Compare a mods copy with the game's original, or with ORIGINAL; [see above](#archives) |
 | `add DEST FILES… [--no-convert]` | Add or replace files in an archive folder |
 | `rm PATH` | Delete a file or folder inside an archive |
 | `mv PATH NEW_NAME` | Rename a file or folder inside an archive |

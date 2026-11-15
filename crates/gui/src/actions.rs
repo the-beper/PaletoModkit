@@ -4,12 +4,14 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use paleto_core::diff;
 use paleto_core::texture_batch;
 use paleto_core::{ArchivePath, Game, vfs};
 
 use crate::app::{App, Info, Location, Status};
 use crate::audio::{self, AudioRequest};
 use crate::browser::{AfterListing, HistoryMove, RowKind, sort_rows};
+use crate::compare_window::Done;
 use crate::crash_window::CrashWindow;
 use crate::dialogs::{AddonDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, edit_message, install_failure};
 use crate::export::{ExportDest, extract, with_notes};
@@ -93,6 +95,8 @@ impl Action {
                 | Action::ClosePreview
                 | Action::ExportTextures(..)
                 | Action::ExportModel(..)
+                | Action::CompareWithOriginal
+                | Action::CloseCompare
                 | Action::ExportSounds(..)
                 | Action::PickTexture(..)
                 | Action::AskTexture(..)
@@ -127,6 +131,7 @@ impl Action {
                 | Action::ExportSounds(..)
                 | Action::ExportTextures(..)
                 | Action::ExportModel(_)
+                | Action::CompareWithOriginal
                 | Action::SavePreview
                 | Action::Extract(..)
                 | Action::Add(_)
@@ -240,6 +245,10 @@ pub(crate) enum Action {
     ExportTextures(Export, Option<PathBuf>),
     /// Export the previewed model as CodeWalker XML with its textures; asks for a folder when `dest` is None.
     ExportModel(Option<PathBuf>),
+    /// Compare the previewed file of the mods folder with the game's original (read-only), and show the result.
+    CompareWithOriginal,
+    /// Close the "Compare with original" window.
+    CloseCompare,
     /// Export sounds of the previewed audio container; asks where when `dest` is None.
     ExportSounds(AudioRequest, Option<PathBuf>),
     /// Replace a sound (by id) of the previewed container with a WAV or MP3 file; asks which when None.
@@ -675,6 +684,20 @@ impl App {
                     }
                 }));
             }
+            Action::CompareWithOriginal => {
+                let (Some(p), Some(game)) = (&self.preview, &self.game) else { return };
+                let modified = match &p.source {
+                    PreviewSource::Archive(path) => path.clone(),
+                    PreviewSource::Disk(path) => ArchivePath::new(path.clone()),
+                };
+                let original = modified.original(game);
+                let keys = self.keys.clone();
+                self.task = Some(Task::spawn("Comparing with the original", ctx, move || match diff::compare_files(original.as_ref(), &modified, keys.as_deref()) {
+                    Ok(compared) => Outcome::Compared(Box::new(Done { original, modified, compared })),
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }));
+            }
+            Action::CloseCompare => self.compare = None,
             Action::FormatPreview => {
                 if let Some((text, _)) = self.preview.as_mut().and_then(|p| p.text.as_mut()) {
                     *text = paleto_core::xml::reindent(text);
