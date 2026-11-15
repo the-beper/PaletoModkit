@@ -282,9 +282,20 @@ pub(crate) enum Outcome {
     /// An operation finished; show the message and reopen `reload` if given.
     Done { message: String, reload: Option<ArchivePath> },
     Installed(InstallResult),
+    /// A model was exported: what was written, and the command line that starts Blender if one was looked for and found.
+    ModelExported { report: paleto_core::model_export::Report, blender: Option<String> },
     Failed(String),
     /// What undoing or setting aside interrupted changes did.
     Recovered(Result<paleto_core::txn::Report, String>, bool),
+}
+
+/// What an exported model came to, with the program to open it with.
+pub(crate) struct ModelExportDialog {
+    pub(crate) report: paleto_core::model_export::Report,
+    /// The command line that starts Blender, if one was looked for and found.
+    pub(crate) blender: Option<String>,
+    /// What the last Open folder or Open came to: a note, or the error.
+    pub(crate) message: Option<Result<String, String>>,
 }
 
 pub(crate) struct NameDialog {
@@ -306,6 +317,19 @@ pub(crate) struct TextureBatchDialog {
     pub(crate) batch: TextureBatch,
     /// Also add the files that match no texture, as new textures.
     pub(crate) add_unmatched: bool,
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+fn count_textures(n: usize) -> String {
+    if n == 1 { "1 texture".to_string() } else { format!("{n} textures") }
+}
+
+/// "<file>.xml and N textures in <dir>".
+pub(crate) fn model_export_summary(report: &paleto_core::model_export::Report) -> String {
+    format!("{} and {} in {}", file_name(&report.xml), count_textures(report.textures), report.xml.parent().map_or_else(String::new, |p| p.display().to_string()))
 }
 
 impl App {
@@ -595,6 +619,69 @@ impl App {
                 }
             }
         });
+    }
+
+    /// The dialog after a model was exported: where it went, what is missing, and how to open it.
+    pub(crate) fn model_export_window(&mut self, ctx: &egui::Context) {
+        let Some(d) = &mut self.model_export else { return };
+        let program = &mut self.model_program;
+        let folder = d.report.xml.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut close = false;
+        let ((), closed) = crate::widgets::dialog_sized(ctx, "model-export", "Model exported", 520.0, false, |ui| {
+            let dark = ui.visuals().dark_mode;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{} and {} in", file_name(&d.report.xml), count_textures(d.report.textures)));
+                ui.label(RichText::new(folder.display().to_string()).weak().small());
+            });
+            if !d.report.missing.is_empty() {
+                let missing = &d.report.missing;
+                let shown = missing.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+                let more = if missing.len() > 5 { ", …" } else { "" };
+                let were = format!("{} {}", count_textures(missing.len()), if missing.len() == 1 { "was" } else { "were" });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("⚠").color(theme::warning(dark)));
+                    ui.label(format!("{were} not found: {shown}{more} (listed in {})", file_name(&d.report.note)));
+                })
+                .response
+                .on_hover_text(missing.join("\n"));
+            }
+            ui.add_space(6.0);
+            if ui.button("📂 Open folder").clicked() {
+                d.message = Some(paleto_core::launch::open_folder(&folder).map(|()| "Opened the folder".to_string()));
+            }
+            ui.add_space(6.0);
+            let mut enter = false;
+            ui.horizontal(|ui| {
+                ui.label("Open with");
+                let field = ui.add(egui::TextEdit::singleline(program).desired_width(ui.available_width() - 70.0).hint_text("a program and its arguments"));
+                enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let open = ui.add_enabled(!program.trim().is_empty(), egui::Button::new("Open")).on_disabled_hover_text("Enter a command line first");
+                if open.clicked() || (enter && !program.trim().is_empty()) {
+                    d.message = Some(paleto_core::launch::run_program(paleto_core::launch::Host::current(), program, &d.report.xml).map(|()| "Started".to_string()));
+                }
+            });
+            crate::widgets::hint(ui, "{file} is the exported .xml and {dir} its folder; without them the program starts with no file. In Blender, import the .xml with the Sollumz add-on.");
+            if program.trim().is_empty()
+                && let Some(blender) = &d.blender
+                && ui.button("Use Blender").on_hover_text(blender.as_str()).clicked()
+            {
+                *program = blender.clone();
+            }
+            match &d.message {
+                Some(Ok(note)) => crate::widgets::hint(ui, note.as_str()),
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e.as_str()).color(theme::error(dark)));
+                }
+                None => {}
+            }
+            ui.add_space(6.0);
+            if ui.add(crate::widgets::primary(ui, "Close")).clicked() {
+                close = true;
+            }
+        });
+        if closed || close {
+            self.model_export = None;
+        }
     }
 
     pub(crate) fn unsaved_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {

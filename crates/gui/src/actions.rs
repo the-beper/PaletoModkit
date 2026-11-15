@@ -1,7 +1,7 @@
 //! The actions of the window: what they mean for the state and the game's files, and the
 //! router that runs them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use paleto_core::texture_batch;
@@ -659,27 +659,19 @@ impl App {
                 let Some(p) = &self.preview else { return };
                 let Some(source) = p.model_source.clone() else { return };
                 let file = p.name.clone();
+                // The note goes wherever the export folder is shared: the model is named from its game folder, or by its file's
+                // name, never by the user's own folders.
+                let shown = |disk: &Path| self.game.as_ref().and_then(|g| disk.strip_prefix(&g.root).ok()).map_or_else(|| PathBuf::from(disk.file_name().unwrap_or_default()), Path::to_path_buf);
+                let from = match &p.source {
+                    PreviewSource::Archive(a) => format!("{}/{}", shown(&a.disk).display(), a.inner_str()),
+                    PreviewSource::Disk(path) => shown(path).display().to_string(),
+                };
                 let Some(dir) = dest.or_else(|| rfd::FileDialog::new().set_title("Export model to").pick_folder()) else { return };
+                let find_blender = self.model_program.trim().is_empty();
                 self.task = Some(Task::spawn("Exporting model", ctx, move || {
-                    let run = || -> Result<String, String> {
-                        let (stem, ext) = file.rsplit_once('.').ok_or_else(|| format!("{file}: not a model"))?;
-                        let export = paleto_formats::xml_export::export(&source.data, ext, stem, &source.dictionaries).map_err(|e| format!("{file}: {e}"))?;
-                        let (_, log) = vfs::write_into(&dir, "exporting a model", |out| {
-                            out.mkdir("")?;
-                            out.write(&format!("{file}.xml"), export.xml.as_bytes())?;
-                            // The textures go in a folder named after the model, where CodeWalker looks for them.
-                            let textures = paleto_formats::xml_export::texture_folder(stem);
-                            for (name, dds) in &export.textures {
-                                out.write(&format!("{textures}/{name}"), dds)?;
-                            }
-                            Ok(())
-                        })
-                        .map_err(|e| e.to_string())?;
-                        Ok(with_notes(format!("exported {file}.xml and {} textures to {}", export.textures.len(), dir.display()), &log))
-                    };
-                    match run() {
-                        Ok(message) => Outcome::Done { message, reload: None },
-                        Err(e) => Outcome::Failed(e),
+                    match paleto_core::model_export::export(&dir, &file, &from, &source.data, &source.dictionaries, &source.names) {
+                        Ok(report) => Outcome::ModelExported { report, blender: if find_blender { paleto_core::launch::find_blender(paleto_core::launch::Host::current()) } else { None } },
+                        Err(e) => Outcome::Failed(e.to_string()),
                     }
                 }));
             }

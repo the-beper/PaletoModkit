@@ -52,6 +52,8 @@ pub(crate) struct Preview {
 pub(crate) struct ModelSource {
     pub(crate) data: Vec<u8>,
     pub(crate) dictionaries: Vec<TextureDictionary>,
+    /// The file name of each of `dictionaries`, in the same order.
+    pub(crate) names: Vec<String>,
 }
 
 /// What loading a preview needs, taken from the app when it is asked for:
@@ -517,14 +519,14 @@ pub(crate) fn load_preview(req: PreviewRequest) -> Loaded {
         Ok(data) if partial.is_some() => (Content::Hex(data, partial), None),
         Ok(data) if is_ytd(name) => TextureDictionary::parse(&data).map_or_else(fail, |dict| (Content::Textures(dict), None)),
         Ok(data) if matches!(ext.as_str(), "ydr" | "yft" | "ydd") => {
-            let dictionaries = sibling_textures(&req);
+            let (names, dictionaries): (Vec<_>, Vec<_>) = sibling_textures(&req).into_iter().unzip();
             match paleto_formats::drawable::parse(&data, &ext, &dictionaries) {
-                Ok(drawables) => (Content::Model(drawables, Some(Arc::new(ModelSource { data, dictionaries }))), None),
+                Ok(drawables) => (Content::Model(drawables, Some(Arc::new(ModelSource { data, dictionaries, names }))), None),
                 Err(e) => fail(e),
             }
         }
         Ok(data) if ext == "ybn" => match paleto_formats::bounds::parse(&data) {
-            Ok(drawables) => (Content::Model(drawables, Some(Arc::new(ModelSource { data, dictionaries: Vec::new() }))), None),
+            Ok(drawables) => (Content::Model(drawables, Some(Arc::new(ModelSource { data, dictionaries: Vec::new(), names: Vec::new() }))), None),
             Err(e) => fail(e),
         },
         Ok(data) if ext == "ynv" => paleto_formats::navmesh::parse(&data).map_or_else(fail, |drawables| (Content::Model(drawables, None), None)),
@@ -566,7 +568,8 @@ pub(crate) fn load_preview(req: PreviewRequest) -> Loaded {
 /// it, then the ones its dictionary inherits from (up to vehshare.ytd).
 /// Tuning parts (in "<vehicle>_mods.rpf") use their vehicle's. A dictionary
 /// is `name.ytd`, `name+hi.ytd` (vehicles) or `name+hifr.ytd` (tuning parts).
-fn sibling_textures(req: &PreviewRequest) -> Vec<TextureDictionary> {
+/// Each comes with the name of its file.
+fn sibling_textures(req: &PreviewRequest) -> Vec<(String, TextureDictionary)> {
     let model = req.name.as_str();
     let stem = model.rsplit_once('.').map_or(model, |(s, _)| s).to_ascii_lowercase();
     let read_here = |name: &str| match &req.location {
@@ -591,14 +594,15 @@ fn sibling_textures(req: &PreviewRequest) -> Vec<TextureDictionary> {
             }
         }
     }
-    let shared = |name: &str| req.shared.place(name).and_then(|p| p.read(req.keys.as_deref()).ok());
-    let local = |name: &str| here(name).and_then(|file| read_here(&file));
+    let shared = |name: &str| req.shared.place(name).and_then(|p| p.read(req.keys.as_deref()).ok()).map(|data| (data, format!("{name}.ytd")));
+    let local = |name: &str| here(name).and_then(|file| Some((read_here(&file)?, file)));
     names
         .iter()
         .enumerate()
         .filter_map(|(i, name)| {
-            let data = if i < own { local(name).or_else(|| shared(name)) } else { shared(name).or_else(|| local(name)) };
-            TextureDictionary::parse(&data?).ok()
+            let found = if i < own { local(name).or_else(|| shared(name)) } else { shared(name).or_else(|| local(name)) };
+            let (data, file) = found?;
+            Some((file, TextureDictionary::parse(&data).ok()?))
         })
         .collect()
 }
@@ -699,6 +703,7 @@ mod tests {
             delay: std::time::Duration::ZERO,
         };
         let found = sibling_textures(&req);
-        assert!(found.iter().flat_map(|d| &d.textures).any(|t| t.name == "red_probe"));
+        assert!(found.iter().flat_map(|(_, d)| &d.textures).any(|t| t.name == "red_probe"));
+        assert_eq!(found.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["car_blower_a+hifr.ytd"]);
     }
 }

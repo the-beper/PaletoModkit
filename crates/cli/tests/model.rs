@@ -31,13 +31,16 @@ fn model_writes_codewalker_xml() {
     let dir = tempfile::tempdir().unwrap();
     let model = dir.path().join("prop_probe.ydr");
     std::fs::write(&model, empty_drawable()).unwrap();
-    let out = dir.path().join("out");
+    let out = dir.path().join("my exports");
     let run = paleto(dir.path()).arg("model").arg(&model).arg("-o").arg(&out).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     let xml = std::fs::read_to_string(out.join("prop_probe.ydr.xml")).unwrap();
     assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Drawable>\n"), "{xml}");
     assert!(xml.contains("<Name>prop_probe</Name>"), "{xml}");
     assert!(String::from_utf8_lossy(&run.stdout).contains("prop_probe.ydr.xml"));
+    // The note of the export says where the model came from and what was searched.
+    let note = std::fs::read_to_string(out.join("prop_probe.ydr.export.txt")).unwrap();
+    assert!(note.contains(&format!("Model: {}\n", model.display())) && note.contains("Texture dictionaries searched: none\n"), "{note}");
 }
 
 #[test]

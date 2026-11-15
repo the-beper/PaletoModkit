@@ -20,7 +20,7 @@ use crate::export_window::{self, ExportWindow};
 use crate::settings::Settings;
 use crate::task::Task;
 use crate::theme::{self, SystemTheme};
-use crate::dialogs::{AddonDialog, InstallDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, desktop_notify, install_summary};
+use crate::dialogs::{AddonDialog, InstallDialog, LegacyAdd, NameDialog, Outcome, TextureBatchDialog, TextureDialog, desktop_notify, install_summary, model_export_summary, ModelExportDialog};
 use crate::find::Find;
 use crate::browser::{AfterListing, Browser, FsEntry, HistoryMove, Listed, PendingListing, TreeRead, mark_changes};
 use crate::preview::{Loaded, Preview};
@@ -153,6 +153,10 @@ pub struct App {
     /// Confirming a change to the previewed textures, or completing it (name, format).
     pub(crate) texture_dialog: Option<TextureDialog>,
     pub(crate) texture_batch: Option<TextureBatchDialog>,
+    /// What an exported model came to, with the program to open it with.
+    pub(crate) model_export: Option<ModelExportDialog>,
+    /// The command line that opens an exported model (saved under its own key: the settings string cannot hold its characters).
+    pub(crate) model_program: String,
     /// The single selected file last seen, for the preview to follow.
     followed: Option<String>,
     /// Select this item once the running edit has reloaded the folder.
@@ -252,6 +256,8 @@ impl App {
             name_dialog: None,
             texture_dialog: None,
             texture_batch: None,
+            model_export: None,
+            model_program: String::new(),
             followed: None,
             select_after: None,
             task: None,
@@ -289,6 +295,7 @@ impl App {
         }
         self.favorites = favorites_window::decode(&storage.get_string("favorites").unwrap_or_default());
         self.recents = favorites_window::decode(&storage.get_string("recents").unwrap_or_default());
+        self.model_program = storage.get_string("model_program").unwrap_or_default();
     }
 
     // ---- API used by tests -------------------------------------------------
@@ -439,6 +446,7 @@ impl App {
     }
 
     pub fn cancel_dialogs(&mut self) {
+        self.model_export = None;
         self.confirm_delete = None;
         self.name_dialog = None;
         self.legacy_add = None;
@@ -592,6 +600,7 @@ impl App {
             || self.name_dialog.is_some()
             || self.texture_dialog.is_some()
             || self.texture_batch.is_some()
+            || self.model_export.is_some()
             || self.info.is_some()
             || self.mods_check.is_some()
             || self.script_hook.is_some()
@@ -827,6 +836,9 @@ impl App {
                     Outcome::Installed(Err((err, _))) => {
                         desktop_notify(&label, &format!("Installation failed: {err}"));
                     }
+                    Outcome::ModelExported { report, .. } => {
+                        desktop_notify(&label, &model_export_summary(report));
+                    }
                     Outcome::Failed(err) => {
                         desktop_notify(&label, &format!("Failed: {err}"));
                     }
@@ -868,6 +880,11 @@ impl App {
                         // The task may have changed what is shown (added packs, moved or deleted files).
                         None => self.refresh_then(after),
                     }
+                }
+                Outcome::ModelExported { report, blender } => {
+                    self.status = Status::Info(crate::export::with_notes(format!("exported {}", model_export_summary(&report)), &report.log));
+                    self.model_export = Some(ModelExportDialog { report, blender, message: None });
+                    self.refresh_then(AfterListing::default());
                 }
                 Outcome::Installed(result) => {
                     self.clear_tree();
@@ -1143,6 +1160,7 @@ impl eframe::App for App {
         self.texture_batch_window(&ctx, &mut actions);
         self.unsaved_window(&ctx, &mut actions);
         self.info_window(&ctx, &mut actions);
+        self.model_export_window(&ctx);
         let busy = self.busy();
         if let Some(request) = self.crash.as_mut().and_then(|w| w.show(&ctx, busy)) {
             actions.push(match request {
@@ -1265,6 +1283,7 @@ impl eframe::App for App {
         // The saved places survive a moved install by being relative to their game folder.
         storage.set_string("favorites", favorites_window::encode(&self.favorites));
         storage.set_string("recents", favorites_window::encode(&self.recents));
+        storage.set_string("model_program", self.model_program.clone());
     }
 }
 

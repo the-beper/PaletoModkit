@@ -116,7 +116,17 @@ Selecting a model (`.ydr`, `.yft`, `.ydd`) shows it in 3D, with its textures: it
 
 When a model names textures that none of those dictionaries holds, a warning above the view lists them and the surfaces that use them are drawn untextured. Some tuning parts are made so: the game has no better source for them either.
 
-**⬇ Export as XML…** (models and collision: `.ydr`, `.ydd`, `.yft`, `.ybn`) asks for a folder and writes the file as CodeWalker XML (`name.ydr.xml`, which Sollumz and CodeWalker import), with its textures as DDS files in a `name/` folder next to it, where CodeWalker looks for them. The command line does the same: [cli.md](cli.md#models).
+**⬇ Export as XML…** (models and collision: `.ydr`, `.ydd`, `.yft`, `.ybn`) asks for a folder and makes the model ready for CodeWalker, and for Blender with the Sollumz add-on:
+
+| File | What it is |
+| :--- | :--- |
+| `name.ydr.xml` | The model as CodeWalker XML |
+| `name/` | Its textures as DDS files: its own and those the viewer found in the dictionaries above, where CodeWalker and Sollumz look for them |
+| `name.ydr.export.txt` | A note: where the model and each texture came from, the dictionaries searched, and the textures found nowhere (a dictionary that only a `.ytyp` names is not searched) |
+
+The dialog that follows says what was written and what is missing, and opens the folder in the file manager, or opens the model in a program of your choice. **Open with** takes a command line, kept for next time: `{file}` stands for the `.xml` and `{dir}` for its folder (for example `kate {file}`); without them the program starts with no file. When Blender is installed and no program is set, **Use Blender** fills it in; import the `.xml` from inside Blender with Sollumz. In the Flatpak the folder opens through the desktop's portal, while starting a program needs the permission the prefix tweaks need too (`flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.the_beper.PaletoModkit`); without it the dialog says so. Neither CodeWalker nor Blender is needed for the export.
+
+[Sollumz](https://github.com/Sollumz/Sollumz) (Blender 4.0 or later) imports and exports the CodeWalker XML of `.ydr`, `.ydd`, `.yft`, `.ybn`, `.ytyp`, `.ycd` and, in part, `.ymap` files. Its documentation does not say whether it handles models of the Enhanced edition; it mentions Enhanced only for converting Legacy models with CodeWalker. The command line exports the same way: [cli.md](cli.md#models).
 
 The same viewer shows collision (`.ybn`) and navigation meshes (`.ynv`) as plain surfaces, without textures. A clip dictionary (`.ycd`) shows a read-only summary: each clip's name or hash, kind, start, end and rate, and each animation's frames, duration and bone tracks.
 

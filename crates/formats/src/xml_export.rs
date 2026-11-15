@@ -120,10 +120,21 @@ impl ShaderTable {
     }
 }
 
-/// Result of an export: the XML, and the DDS files it names (name, contents).
+/// Result of an export: the XML, the DDS files it names, and the textures it names that could not be found.
 pub struct Export {
     pub xml: String,
-    pub textures: Vec<(String, Vec<u8>)>,
+    pub textures: Vec<ExportedTexture>,
+    /// Textures the shaders name that neither the model nor the dictionaries searched hold, each once.
+    pub missing: Vec<String>,
+}
+
+/// A DDS file of an export.
+pub struct ExportedTexture {
+    /// The file name (`<texture>.dds`).
+    pub file: String,
+    pub dds: Vec<u8>,
+    /// Where it came from: the index of the dictionary searched that holds it, or none for the model's own.
+    pub dictionary: Option<usize>,
 }
 
 /// Exports a model (`.ydr`, `.ydd`, `.yft`) or collision (`.ybn`, without
@@ -133,7 +144,7 @@ pub struct Export {
 pub fn export(data: &[u8], extension: &str, name: &str, dictionaries: &[TextureDictionary]) -> Result<Export, Error> {
     let extension = extension.to_ascii_lowercase();
     if extension == "ybn" {
-        return Ok(Export { xml: crate::bounds_xml::export_ybn(data)?, textures: Vec::new() });
+        return Ok(Export { xml: crate::bounds_xml::export_ybn(data)?, textures: Vec::new(), missing: Vec::new() });
     }
     let res = Resource::parse(data)?;
     let names = Names::new();
@@ -149,25 +160,56 @@ pub fn export(data: &[u8], extension: &str, name: &str, dictionaries: &[TextureD
         "yft" => fragment::write(&res, &names)?,
         other => return Err(Error::Unsupported(format!(".{other} models"))),
     };
-    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut collected = Collected::default();
     for d in &drawables {
-        for tex in d.embedded.iter().flatten().map(|e| &e.texture) {
-            files.entry(tex.file_name(false)).or_insert_with(|| tex.to_dds());
+        let embedded: Vec<&Texture> = d.embedded.iter().flatten().map(|e| &e.texture).collect();
+        let named = d.shaders.iter().flat_map(|s| &s.params).filter_map(|p| match &p.value {
+            Value::Texture(Some(texture)) => Some(texture.as_str()),
+            _ => None,
+        });
+        collected.add(&embedded, named, dictionaries);
+    }
+    Ok(collected.into_export(xml))
+}
+
+/// The textures of an export, by file name, and those not found.
+#[derive(Default)]
+struct Collected {
+    files: BTreeMap<String, ExportedTexture>,
+    /// The names of the textures in `files`, lower case.
+    held: Vec<String>,
+    missing: Vec<String>,
+}
+
+impl Collected {
+    /// A drawable's own textures, then those its shaders name that it does not hold, from the first dictionary that does.
+    fn add<'a>(&mut self, embedded: &[&Texture], named: impl Iterator<Item = &'a str>, dictionaries: &[TextureDictionary]) {
+        for tex in embedded {
+            self.keep(tex, None);
         }
-        for shader in &d.shaders {
-            for param in &shader.params {
-                let Value::Texture(Some(texture)) = &param.value else { continue };
-                let embedded = d.embedded.iter().flatten().any(|e| e.texture.name.eq_ignore_ascii_case(texture));
-                if embedded {
-                    continue;
-                }
-                if let Some(tex) = dictionaries.iter().flat_map(|dict| &dict.textures).find(|t| t.name.eq_ignore_ascii_case(texture)) {
-                    files.entry(tex.file_name(false)).or_insert_with(|| tex.to_dds());
-                }
+        for texture in named {
+            if embedded.iter().any(|t| t.name.eq_ignore_ascii_case(texture)) {
+                continue;
+            }
+            let found = dictionaries.iter().enumerate().find_map(|(i, dict)| dict.textures.iter().find(|t| t.name.eq_ignore_ascii_case(texture)).map(|t| (i, t)));
+            match found {
+                Some((i, tex)) => self.keep(tex, Some(i)),
+                None if !self.missing.iter().any(|m| m.eq_ignore_ascii_case(texture)) => self.missing.push(texture.to_string()),
+                None => {}
             }
         }
     }
-    Ok(Export { xml, textures: files.into_iter().collect() })
+
+    fn keep(&mut self, tex: &Texture, dictionary: Option<usize>) {
+        self.files.entry(tex.file_name(false)).or_insert_with(|| ExportedTexture { file: tex.file_name(false), dds: tex.to_dds(), dictionary });
+        self.held.push(tex.name.to_ascii_lowercase());
+    }
+
+    /// The export, without the textures one drawable names and another holds: they were exported after all.
+    fn into_export(mut self, xml: String) -> Export {
+        self.missing.retain(|m| !self.held.contains(&m.to_ascii_lowercase()));
+        Export { xml, textures: self.files.into_values().collect(), missing: self.missing }
+    }
 }
 
 /// A drawable, as far as the XML needs it.
@@ -1224,6 +1266,30 @@ fn write(drawables: &[Drawable], dictionary: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn texture(name: &str) -> Texture {
+        Texture { name: name.into(), width: 4, height: 4, levels: 1, format: Format::Bgra8, srgb: false, faces: 1, data: vec![0; 64] }
+    }
+
+    #[test]
+    fn each_texture_says_where_it_came_from_and_the_missing_are_listed_once() {
+        let own = texture("body");
+        let dictionaries = [
+            TextureDictionary { enhanced: true, textures: vec![texture("Lights"), texture("body")], unsupported: 0 },
+            TextureDictionary { enhanced: true, textures: vec![texture("lights"), texture("vehicle_generic_glasswindows")], unsupported: 0 },
+        ];
+        let mut collected = Collected::default();
+        // The model's own texture wins over a dictionary's of the same name; the first dictionary that holds one gives it.
+        collected.add(&[&own], ["body", "lights", "vehicle_generic_glasswindows", "decals", "DECALS"].into_iter(), &dictionaries);
+        collected.add(&[], ["decals", "dirt", "wheel"].into_iter(), &dictionaries);
+        // One drawable names a texture that another holds: it is exported, so not missing.
+        let wheel = texture("Wheel");
+        collected.add(&[&wheel], std::iter::empty(), &dictionaries);
+        let export = collected.into_export(String::new());
+        let files: Vec<(&str, Option<usize>)> = export.textures.iter().map(|t| (t.file.as_str(), t.dictionary)).collect();
+        assert_eq!(files, [("Lights.dds", Some(0)), ("Wheel.dds", None), ("body.dds", None), ("vehicle_generic_glasswindows.dds", Some(1))]);
+        assert_eq!(export.missing, ["decals", "dirt"]);
+    }
 
     fn geometry(indices: Vec<u16>) -> Geometry {
         // Position, Colour0 (bytes) and TexCoord0: the layout bits 0, 4 and 6.

@@ -33,7 +33,7 @@ type Exported = (String, Vec<(String, Vec<u8>)>);
 
 fn export(ext: &str, data: &[u8], stem: &str) -> Result<Exported, String> {
     match ext {
-        "ydr" | "ydd" | "yft" | "ybn" => paleto_formats::xml_export::export(data, ext, stem, &[]).map(|e| (e.xml, e.textures)).map_err(|e| e.to_string()),
+        "ydr" | "ydd" | "yft" | "ybn" => paleto_formats::xml_export::export(data, ext, stem, &[]).map(|e| (e.xml, e.textures.into_iter().map(|t| (t.file, t.dds)).collect())).map_err(|e| e.to_string()),
         other => Err(format!("no exporter for .{other}")),
     }
 }

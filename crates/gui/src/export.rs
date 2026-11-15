@@ -23,6 +23,18 @@ impl App {
         self.apply(Action::ExportModel(Some(dest.to_path_buf())), ctx);
     }
 
+    /// Sets the command line that opens an exported model, as typing it into the export dialog does.
+    #[doc(hidden)]
+    pub fn set_model_program(&mut self, command: &str) {
+        self.model_program = command.to_string();
+    }
+
+    /// The command line that opens an exported model.
+    #[doc(hidden)]
+    pub fn model_program(&self) -> &str {
+        &self.model_program
+    }
+
     /// Replaces a sound of the previewed audio container with a WAV or MP3 file.
     pub fn replace_sound(&mut self, id: u32, file: &Path, ctx: &egui::Context) {
         self.apply(Action::ReplaceSound(id, Some(file.to_path_buf())), ctx);
