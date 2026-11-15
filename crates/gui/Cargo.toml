@@ -20,7 +20,7 @@ egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 egui_extras = { version = "0.37", features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pulseaudio = "0.3"
-rfd = "0.17"
+rfd = "0.18"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 raw-window-handle = "0.6"
