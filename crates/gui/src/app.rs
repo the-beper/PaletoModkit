@@ -996,7 +996,7 @@ impl eframe::App for App {
         }
         if !dropped.is_empty() {
             let (packages, files): (Vec<_>, Vec<_>) =
-                dropped.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv")));
+                dropped.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv") || e.eq_ignore_ascii_case("oivs")));
             if self.busy() {
                 self.status = Status::Error("Wait for the current operation to finish, then drop the files again.".into());
             } else if dialog {

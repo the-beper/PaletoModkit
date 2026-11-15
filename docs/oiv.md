@@ -26,6 +26,26 @@ Paleto Modkit follows OpenIV's package format 2.x (`<package version="2.x" targe
 
 A `<remove>` whose XPath matches nothing is not an error: the node was already gone. Other edits that find nothing to change are logged as warnings, and the installation goes on.
 
+## Super packages (`.oivs`)
+
+An `.oivs` file is a super package, made for [CodeWalker's OIV Package Installer](https://www.gta5-mods.com/tools/oiv-package-installer): one package with parts the user picks from. It is a zip with `super.xml` (`<superpackage version="1.x">`, or no version), `icon.png`, `content/` and `media/`. It is recognised by its manifest, not by the extension. Everything above (where changes go, the transaction, the limits, the log) applies to it too.
+
+| Element | What it does |
+| :--- | :--- |
+| `<modules>` → `<module id name required default>` | A part that is ticked or not. A `required` one is always installed; `default="true"` is ticked at first. |
+| `<groups>` → `<group type="single" title allowNone default>` → `<option id name>` | Exactly one option, or none when `allowNone` is set. A group that must have one starts on its first option when its `default` names none. Other group types are refused. |
+| `<description>` | Text shown for the module or option. |
+| `<media>` | Pictures of it: `<image src caption>`, or `<compare before after title>` (before and after). PNG files up to 32 MiB; the first 4 of an item are shown. |
+| `<install>` | The `<content>` blocks, with the same actions as in [Supported actions](#supported-actions), and `<folder source>`: every file under `content/<source>/` goes to the game folder at the same relative path (game data to `mods/`, as usual); an empty `source` adds nothing. Any other element is refused, where CodeWalker's installer skips it, so a package is never installed in part. |
+
+The chosen modules install in manifest order, then the chosen option of each group, so a later one replaces a file an earlier one adds.
+
+`<gameversion>` (`enhanced`/`gen9`, `legacy`/`gen8`) is read in `.oiv` packages too. If it does not match the game's edition, the GUI dialog and the CLI show a warning; the install is not refused.
+
+On the Enhanced edition, the count of Legacy files covers every part of the package, but only the chosen parts are converted.
+
+In the app, the install dialog lists the modules (checkboxes, required ones fixed) and the groups (radio buttons, with None when allowed), each with its description, and shows the pictures of the item last clicked or hovered (before and after side by side). **Install** stays disabled until something is chosen. From the command line, see [cli.md](cli.md).
+
 ## One install, one transaction
 
 An install holds the lock of the game for its whole run: a second change to the same game (another install, a snapshot, and so on) gets a "busy" message instead of mixing with it. The whole install is one journaled transaction, archives included:

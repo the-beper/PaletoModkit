@@ -1,5 +1,8 @@
 //! OpenIV packages (`.oiv`, format 2.x): a zip with `assembly.xml`, an
-//! optional `icon.png` and a `content/` folder.
+//! optional `icon.png` and a `content/` folder. Super packages (`.oivs`, made
+//! for CodeWalker's OIV Package Installer) have `super.xml` instead, whose
+//! modules and groups of options each hold the commands of an `assembly.xml`
+//! (see [`Choices`]), and pictures in `media/`.
 //!
 //! Installation always targets the mods folder for game data; the original
 //! game files are never modified.
@@ -17,7 +20,7 @@ use zip::ZipArchive;
 use crate::budget::{self, Budget, Limits, Scratch};
 use crate::convert;
 use crate::fsroot::{Dir, GameRoots, Resolved, RootKind};
-use crate::game::Game;
+use crate::game::{Edition, Game};
 use crate::relpath::RelPath;
 use crate::txn::{self, Staged, Txn, TxnFailure};
 use crate::text::{self, Condition, TextOp};
@@ -32,6 +35,8 @@ pub struct Metadata {
     pub version: String,
     pub author: String,
     pub description: String,
+    /// The edition the package says it is made for (`<gameversion>`), if it says.
+    pub game_version: Option<Edition>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,10 +55,68 @@ enum Command {
 pub struct Package {
     entries: Entries,
     pub metadata: Metadata,
+    /// What a super package lets the user choose; none for a plain one.
+    pub choices: Option<Choices>,
+    /// What [`Package::install`] runs: a super package's chosen parts (see [`Package::select`]).
     content: Vec<Command>,
     /// Content converted to the Enhanced format, by zip entry name (lower case),
     /// installed in place of the package's own.
     converted: HashMap<String, Converted>,
+}
+
+/// What a super package installs: the modules ticked, each of its own, and one option of each group. The
+/// modules come first in their order, then the groups', so a later one replaces a file an earlier one adds.
+#[derive(Debug, Clone, Default)]
+pub struct Choices {
+    pub modules: Vec<Module>,
+    pub groups: Vec<Group>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Module {
+    pub part: Part,
+    /// Always installed.
+    pub required: bool,
+    /// Ticked at first.
+    pub default: bool,
+}
+
+/// A choice of one option, or of none if `allow_none`.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub allow_none: bool,
+    /// The option chosen at first.
+    pub default: Option<usize>,
+    pub options: Vec<Part>,
+}
+
+/// A module or an option: what it is called, says and shows, and its commands.
+#[derive(Debug, Clone)]
+pub struct Part {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub media: Vec<Media>,
+    content: Vec<Command>,
+}
+
+/// A picture of a part, by its path in the package (read it with [`Package::media`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Media {
+    Image { src: String, caption: String },
+    /// The game before and after the part.
+    Compare { title: String, before: String, after: String },
+}
+
+/// What to install of a super package: whether each module is ticked and the option chosen in each group,
+/// in the package's order (required modules are installed whatever their flag says).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub modules: Vec<bool>,
+    pub groups: Vec<Option<usize>>,
 }
 
 /// Converted content: small files are held, an archive stays in a file (its folder already gone).
@@ -64,6 +127,9 @@ enum Converted {
 
 /// How many nodes `assembly.xml` may have (a legitimate one has a few thousand).
 const MAX_NODES: u32 = 2_000_000;
+
+/// The largest picture of a super package that is read: a 4096×4096 screenshot as a PNG (CodeWalker's packer makes them smaller).
+pub const MAX_MEDIA: u64 = 32 << 20;
 
 impl Package {
     pub fn open(path: &Path) -> Result<Self, Error> {
@@ -77,22 +143,33 @@ impl Package {
         budget::zip_precheck(&mut file, &limits)?;
         let zip = budget::zip_open(file).map_err(zip_err)?;
         let mut entries = Entries::new(zip, limits)?;
-        let assembly = entries.read("assembly.xml", limits.manifest)?;
+        let manifest = if entries.find("super.xml").is_ok() { "super.xml" } else { "assembly.xml" };
+        let (tag, major) = if manifest == "super.xml" { ("superpackage", "1.") } else { ("package", "2.") };
+        let assembly = entries.read(manifest, limits.manifest)?;
         let assembly = String::from_utf8_lossy(assembly.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&assembly)).into_owned();
         let options = roxmltree::ParsingOptions { nodes_limit: MAX_NODES, ..Default::default() };
-        let doc = roxmltree::Document::parse_with_options(&assembly, options).map_err(|e| Error::Package(format!("assembly.xml: {e}")))?;
+        let doc = roxmltree::Document::parse_with_options(&assembly, options).map_err(|e| Error::Package(format!("{manifest}: {e}")))?;
         let root = doc.root_element();
-        if !root.has_tag_name("package") {
-            return Err(Error::Package("assembly.xml: root is not <package>".into()));
+        if !root.has_tag_name(tag) {
+            return Err(Error::Package(format!("{manifest}: root is not <{tag}>")));
         }
         let format_version = root.attribute("version").unwrap_or("").to_string();
-        if !format_version.starts_with("2.") {
+        // A super package without a version is read too, as CodeWalker's installer reads it (that one reads any version).
+        if !format_version.starts_with(major) && !(tag == "superpackage" && format_version.is_empty()) {
             return Err(Error::Package(format!("unsupported package format {format_version}")));
         }
         if let Some(target) = root.attribute("target")
             && !target.eq_ignore_ascii_case("five") {
                 return Err(Error::Package(format!("package is for another game ({target})")));
             }
+        // Anywhere in the file, as CodeWalker's installer reads it.
+        let game_version = root.descendants().find(|n| n.is_element() && n.tag_name().name().eq_ignore_ascii_case("gameversion")).and_then(|n| {
+            match n.text().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+                "enhanced" | "gen9" => Some(Edition::Enhanced),
+                "legacy" | "gen8" => Some(Edition::Legacy),
+                _ => None,
+            }
+        });
 
         let meta = child(root, "metadata");
         let text_of = |path: &[&str]| -> String {
@@ -114,11 +191,41 @@ impl Package {
             version,
             author: text_of(&["author", "displayName"]),
             description: text_of(&["description"]),
+            game_version,
         };
 
+        if manifest == "super.xml" {
+            let choices = Choices::parse(root, &assembly, &entries)?;
+            let content = choices.content(&choices.default_selection())?;
+            return Ok(Package { entries, metadata, choices: Some(choices), content, converted: HashMap::new() });
+        }
         let content = child(root, "content").ok_or_else(|| Error::Package("assembly.xml: missing <content>".into()))?;
         let content = parse_commands(content, assembly.as_str())?;
-        Ok(Package { entries, metadata, content, converted: HashMap::new() })
+        Ok(Package { entries, metadata, choices: None, content, converted: HashMap::new() })
+    }
+
+    /// Chooses what a super package installs (at first, [`Choices::default_selection`]); before
+    /// [`Package::convert_legacy`] and [`Package::install`]. A plain package has nothing to choose.
+    pub fn select(&mut self, selection: &Selection) -> Result<(), Error> {
+        if let Some(choices) = &self.choices {
+            self.content = choices.content(selection)?;
+        }
+        Ok(())
+    }
+
+    /// A picture of a super package's [`Media`], by its path in the package; none if there is none or it is
+    /// over [`MAX_MEDIA`] (it is not read then).
+    pub fn media(&mut self, src: &str) -> Option<Vec<u8>> {
+        self.entries.fresh();
+        self.entries.read(src.trim_start_matches(['/', '\\']), MAX_MEDIA.min(self.entries.budget.limits().in_memory)).ok()
+    }
+
+    /// The width and height a picture of [`Package::media`] says it has, from its PNG header (nothing more is read); none
+    /// if there is none or it is not a PNG.
+    pub fn media_size(&mut self, src: &str) -> Option<(u32, u32)> {
+        let head = self.entries.head(src.trim_start_matches(['/', '\\']), 24).ok()?;
+        let be = |at: usize| u32::from_be_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+        (head.len() == 24 && head.starts_with(b"\x89PNG\r\n\x1a\n") && &head[12..16] == b"IHDR").then(|| (be(16), be(20)))
     }
 
     /// The package's picture; none if there is none or it is over the limit (it is not read then).
@@ -127,8 +234,8 @@ impl Package {
         self.entries.read("icon.png", self.entries.budget.limits().icon).ok()
     }
 
-    /// The `<add>` sources, at every level.
-    fn add_sources(&self) -> Vec<String> {
+    /// The `<add>` sources, at every level: of what is chosen, or with `all` of every part of a super package.
+    fn add_sources(&self, all: bool) -> Vec<String> {
         fn walk(cmds: &[Command], out: &mut Vec<String>) {
             for cmd in cmds {
                 match cmd {
@@ -140,6 +247,9 @@ impl Package {
         }
         let mut out = Vec::new();
         walk(&self.content, &mut out);
+        for part in self.choices.iter().filter(|_| all).flat_map(Choices::parts) {
+            walk(&part.content, &mut out);
+        }
         out.sort();
         out.dedup();
         out
@@ -147,11 +257,12 @@ impl Package {
 
     /// The package's files that the Enhanced game needs converted: models,
     /// textures and particles made for Legacy, loose or inside the archives it
-    /// adds ("dlc.rpf/x64/vehicles.rpf/car.yft"). Paths use '/' separators.
+    /// adds ("dlc.rpf/x64/vehicles.rpf/car.yft"), in every part of a super
+    /// package, chosen or not. Paths use '/' separators.
     pub fn legacy_files(&mut self, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
         self.entries.fresh();
         let mut found = Vec::new();
-        for source in self.add_sources() {
+        for source in self.add_sources(true) {
             let name = source.replace('\\', "/");
             let entry = content_path(&source);
             if name.to_ascii_lowercase().ends_with(".rpf") {
@@ -162,23 +273,23 @@ impl Package {
                 if let Ok(archive) = paleto_rpf::Archive::open(&disk, keys) {
                     found.extend(convert::legacy_in_archive(&archive, keys).into_iter().map(|p| format!("{name}/{p}")));
                 }
-            } else if convert::convertible(&name) && convert::needs_conversion(&name, &self.entries.head(&entry)?) {
+            } else if convert::convertible(&name) && convert::needs_conversion(&name, &self.entries.head(&entry, 16)?) {
                 found.push(name);
             }
         }
         Ok(found)
     }
 
-    /// Converts the package's Legacy files (see [`Package::legacy_files`])
-    /// with `tool`, so that [`Package::install`] installs the Enhanced ones.
-    /// Returns a log; files that cannot be converted are reported there and
-    /// installed as they are.
+    /// Converts the package's Legacy files (see [`Package::legacy_files`]) that
+    /// will be installed (of a super package, what is chosen) with `tool`, so
+    /// that [`Package::install`] installs the Enhanced ones. Returns a log;
+    /// files that cannot be converted are reported there and installed as they are.
     pub fn convert_legacy(&mut self, tool: &Path, keys: Option<&Keys>) -> Result<Vec<String>, Error> {
         self.entries.fresh();
         let in_memory = self.entries.budget.limits().in_memory;
         let mut log = Vec::new();
         let mut loose = Vec::new();
-        for source in self.add_sources() {
+        for source in self.add_sources(false) {
             let name = source.replace('\\', "/");
             let entry = content_path(&source).to_ascii_lowercase();
             if name.to_ascii_lowercase().ends_with(".rpf") {
@@ -199,7 +310,7 @@ impl Package {
                 if let Some((file, len)) = converted? {
                     self.converted.insert(entry, Converted::File(file, len));
                 }
-            } else if convert::convertible(&name) && convert::needs_conversion(&name, &self.entries.head(&entry)?) {
+            } else if convert::convertible(&name) && convert::needs_conversion(&name, &self.entries.head(&entry, 16)?) {
                 let data = self.entries.read(&entry, in_memory)?;
                 loose.push((name, entry, data));
             }
@@ -300,6 +411,129 @@ impl Package {
             }
         }
         Ok(())
+    }
+}
+
+impl Choices {
+    /// The `<modules>` and `<groups>` of `super.xml`.
+    fn parse(root: roxmltree::Node, src: &str, entries: &Entries) -> Result<Self, Error> {
+        let mut choices = Choices::default();
+        let mut folders = Folders::new(entries);
+        for m in child(root, "modules").into_iter().flat_map(|n| children(n, "module")) {
+            choices.modules.push(Module { part: Part::parse(m, src, &mut folders)?, required: flag(m, "required"), default: flag(m, "default") });
+        }
+        for g in child(root, "groups").into_iter().flat_map(|n| children(n, "group")) {
+            let kind = g.attribute("type").unwrap_or("single");
+            if !kind.eq_ignore_ascii_case("single") {
+                return Err(Error::Package(format!("super.xml: unsupported group type {kind}")));
+            }
+            let options = children(g, "option").map(|o| Part::parse(o, src, &mut folders)).collect::<Result<Vec<_>, _>>()?;
+            let allow_none = !g.attribute("allowNone").is_some_and(|v| v.eq_ignore_ascii_case("false"));
+            let named = g.attribute("default").filter(|d| !d.eq_ignore_ascii_case("none")).and_then(|d| options.iter().position(|o| o.id.eq_ignore_ascii_case(d)));
+            let default = named.or((!allow_none && !options.is_empty()).then_some(0));
+            choices.groups.push(Group { id: attr(g, "id"), title: attr(g, "title"), description: child_text(g, "description"), allow_none, default, options });
+        }
+        Ok(choices)
+    }
+
+    /// The required modules and those ticked at first, and each group's first option.
+    pub fn default_selection(&self) -> Selection {
+        Selection { modules: self.modules.iter().map(|m| m.required || m.default).collect(), groups: self.groups.iter().map(|g| g.default).collect() }
+    }
+
+    /// A selection from words, over the default one: `id` ticks a module, `-id` (or `!id`) unticks one, and
+    /// `group=option` or `group=none` chooses in a group; separated by commas. Ids ignore case. This is how
+    /// CodeWalker's installer takes `--select`.
+    pub fn parse_selection(&self, spec: &str) -> Result<Selection, Error> {
+        let mut sel = self.default_selection();
+        for token in spec.split([',', ';']).map(str::trim).filter(|t| !t.is_empty()) {
+            if let Some((group, option)) = token.split_once('=') {
+                let (group, option) = (group.trim(), option.trim());
+                let g = self.groups.iter().position(|g| g.id.eq_ignore_ascii_case(group)).ok_or_else(|| Error::Package(format!("the package has no group {group}")))?;
+                sel.groups[g] = if option.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    let found = self.groups[g].options.iter().position(|o| o.id.eq_ignore_ascii_case(option));
+                    Some(found.ok_or_else(|| Error::Package(format!("the group {group} has no option {option}")))?)
+                };
+            } else {
+                let (off, id) = token.strip_prefix(['-', '!']).map_or((false, token), |id| (true, id.trim()));
+                let m = self.modules.iter().position(|m| m.part.id.eq_ignore_ascii_case(id)).ok_or_else(|| Error::Package(format!("the package has no module {id}")))?;
+                if off && self.modules[m].required {
+                    return Err(Error::Package(format!("the module {id} is required")));
+                }
+                sel.modules[m] = !off;
+            }
+        }
+        self.content(&sel)?;
+        Ok(sel)
+    }
+
+    /// Whether `selection` installs anything at all.
+    pub fn installs_anything(&self, selection: &Selection) -> bool {
+        self.chosen(selection).is_ok_and(|parts| parts.iter().any(|p| !p.content.is_empty()))
+    }
+
+    /// The commands of what `selection` chooses, in the order they run.
+    fn content(&self, selection: &Selection) -> Result<Vec<Command>, Error> {
+        Ok(self.chosen(selection)?.into_iter().flat_map(|p| p.content.iter().cloned()).collect())
+    }
+
+    /// The parts `selection` chooses, in the order they run.
+    fn chosen(&self, selection: &Selection) -> Result<Vec<&Part>, Error> {
+        if selection.modules.len() != self.modules.len() || selection.groups.len() != self.groups.len() {
+            return Err(Error::Package("the selection is not one of this package".into()));
+        }
+        let mut parts: Vec<&Part> = self.modules.iter().zip(&selection.modules).filter(|(m, on)| **on || m.required).map(|(m, _)| &m.part).collect();
+        for (group, choice) in self.groups.iter().zip(&selection.groups) {
+            match choice {
+                Some(i) => parts.push(group.options.get(*i).ok_or_else(|| Error::Package(format!("the group {} has no option {}", group.id, i + 1)))?),
+                None if !group.allow_none && !group.options.is_empty() => return Err(Error::Package(format!("{} needs one of its options", group.label()))),
+                None => {}
+            }
+        }
+        Ok(parts)
+    }
+
+    /// Every module and option.
+    fn parts(&self) -> impl Iterator<Item = &Part> {
+        self.modules.iter().map(|m| &m.part).chain(self.groups.iter().flat_map(|g| &g.options))
+    }
+}
+
+impl Group {
+    /// What to call it: its title, else its id.
+    pub fn label(&self) -> &str {
+        if self.title.trim().is_empty() { &self.id } else { &self.title }
+    }
+}
+
+impl Part {
+    /// A `<module>` or an `<option>`: its `<install>` holds `<content>` blocks of commands and `<folder>`s, whose
+    /// files go to the game folder as they lie in the folder (after the blocks, as CodeWalker's installer does).
+    /// Anything else there is refused, where CodeWalker's installer skips it: a package is not installed in part.
+    fn parse(node: roxmltree::Node, src: &str, folders: &mut Folders) -> Result<Self, Error> {
+        let mut content = Vec::new();
+        let mut added = Vec::new();
+        for n in child(node, "install").into_iter().flat_map(|i| i.children().filter(|n| n.is_element())) {
+            match n.tag_name().name() {
+                "content" => content.extend(parse_commands(n, src)?),
+                "folder" => added.extend(folders.expand(n.attribute("source").unwrap_or_default())?),
+                other => return Err(Error::Package(format!("unknown install item <{other}>"))),
+            }
+        }
+        content.extend(added);
+        let media = child(node, "media").into_iter().flat_map(|m| m.children()).filter_map(|m| match m.tag_name().name() {
+            "image" => Some(Media::Image { src: attr(m, "src"), caption: attr(m, "caption") }),
+            "compare" => Some(Media::Compare { title: attr(m, "title"), before: attr(m, "before"), after: attr(m, "after") }),
+            _ => None,
+        });
+        Ok(Part { id: attr(node, "id"), name: attr(node, "name"), description: child_text(node, "description"), media: media.collect(), content })
+    }
+
+    /// What to call it: its name, else its id.
+    pub fn label(&self) -> &str {
+        if self.name.trim().is_empty() { &self.id } else { &self.name }
     }
 }
 
@@ -1007,6 +1241,23 @@ fn child<'a, 'i>(node: roxmltree::Node<'a, 'i>, name: &str) -> Option<roxmltree:
     node.children().find(|n| n.is_element() && n.tag_name().name().eq_ignore_ascii_case(name))
 }
 
+fn children<'a, 'i>(node: roxmltree::Node<'a, 'i>, name: &'static str) -> impl Iterator<Item = roxmltree::Node<'a, 'i>> {
+    node.children().filter(move |n| n.is_element() && n.tag_name().name().eq_ignore_ascii_case(name))
+}
+
+fn child_text(node: roxmltree::Node, name: &str) -> String {
+    child(node, name).and_then(|n| n.text()).unwrap_or("").trim().to_string()
+}
+
+fn attr(node: roxmltree::Node, name: &str) -> String {
+    node.attribute(name).unwrap_or("").to_string()
+}
+
+/// An attribute that is "true" in any case (`required="True"`).
+fn flag(node: roxmltree::Node, name: &str) -> bool {
+    node.attribute(name).is_some_and(|v| v.eq_ignore_ascii_case("true"))
+}
+
 fn content_path(source: &str) -> String {
     format!("content/{}", source.replace('\\', "/").trim_start_matches('/'))
 }
@@ -1043,6 +1294,43 @@ fn rewound(file: &File) -> io::Result<&File> {
 /// (packages made on Windows use both).
 fn normal(name: &str) -> String {
     name.replace('\\', "/").to_ascii_lowercase()
+}
+
+/// A super package's files, to expand its `<folder>`s with.
+struct Folders {
+    /// The zip's files by [`normal`] name, sorted, with the names as the zip spells them ('/' separators).
+    names: Vec<(String, String)>,
+    /// How many more files the package's folders may add, in all: a manifest naming one folder many times is not a way
+    /// past the limit on the files of a package.
+    left: u64,
+}
+
+impl Folders {
+    fn new(entries: &Entries) -> Self {
+        let mut names: Vec<(String, String)> = entries.zip.file_names().flatten().filter(|n| !n.ends_with(['/', '\\'])).map(|n| (normal(&n), n.replace('\\', "/"))).collect();
+        names.sort_unstable();
+        Folders { names, left: entries.budget.limits().entries }
+    }
+
+    /// A `<folder>`: an `<add>` of each file below `content/<source>/` to its path inside that folder, names as the zip spells
+    /// them. None for an empty source (not the whole of `content/`) or a folder with no files, as CodeWalker's installer takes them.
+    fn expand(&mut self, source: &str) -> Result<Vec<Command>, Error> {
+        if source.trim().trim_matches(['/', '\\']).is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefix = format!("{}/", normal(&content_path(source)).trim_end_matches('/'));
+        let start = self.names.partition_point(|(n, _)| n.as_str() < prefix.as_str());
+        let mut adds = Vec::new();
+        for (_, name) in self.names[start..].iter().take_while(|(n, _)| n.starts_with(&prefix)) {
+            if self.left == 0 {
+                return Err(Error::Package("the package's folders add more files than a package may hold".into()));
+            }
+            self.left -= 1;
+            // `normal` keeps the length of a name, so the prefix ends at the same byte in both.
+            adds.push(Command::Add { source: name["content/".len()..].to_string(), target: safe_path(name[prefix.len()..].to_string())? });
+        }
+        Ok(adds)
+    }
 }
 
 /// The package's zip, read within its limits: every read goes through the budget.
@@ -1087,10 +1375,10 @@ impl Entries {
     }
 
     /// The first bytes of an entry.
-    fn head(&mut self, name: &str) -> Result<Vec<u8>, Error> {
+    fn head(&mut self, name: &str, len: u64) -> Result<Vec<u8>, Error> {
         let index = self.find(name)?;
         let mut head = Vec::new();
-        self.zip.by_index(index).map_err(zip_err)?.take(16).read_to_end(&mut head)?;
+        self.zip.by_index(index).map_err(zip_err)?.take(len).read_to_end(&mut head)?;
         Ok(head)
     }
 

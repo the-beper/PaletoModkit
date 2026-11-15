@@ -29,7 +29,7 @@
 - View, export and replace textures (`.ytd`) from DDS or PNG; preview 3D models; play and replace sounds.
 
 **Install mods**
-- Install `.oiv` packages and add-on packs (`dlc.rpf`), with the DLC list updated for you.
+- Install `.oiv` and `.oivs` packages and add-on packs (`dlc.rpf`), with the DLC list updated for you.
 - On Enhanced, convert models and textures made for Legacy, built in (CodeWalker's converter, no Wine).
 - Export your own changes as an `.oiv`, to share them or reinstall them later.
 

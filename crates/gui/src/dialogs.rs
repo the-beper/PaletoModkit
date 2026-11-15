@@ -1,10 +1,11 @@
 //! The dialogs of the app window: installing packages and add-on packs, saving the previewed
 //! text, replacing textures, asking for a name, deleting.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, RichText};
-use paleto_core::oiv::Metadata;
+use paleto_core::oiv::{Choices, Media, Metadata, Part, Selection};
 use paleto_core::texture_batch::{self, TextureBatch};
 use paleto_core::{ArchivePath, Package};
 
@@ -15,7 +16,7 @@ use crate::textures::TextureEdit;
 use crate::actions::{Action, Unsaved};
 use crate::app::{App, Info, Status};
 use crate::menus::{about, format_combo, getting_started, shortcuts};
-use crate::preview::{PreviewSource, load_icon};
+use crate::preview::{PreviewSource, load_icon, load_picture};
 
 
 /// Add-on packs (dlc.rpf) dropped or chosen, to install into the mods folder.
@@ -45,6 +46,233 @@ pub(crate) struct InstallDialog {
     /// Convert them before installing.
     pub(crate) convert: bool,
     result: Option<InstallResult>,
+    /// What a super package lets the user choose (a copy: the package itself goes to the install task).
+    choices: Option<Choices>,
+    /// What is chosen of `choices`; empty for a plain package.
+    pub(crate) selection: Selection,
+    /// The module or option whose pictures are shown.
+    focus: Option<Focus>,
+    /// How wide the widest row of pictures of the package is for each point of its height (an image: its width over its
+    /// height; a comparison: both side by side); none if it has no pictures. The dialog is sized for it once, so that it
+    /// does not change size as the pointer moves over the parts.
+    widest: Option<f32>,
+    /// Decoded pictures by their path in the package; none for one that is missing or cannot be decoded.
+    pictures: HashMap<String, Option<egui::TextureHandle>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Module(usize),
+    /// An option of a group.
+    Option(usize, usize),
+}
+
+/// The longest side a picture of a package is kept at for display.
+const PICTURE_SIDE: u32 = 1024;
+
+/// The width of the list of choices beside the pictures.
+const LIST_WIDTH: f32 = 400.0;
+
+/// The most media items shown for one module or option (a comparison is two pictures, each decoded when first shown).
+const MAX_PICTURES: usize = 4;
+
+impl InstallDialog {
+    fn part(&self, focus: Focus) -> Option<&Part> {
+        let choices = self.choices.as_ref()?;
+        match focus {
+            Focus::Module(m) => choices.modules.get(m).map(|m| &m.part),
+            Focus::Option(g, o) => choices.groups.get(g)?.options.get(o),
+        }
+    }
+
+    /// The picture at `src`, read from the package and decoded the first time it is asked for under any spelling.
+    fn picture(&mut self, ctx: &egui::Context, src: &str) -> Option<egui::TextureHandle> {
+        // The package finds a name in any case and with either separator.
+        let key = src.replace('\\', "/").trim_start_matches('/').to_ascii_lowercase();
+        if !self.pictures.contains_key(&key) {
+            let png = self.package.as_mut()?.media(src);
+            let texture = png.and_then(|png| load_picture(ctx, &key, &png, PICTURE_SIDE));
+            self.pictures.insert(key.clone(), texture);
+        }
+        self.pictures[&key].clone()
+    }
+}
+
+/// The modules and groups of a super package to choose from, and the pictures of the one in focus beside them.
+fn choices_section(ui: &mut egui::Ui, d: &mut InstallDialog, height: f32) {
+    let spacing = ui.spacing().item_spacing.x;
+    let has_media = d.widest.is_some();
+    let list_width = if has_media { LIST_WIDTH } else { ui.available_width() };
+    let pictures_width = (ui.available_width() - list_width - spacing).max(0.0);
+    // Both columns keep the same height whatever is shown: a dialog that changed size would move the parts under the
+    // pointer, and hovering a part shows its pictures.
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(list_width);
+            if has_media {
+                ui.set_min_height(height);
+            }
+            egui::ScrollArea::vertical().id_salt("install-choices").max_height(height).show(ui, |ui| choices_list(ui, d));
+        });
+        if has_media {
+            ui.vertical(|ui| {
+                ui.set_width(pictures_width);
+                ui.set_min_height(height);
+                pictures(ui, d, height);
+            });
+        }
+    });
+}
+
+fn choices_list(ui: &mut egui::Ui, d: &mut InstallDialog) {
+    let (Some(choices), selection, focus) = (&d.choices, &mut d.selection, &mut d.focus) else { return };
+    for (m, module) in choices.modules.iter().enumerate() {
+        let part = &module.part;
+        let block = ui.vertical(|ui| {
+            let mut on = module.required || selection.modules[m];
+            let text = if module.required { format!("{} (required)", part.label()) } else { part.label().to_string() };
+            let response = ui.add_enabled(!module.required, egui::Checkbox::new(&mut on, text));
+            if response.changed() {
+                selection.modules[m] = on;
+            }
+            describe(ui, ("module", m), &part.description);
+            response
+        });
+        if !part.media.is_empty() && (block.inner.clicked() || block.response.contains_pointer()) {
+            *focus = Some(Focus::Module(m));
+        }
+        ui.add_space(4.0);
+    }
+    for (g, group) in choices.groups.iter().enumerate() {
+        ui.separator();
+        ui.label(RichText::new(group.label()).strong());
+        describe(ui, ("group", g), &group.description);
+        let none = group.allow_none.then_some(None).into_iter();
+        for (o, choice) in none.chain((0..group.options.len()).map(Some)).enumerate() {
+            let part = choice.map(|o| &group.options[o]);
+            let block = ui.vertical(|ui| {
+                let response = ui.radio_value(&mut selection.groups[g], choice, part.map_or("None", Part::label));
+                if let Some(part) = part {
+                    describe(ui, ("option", g, o), &part.description);
+                }
+                response
+            });
+            if let (Some(option), Some(part)) = (choice, part)
+                && !part.media.is_empty()
+                && (block.inner.clicked() || block.response.contains_pointer())
+            {
+                *focus = Some(Focus::Option(g, option));
+            }
+            ui.add_space(2.0);
+        }
+    }
+}
+
+/// A part's description under its control, a little indented.
+fn describe(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    ui.scope(|ui| {
+        ui.visuals_mut().indent_has_left_vline = false;
+        ui.indent(id, |ui| ui.label(RichText::new(text.trim()).weak()));
+    });
+}
+
+/// The pictures of the module or option in focus, each as large as the room allows: an image with its caption, a comparison
+/// as before and after side by side. `height` is the room for one row with its labels; more rows scroll.
+fn pictures(ui: &mut egui::Ui, d: &mut InstallDialog, height: f32) {
+    let Some(focus) = d.focus else { return };
+    let Some(part) = d.part(focus) else { return };
+    let (label, media) = (part.label().to_string(), part.media.clone());
+    let ctx = ui.ctx().clone();
+    // A row of text, and what follows each item (its spacing and the space after it), so that one item fits without scrolling.
+    let (row, trail) = (label_row(ui), ui.spacing().item_spacing.y + ITEM_GAP);
+    egui::ScrollArea::vertical().id_salt("install-pictures").max_height(height).show(ui, |ui| {
+        ui.label(RichText::new(label).strong());
+        let width = ui.available_width();
+        for item in media.iter().take(MAX_PICTURES) {
+            match item {
+                Media::Image { src, caption } => {
+                    let Some(texture) = d.picture(&ctx, src) else { continue };
+                    let captioned = !caption.trim().is_empty();
+                    show_picture(ui, &texture, egui::vec2(width, height - trail - row * if captioned { 2.0 } else { 1.0 }));
+                    if captioned {
+                        ui.label(RichText::new(caption.trim()).weak());
+                    }
+                }
+                Media::Compare { title, before, after } => {
+                    let shots = [("Before", d.picture(&ctx, before)), ("After", d.picture(&ctx, after))];
+                    if shots.iter().all(|(_, texture)| texture.is_none()) {
+                        continue;
+                    }
+                    let titled = !title.trim().is_empty();
+                    if titled {
+                        ui.label(title.trim());
+                    }
+                    let half = (width - ui.spacing().item_spacing.x) / 2.0;
+                    let room = egui::vec2(half, height - trail - row * if titled { 3.0 } else { 2.0 });
+                    ui.horizontal_top(|ui| {
+                        for (name, texture) in &shots {
+                            let Some(texture) = texture else { continue };
+                            ui.vertical(|ui| {
+                                ui.set_width(half);
+                                ui.label(RichText::new(*name).weak());
+                                show_picture(ui, texture, room);
+                            });
+                        }
+                    });
+                }
+            }
+            ui.add_space(ITEM_GAP);
+        }
+    });
+}
+
+/// The space after each picture item.
+const ITEM_GAP: f32 = 6.0;
+
+/// A picture as large as it fits in `room`, in the middle of its width.
+fn show_picture(ui: &mut egui::Ui, texture: &egui::TextureHandle, room: egui::Vec2) {
+    let size = fit(texture.size_vec2(), room);
+    ui.allocate_ui_with_layout(egui::vec2(room.x, size.y), egui::Layout::top_down(egui::Align::Center), |ui| ui.add(egui::Image::new(texture).fit_to_exact_size(size)));
+}
+
+/// A picture of `size` as large as it fits in `room`, keeping its shape.
+fn fit(size: egui::Vec2, room: egui::Vec2) -> egui::Vec2 {
+    size * (room.x / size.x).min(room.y / size.y).max(0.0)
+}
+
+/// The height of a line of text and the space after it.
+fn label_row(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y
+}
+
+/// See [`InstallDialog::widest`]. Read from the pictures' headers; one that says nothing counts as 16:9, and a picture
+/// counts as no narrower than 1:2 and no wider than 3:1, so that a strange one cannot squeeze the dialog.
+fn widest_row(package: &mut Package, choices: &Choices) -> f32 {
+    let mut shape = |src: &str| package.media_size(src).filter(|&(w, h)| w > 0 && h > 0).map_or(16.0 / 9.0, |(w, h)| (w as f32 / h as f32).clamp(0.5, 3.0));
+    let parts = choices.modules.iter().map(|m| &m.part).chain(choices.groups.iter().flat_map(|g| &g.options));
+    parts
+        .flat_map(|p| p.media.iter().take(MAX_PICTURES))
+        .map(|m| match m {
+            Media::Image { src, .. } => shape(src),
+            Media::Compare { before, after, .. } => shape(before) + shape(after),
+        })
+        .fold(0.5, f32::max)
+}
+
+/// The first module or option that has a picture.
+fn first_with_media(choices: &Choices) -> Option<Focus> {
+    let module = choices.modules.iter().position(|m| !m.part.media.is_empty()).map(Focus::Module);
+    module.or_else(|| choices.groups.iter().enumerate().find_map(|(g, group)| group.options.iter().position(|o| !o.media.is_empty()).map(|o| Focus::Option(g, o))))
+}
+
+fn edition_name(edition: paleto_core::Edition) -> &'static str {
+    match edition {
+        paleto_core::Edition::Legacy => "Legacy",
+        paleto_core::Edition::Enhanced => "Enhanced",
+    }
 }
 
 /// The log of an install, or why it failed and what it did and undid before.
@@ -91,7 +319,11 @@ impl App {
                     _ => Vec::new(),
                 };
                 let convert = paleto_core::convert::converter().is_some();
-                self.install = Some(InstallDialog { path: path.to_path_buf(), package: Some(package), metadata, icon, legacy, convert, result: None });
+                let choices = package.choices.clone();
+                let selection = choices.as_ref().map(Choices::default_selection).unwrap_or_default();
+                let focus = choices.as_ref().and_then(first_with_media);
+                let widest = choices.as_ref().filter(|_| focus.is_some()).map(|c| widest_row(&mut package, c));
+                self.install = Some(InstallDialog { path: path.to_path_buf(), package: Some(package), metadata, icon, legacy, convert, result: None, choices, selection, focus, widest, pictures: HashMap::new() });
             }
             Err(e) => self.status = Status::Error(format!("{}: {e}", path.display())),
         }
@@ -152,8 +384,19 @@ impl App {
             legacy: Vec::new(),
             convert: false,
             result: None,
+            choices: None,
+            selection: Selection::default(),
+            focus: None,
+            widest: None,
+            pictures: HashMap::new(),
         });
         dialog.result = Some(result);
+    }
+
+    /// What the install dialog has chosen of a super package, while it is open.
+    #[doc(hidden)]
+    pub fn install_selection(&self) -> Option<&Selection> {
+        self.install.as_ref().filter(|d| d.choices.is_some()).map(|d| &d.selection)
     }
 
     /// Shows this failed install as if it had just run, for the tests.
@@ -206,9 +449,20 @@ impl App {
         let busy = self.busy();
         let (game_ready, keys_ready, keys_pending) = (self.game.is_some(), self.keys.is_some(), self.keys_task.is_some());
         let can_convert = paleto_core::convert::converter().is_some();
+        let edition = self.game.as_ref().map(|g| g.edition);
         let Some(d) = &mut self.install else { return };
+        let screen = ctx.content_rect();
+        // The dialog keeps about this much for its header, description, notes and buttons; the rest may go to the pictures.
+        let picture_height = (screen.height() - 340.0).clamp(100.0, 540.0);
         egui::Modal::new(egui::Id::unique("install")).show(ctx, |ui| {
-            ui.set_width(520.0);
+            // A row of pictures with the part's name above and "Before"/"After" over a comparison.
+            let section_height = picture_height + 2.0 * label_row(ui);
+            let width = match (&d.choices, d.widest) {
+                (None, _) => 520.0,
+                (Some(_), None) => 560.0,
+                (Some(_), Some(widest)) => (LIST_WIDTH + 3.0 * ui.spacing().item_spacing.x + picture_height * widest).clamp(560.0, (screen.width() - 60.0).max(560.0)),
+            };
+            ui.set_width(width);
             ui.horizontal(|ui| {
                 if let Some(icon) = &d.icon {
                     ui.add(egui::Image::new(icon).fit_to_exact_size(egui::vec2(64.0, 64.0)));
@@ -229,11 +483,28 @@ impl App {
             ui.separator();
             match &d.result {
                 None => {
-                    egui::ScrollArea::vertical().max_height(crate::widgets::dialog_list_height(ui.ctx())).show(ui, |ui| {
+                    let list_height = crate::widgets::dialog_list_height(ui.ctx());
+                    let description_height = if d.choices.is_some() { list_height.min(80.0) } else { list_height };
+                    egui::ScrollArea::vertical().max_height(description_height).show(ui, |ui| {
                         ui.label(&d.metadata.description);
                     });
                     ui.separator();
+                    if d.choices.is_some() {
+                        ui.label(RichText::new("What to install").strong());
+                        choices_section(ui, d, if d.widest.is_some() { section_height } else { list_height + 40.0 });
+                        ui.separator();
+                    }
+                    let installs = d.choices.as_ref().is_none_or(|c| c.installs_anything(&d.selection));
                     crate::widgets::hint(ui, "Game data is installed into the mods folder; the original files are not modified.");
+                    if let (Some(made_for), Some(chosen)) = (d.metadata.game_version, edition)
+                        && made_for != chosen
+                    {
+                        let dark = ui.visuals().dark_mode;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("⚠").color(theme::warning(dark)));
+                            ui.label(format!("This package is made for GTA V {}; the chosen game is {}: it may crash.", edition_name(made_for), edition_name(chosen)));
+                        });
+                    }
                     if !d.legacy.is_empty() {
                         let dark = ui.visuals().dark_mode;
                         ui.horizontal_wrapped(|ui| {
@@ -283,7 +554,8 @@ impl App {
                                 actions.push(Action::CloseInstall);
                             }
                         } else {
-                            if ui.add(crate::widgets::primary(ui, "Install")).clicked() {
+                            let install = crate::widgets::primary(ui, "Install");
+                            if ui.add_enabled(installs, install).on_disabled_hover_text("Choose something to install").clicked() {
                                 actions.push(Action::Install);
                             }
                             if ui.button("Cancel").clicked() {
@@ -825,4 +1097,44 @@ pub(crate) fn desktop_notify(summary: &str, body: &str) {
             .stderr(std::process::Stdio::null())
             .status();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_picture_fills_its_room_and_keeps_its_shape() {
+        let wide = egui::vec2(1280.0, 720.0);
+        assert_eq!(fit(wide, egui::vec2(640.0, 1000.0)), egui::vec2(640.0, 360.0));
+        assert_eq!(fit(wide, egui::vec2(2000.0, 360.0)), egui::vec2(640.0, 360.0));
+        // Larger than it is, when there is room.
+        assert_eq!(fit(egui::vec2(100.0, 50.0), egui::vec2(400.0, 400.0)), egui::vec2(400.0, 200.0));
+    }
+
+    #[test]
+    fn the_dialog_is_as_wide_as_the_widest_row_of_pictures() {
+        use std::io::Write;
+        let png = |w: u32, h: u32| [b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".as_slice(), &w.to_be_bytes(), &h.to_be_bytes()].concat();
+        let package = |media: &str, files: &[(&str, Vec<u8>)]| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("p.oivs");
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let xml = format!(r#"<superpackage version="1.0"><modules><module id="m"><media>{media}</media></module><module id="n"><media><image src="media/wide.png"/></media></module></modules></superpackage>"#);
+            for (name, data) in [("super.xml", xml.as_bytes())].into_iter().chain(files.iter().map(|(n, d)| (*n, d.as_slice()))) {
+                zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(data).unwrap();
+            }
+            zip.finish().unwrap();
+            let mut package = Package::open(&path).unwrap();
+            let choices = package.choices.clone().unwrap();
+            widest_row(&mut package, &choices)
+        };
+        let wide = ("media/wide.png", png(1280, 720));
+        // A comparison of two squares is wider than one 16:9 picture.
+        assert_eq!(package(r#"<compare before="media/a.png" after="media/a.png"/>"#, &[wide.clone(), ("media/a.png", png(500, 500))]), 2.0);
+        // A picture that cannot be read counts as 16:9; a strange shape counts as at most 3:1.
+        assert_eq!(package(r#"<image src="media/gone.png"/>"#, std::slice::from_ref(&wide)), 1280.0 / 720.0);
+        assert_eq!(package(r#"<image src="media/line.png"/>"#, &[wide, ("media/line.png", png(10000, 1))]), 3.0);
+    }
 }

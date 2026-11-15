@@ -146,6 +146,10 @@ This writes `out/prop_x.ydr.xml`, and one DDS file per texture the model names i
 # Install an OIV package
 paleto install my-mod.oiv
 
+# Super package (.oivs): list its modules and groups, then choose
+paleto install pack.oivs --list
+paleto install pack.oivs --select "extra,-clouds,weather=rain"
+
 # Install an add-on pack: a dlc.rpf, or a mod's folder holding it, into
 # mods/update/x64/dlcpacks/<name>/ and the DLC list
 paleto install ~/Downloads/SuperCar
@@ -228,7 +232,7 @@ See [troubleshooting.md](troubleshooting.md) for what these find.
 | `mv PATH NEW_NAME` | Rename a file or folder inside an archive |
 | `mkdir PATH` | Create a folder (and missing parents) inside an archive |
 | `new PATH` | Create a new, empty archive |
-| `install PACKAGE [--name NAME] [--no-convert]` | Install an OIV package or an add-on pack |
+| `install PACKAGE [--name NAME] [--no-convert] [--select CHOICES] [--list]` | Install an OIV package, an `.oivs` super package or an add-on pack. For `.oivs` only: `--select` chooses its parts (the syntax of CodeWalker's installer, see `--help`), `--list` shows them and installs nothing |
 | `convert [FILES…] [-o DIR] [--no-backup] [--undo [TIME]]` | Convert Legacy files to the Enhanced format, or undo a conversion |
 | `export [OUTPUT] [--only TEXT…] [--name] [--version] [--author]` | Make an OIV package of the mods folder's changes |
 | `crash [DUMP]` | Read the game's last crash |

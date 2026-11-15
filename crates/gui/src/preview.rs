@@ -127,7 +127,7 @@ impl App {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if path.is_dir() {
             self.go(Location::Folder(path));
-        } else if ext == "oiv" {
+        } else if ext == "oiv" || ext == "oivs" {
             self.open_package(&path, ctx);
         } else if ext == "rpf" {
             self.open(ArchivePath::new(path));
@@ -656,6 +656,25 @@ pub(crate) fn load_icon(ctx: &egui::Context, png: &[u8]) -> Option<egui::Texture
     let size = [img.width() as usize, img.height() as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
     Some(ctx.load_texture("package-icon", color, Default::default()))
+}
+
+/// A screenshot of a super package: decoded within bigger limits than an icon, then shrunk so that no side is over `max_side`
+/// (the texture stays small).
+pub(crate) fn load_picture(ctx: &egui::Context, name: &str, png: &[u8], max_side: u32) -> Option<egui::TextureHandle> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(192 << 20);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    reader.limits(limits);
+    let mut img = reader.decode().ok()?;
+    if img.width() > max_side || img.height() > max_side {
+        img = img.resize(max_side, max_side, image::imageops::FilterType::Triangle);
+    }
+    let img = img.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    Some(ctx.load_texture(name, color, egui::TextureOptions::LINEAR))
 }
 
 pub(crate) fn extension(name: &str) -> String {

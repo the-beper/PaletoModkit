@@ -4,6 +4,7 @@
     <comment>OpenIV mod package</comment>
     <sub-class-of type="application/zip"/>
     <glob pattern="*.oiv"/>
+    <glob pattern="*.oivs"/>
     <generic-icon name="package-x-generic"/>
   </mime-type>
   <mime-type type="application/x-rage-package">

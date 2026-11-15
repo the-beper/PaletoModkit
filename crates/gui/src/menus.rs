@@ -190,7 +190,7 @@ impl App {
                     let install = egui::Button::new(RichText::new(label).color(selection.stroke.color)).fill(selection.bg_fill);
                     // Short on a narrow window, where it saves room.
                     let width = if narrow { 0.0 } else { right_width(ui) };
-                    if crate::widgets::bar_button(ui, install, width).on_hover_text("Install an OpenIV package (.oiv) or an add-on pack (dlc.rpf) into the mods folder").clicked() {
+                    if crate::widgets::bar_button(ui, install, width).on_hover_text("Install an OpenIV package (.oiv, .oivs) or an add-on pack (dlc.rpf) into the mods folder").clicked() {
                         actions.push(Action::PickPackage);
                     }
                 }
@@ -462,10 +462,10 @@ impl App {
             ),
             Some(folder) => {
                 let name = folder.inner.last().cloned().unwrap_or_else(|| folder.disk.file_name().unwrap_or_default().to_string_lossy().into_owned());
-                (format!("Add to {name}"), "Files are added to this archive folder; .oiv packages open the installer.".to_string())
+                (format!("Add to {name}"), "Files are added to this archive folder; .oiv and .oivs packages open the installer.".to_string())
             }
             None => (
-                "Install an .oiv package".to_string(),
+                "Install an .oiv or .oivs package".to_string(),
                 "To add other files, first open a folder inside an archive (.rpf).".to_string(),
             ),
         };
@@ -596,7 +596,7 @@ pub(crate) fn getting_started(ui: &mut egui::Ui) {
         ui,
         "4. Install mods",
         &[
-            "Install .oiv packages with Install package… (top right) or by dropping them on the window; add-on packs (dlc.rpf) \
+            "Install .oiv and .oivs packages with Install package… (top right) or by dropping them on the window; add-on packs (dlc.rpf) \
              the same way. Game data goes to the mods folder, plugins and scripts to the game folder.",
             "On the Enhanced edition, files made for Legacy are found and can be converted while they are installed.",
             "Prefix tweaks (beside Install) prepares the game's Wine prefix for ScriptHookVDotNet mods: it installs .NET Framework 4.8, \
