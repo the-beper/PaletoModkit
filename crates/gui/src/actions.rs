@@ -378,7 +378,7 @@ impl App {
                 }
             }
             Action::PickPackage => {
-                let dialog = rfd::FileDialog::new().add_filter("Mod package (.oiv, dlc.rpf)", &["oiv", "rpf"]).set_title("Install a package or an add-on pack");
+                let dialog = rfd::FileDialog::new().add_filter("Mod package (.oiv, .oivs, dlc.rpf)", &["oiv", "oivs", "rpf"]).set_title("Install a package or an add-on pack");
                 if let Some(path) = dialog.pick_file() {
                     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rpf")) {
                         let packs = paleto_core::addon::find_packs(std::slice::from_ref(&path), self.keys.as_deref());
@@ -397,8 +397,12 @@ impl App {
                 let Some(mut package) = dialog.package.take() else { return };
                 let (game, keys) = (game.clone(), keys.clone());
                 let tool = (dialog.convert && !dialog.legacy.is_empty()).then(paleto_core::convert::converter).flatten();
+                let selection = dialog.selection.clone();
                 self.task = Some(Task::spawn(format!("Installing {}", dialog.metadata.name), ctx, move || {
                     let mut log = Vec::new();
+                    if let Err(e) = package.select(&selection) {
+                        return Outcome::Installed(Err(install_failure(&e, log)));
+                    }
                     if let Some(tool) = &tool {
                         match package.convert_legacy(tool, Some(&keys)) {
                             Ok(converted) => log = converted,

@@ -23,7 +23,7 @@ How to browse the game files and change them with the desktop app. For installin
 
 ![The game folder](../screenshots/game-folder.png)
 
-- **Menu bar**: File, Game, Tools, View and Help. The filter box sits in the middle. At the right end, **Install package…** is the one place for `.oiv` packages and add-on packs (`dlc.rpf`), with **Prefix tweaks…** beside it (the game's Wine prefix, for ScriptHookVDotNet mods; see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). Neither has a menu entry. [Menus at a glance](#menus-at-a-glance) lists what each menu holds.
+- **Menu bar**: File, Game, Tools, View and Help. The filter box sits in the middle. At the right end, **Install package…** is the one place for `.oiv` and `.oivs` packages and add-on packs (`dlc.rpf`), with **Prefix tweaks…** beside it (the game's Wine prefix, for ScriptHookVDotNet mods; see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). Neither has a menu entry. [Menus at a glance](#menus-at-a-glance) lists what each menu holds.
 - **Location bar**: back, forward and up buttons, then the path as clickable parts. Inside the mods copy of an archive, the path shows **MODS**, and **Show original** at the right end shows the game's own archive instead (marked **ORIGINAL**; **Show mods copy** goes back). This lasts until you leave that archive.
 - **Side tree**: the game folder. Click a name to open it, its arrow to expand it. **Expand all** and **Collapse all** are above it. **View → Side tree** hides it when you want the room for the file list.
 - **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it, and again to reverse the order.
@@ -49,7 +49,7 @@ Double-click an archive (`.rpf`), or select it and press **Enter**, to open it l
 
 ![Typing filters the list](../screenshots/4-type-to-search.png)
 
-**File → Open archive…** opens an archive outside the game folder, for example one that came with a mod. You can also open `.rpf` and `.oiv` files from your file manager.
+**File → Open archive…** opens an archive outside the game folder, for example one that came with a mod. You can also open `.rpf`, `.oiv` and `.oivs` files from your file manager.
 
 ## Editing archives
 
@@ -162,7 +162,7 @@ Dropping on the window:
 
 - files and folders: added to the open archive folder;
 - DDS or PNG files on an open texture dictionary: they replace the textures they are named after;
-- an `.oiv` package: opens the installer;
+- an `.oiv` or `.oivs` package: opens the installer;
 - a `dlc.rpf`, or a mod's folder holding one: installs it as an add-on pack (see [mods.md](mods.md#add-on-packs)).
 
 ## Hash generator

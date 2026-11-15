@@ -35,6 +35,8 @@ mod link_matrix_tests;
 #[cfg(test)]
 mod oiv_txn_tests;
 #[cfg(test)]
+mod oivs_tests;
+#[cfg(test)]
 mod write_safety_tests;
 
 pub use game::{Edition, Game};

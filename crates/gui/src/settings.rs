@@ -194,7 +194,7 @@ impl FileClass {
     pub fn of(name: &str) -> Self {
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
         match ext.as_str() {
-            "rpf" | "oiv" => Self::Archive,
+            "rpf" | "oiv" | "oivs" => Self::Archive,
             "ytd" | "dds" | "png" | "jpg" | "jpeg" | "bmp" | "gfx" => Self::Texture,
             "ydr" | "ydd" | "yft" | "ybn" | "ynv" | "ycd" | "ypt" | "ymf" => Self::Model,
             "ymap" | "ytyp" | "ynd" | "ymt" => Self::Map,

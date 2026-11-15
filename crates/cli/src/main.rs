@@ -161,10 +161,11 @@ enum Command {
     Mkdir { path: String },
     /// Create a new, empty archive.
     New { path: PathBuf },
-    /// Install an OIV package into the mods folder, or an add-on pack: a
-    /// dlc.rpf (or a folder holding them) goes to update/x64/dlcpacks/<name>/
-    /// and into the DLC list. For the Enhanced edition, files made for Legacy
-    /// are converted first (when paleto-cwconv is installed).
+    /// Install an OIV package (.oiv, or a super package .oivs) into the mods
+    /// folder, or an add-on pack: a dlc.rpf (or a folder holding them) goes to
+    /// update/x64/dlcpacks/<name>/ and into the DLC list. For the Enhanced
+    /// edition, files made for Legacy are converted first (when paleto-cwconv
+    /// is installed).
     Install {
         package: PathBuf,
         /// Install files made for Legacy as they are.
@@ -173,6 +174,14 @@ enum Command {
         /// The add-on pack's name (by default its folder's, or the one in its setup2.xml).
         #[arg(long)]
         name: Option<String>,
+        /// What to install of a super package, over what it ticks itself:
+        /// MODULE ticks a module, -MODULE unticks one, GROUP=OPTION or
+        /// GROUP=none chooses in a group. Example: "visuals,-sfx,alt=both".
+        #[arg(long, value_name = "CHOICES", allow_hyphen_values = true)]
+        select: Option<String>,
+        /// Show what a super package offers and what would be installed; install nothing.
+        #[arg(long)]
+        list: bool,
     },
     /// Convert Legacy models, textures and particles to the Enhanced format
     /// (with CodeWalker's converter, paleto-cwconv). Without files: every such
@@ -823,8 +832,9 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Install { package, no_convert, name } if !package.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv")) => {
+        Command::Install { package, no_convert, name, select, list } if !package.extension().is_some_and(|e| e.eq_ignore_ascii_case("oiv") || e.eq_ignore_ascii_case("oivs")) => {
             use paleto_core::addon;
+            anyhow::ensure!(select.is_none() && !list, "--select and --list are for super packages (.oivs)");
             let game = find_game(cli.game.as_deref(), None)?;
             let keys = game.keys()?;
             let packs = addon::find_packs(std::slice::from_ref(&package), Some(&keys));
@@ -839,12 +849,29 @@ fn main() -> Result<()> {
                 println!("  {line}");
             }
         }
-        Command::Install { package, no_convert, .. } => {
-            let game = find_game(cli.game.as_deref(), None)?;
-            let keys = game.keys()?;
+        Command::Install { package, no_convert, select, list, .. } => {
             let mut pkg = Package::open(&package).with_context(|| format!("opening {}", package.display()))?;
             let m = &pkg.metadata;
-            println!("{} {} by {} (OIV {})", m.name, m.version, m.author, m.format_version);
+            println!("{} {} by {} ({} {})", m.name, m.version, m.author, if pkg.choices.is_some() { "OIVS" } else { "OIV" }, m.format_version);
+            match pkg.choices.clone() {
+                Some(choices) => {
+                    let selection = choices.parse_selection(select.as_deref().unwrap_or_default())?;
+                    print_choices(&choices, &selection);
+                    if list {
+                        return Ok(());
+                    }
+                    anyhow::ensure!(choices.installs_anything(&selection), "nothing is chosen: choose with --select (the ids above)");
+                    pkg.select(&selection)?;
+                }
+                None => anyhow::ensure!(select.is_none() && !list, "--select and --list are for super packages (.oivs)"),
+            }
+            let game = find_game(cli.game.as_deref(), None)?;
+            let keys = game.keys()?;
+            if let Some(made) = pkg.metadata.game_version
+                && made != game.edition
+            {
+                println!("! the package is made for GTA V {made:?}, the game is {:?}: it may crash on it", game.edition);
+            }
             if game.edition == paleto_core::Edition::Enhanced {
                 let legacy = pkg.legacy_files(Some(&keys))?;
                 if !legacy.is_empty() {
@@ -1268,6 +1295,26 @@ fn write_file(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// What a super package offers, marked as `selection` chooses it, with the ids `--select` takes.
+fn print_choices(choices: &paleto_core::oiv::Choices, selection: &paleto_core::oiv::Selection) {
+    let mark = |on: bool, mark: char| if on { mark } else { ' ' };
+    if !choices.modules.is_empty() {
+        println!("modules:");
+    }
+    for (m, &on) in choices.modules.iter().zip(&selection.modules) {
+        println!("  [{}] {:<20} {}{}", mark(on || m.required, 'x'), m.part.id, m.part.label(), if m.required { " (required)" } else { "" });
+    }
+    for (g, &choice) in choices.groups.iter().zip(&selection.groups) {
+        println!("group {} ({}):", g.id, g.label());
+        if g.allow_none {
+            println!("  ({}) none", mark(choice.is_none(), '*'));
+        }
+        for (i, o) in g.options.iter().enumerate() {
+            println!("  ({}) {:<20} {}", mark(choice == Some(i), '*'), o.id, o.label());
+        }
+    }
+}
+
 /// What the writer noted when it finished (a backup it could not remove).
 fn show_notes(log: Vec<String>) {
     for line in log {
@@ -1417,7 +1464,7 @@ fn changes_game(command: &Command) -> Option<Option<PathBuf>> {
         }
         Command::Xml { path, import: Some(_), .. } | Command::Text { path, import: Some(_), .. } => inside(path),
         Command::Audio { path, replace, .. } if !replace.is_empty() => inside(path),
-        Command::Install { .. } | Command::Clean { delete: true } => Some(None),
+        Command::Install { list: false, .. } | Command::Clean { delete: true } => Some(None),
         Command::Hunt { action } if !matches!(action, None | Some(HuntAction::Status)) => Some(None),
         Command::Snapshot { action: Some(SnapshotAction::Save { .. } | SnapshotAction::Restore { .. } | SnapshotAction::Delete { .. }) } => Some(None),
         Command::Convert { undo: Some(_), .. } => Some(None),

@@ -36,6 +36,8 @@ The installer shows the package's name, version, author and description before a
 
 Paleto Modkit supports OIV format 2.x: adding and deleting files, nested archives, text edits, XPath edits of XML files and of binary metadata, and archive defragmentation. [oiv.md](oiv.md) lists what each action does.
 
+An `.oivs` super package (made for CodeWalker's OIV Package Installer) is opened the same way. Its installer lists the parts to pick from; see [oiv.md](oiv.md#super-packages-oivs).
+
 On the Enhanced edition, files made for Legacy in the package are noticed before installing, and can be converted while installing (see [below](#legacy-files-on-the-enhanced-edition)).
 
 ## Add-on packs
