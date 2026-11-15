@@ -68,9 +68,58 @@ fn row(offset: usize, bytes: &[u8], per_row: usize) -> (String, String) {
     (format!("{offset:08X}  "), format!("{hex} {ascii}"))
 }
 
+/// Two buffers side by side for the comparison window: `rows` rows from the one holding byte `around`, each with the offset, then `a` and `b` in hex.
+/// A byte that differs from the other buffer's (or has none there) is tinted; a byte past the end of its buffer is blank.
+pub fn compare(ui: &mut egui::Ui, a: &[u8], b: &[u8], around: usize, rows: usize) {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let (weak, strong) = (ui.visuals().weak_text_color(), ui.visuals().text_color());
+    let dark = ui.visuals().dark_mode;
+    let char_width = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    // Offset, two buffers of 3 characters per byte and a gap in the middle of each.
+    let per_row = if char_width * (10 + 2 * (3 * PER_ROW + 2) + 2) as f32 <= ui.available_width() { PER_ROW } else { PER_ROW / 2 };
+    let first = around / per_row * per_row;
+    let tints = [crate::theme::error(dark).gamma_multiply(0.35), crate::theme::ok(dark).gamma_multiply(0.35)];
+    for offset in (first..a.len().max(b.len())).step_by(per_row).take(rows) {
+        let mut job = LayoutJob::default();
+        job.append(&format!("{offset:08X}  "), 0.0, egui::TextFormat::simple(font.clone(), weak));
+        for (buffer, other, tint) in [(a, b, tints[0]), (b, a, tints[1])] {
+            for i in 0..per_row {
+                if i == 8 {
+                    job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), strong));
+                }
+                let (cell, differs) = hex_cell(buffer, other, offset + i);
+                let mut format = egui::TextFormat::simple(font.clone(), strong);
+                if differs {
+                    format.background = tint;
+                }
+                job.append(&cell, 0.0, format);
+                job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), strong));
+            }
+            job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), strong));
+        }
+        ui.add(egui::Label::new(job).extend());
+    }
+}
+
+/// The byte of `buffer` at `at` in hex (blank past its end), and whether it differs from `other`'s there.
+fn hex_cell(buffer: &[u8], other: &[u8], at: usize) -> (String, bool) {
+    match buffer.get(at) {
+        Some(byte) => (format!("{byte:02X}"), other.get(at) != Some(byte)),
+        None => ("  ".into(), false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compared_cells_mark_differences_and_blank_the_missing() {
+        assert_eq!(hex_cell(&[1, 0xAB], &[1, 0xAC], 0), ("01".to_string(), false));
+        assert_eq!(hex_cell(&[1, 0xAB], &[1, 0xAC], 1), ("AB".to_string(), true));
+        assert_eq!(hex_cell(&[1, 0xAB], &[1], 1), ("AB".to_string(), true));
+        assert_eq!(hex_cell(&[1], &[1, 0xAB], 1), ("  ".to_string(), false));
+    }
 
     #[test]
     fn rows_pad_the_hex_and_dot_the_unprintable() {

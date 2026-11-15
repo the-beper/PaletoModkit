@@ -7,6 +7,7 @@ pub mod convert;
 pub mod crash_hunt;
 pub mod crash_report;
 pub mod diagnosis;
+pub mod diff;
 pub mod export;
 #[macro_use]
 pub mod fsroot;

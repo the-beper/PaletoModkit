@@ -41,6 +41,18 @@ Paleto Modkit finds the games installed in your Steam libraries. **Game → Choo
 | **Plain name** | **Original**: an untouched game file. **Show original** in the location bar shows one archive's original; **View → Show original files (ignore mods folder)** shows the originals everywhere, ignoring the mods folder. |
 | **Icon colour** | **File type**: folders, archives, textures, models, maps, audio, executables and text each have their own colour. **View → Coloured icons** turns them off. |
 
+## Comparing with the original
+
+Selecting a file of the mods folder (inside a mods copy of an archive, or a loose one) shows **⬌ Compare with original** in the preview's toolbar. It opens a window that compares the file with the game's own, read-only:
+
+| File | How it is compared |
+| :--- | :--- |
+| Text | Line by line, **Unified** or **Side by side**, with three unchanged lines around each change; a difference only in line endings is said so |
+| XML, and binary metadata shown as XML | The same, once the formatting is set aside (indentation, attribute order, the declaration): a file only formatted differently is reported as having the same content. Text inside an element counts. Names one side knows and the other shows as a hash are shared first |
+| Anything else (`.ycd` too) | Sizes, SHA-256, and the stretches that differ; **Previous** and **Next** show each in the two files side by side, byte by byte |
+
+A file the game has no original of (one the mods add, or an add-on pack's) is reported as added. Files over 256 MiB are compared by size and stored bytes only. The command line does the same: `paleto diff` ([cli.md](cli.md#archives)).
+
 ## Browsing
 
 Double-click an archive (`.rpf`), or select it and press **Enter**, to open it like a folder. Archives inside archives open the same way, as deep as they go.
