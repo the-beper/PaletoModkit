@@ -3,9 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use paleto_core::ArchivePath;
+use paleto_modkit::app::Info;
 use paleto_modkit::{App, Location};
 use paleto_rpf::ArchiveEditor;
 
@@ -76,6 +78,20 @@ fn click_compare(harness: &mut Harness<'_, App>) {
 
 fn has_compare_button(harness: &Harness<'_, App>) -> bool {
     harness.query_by_label("⬌ Compare with original").is_some() || harness.query_by_label("⬌").is_some()
+}
+
+fn has_label(harness: &Harness<'_, App>, label: &str) -> bool {
+    harness.query_all_by_label(label).next().is_some()
+}
+
+fn window_rect(harness: &Harness<'_, App>) -> egui::Rect {
+    harness.get_by_role_and_label(Role::Window, "Compare with original").rect()
+}
+
+/// The window's own close button: other controls of the app can have the same label.
+fn close_rect(harness: &Harness<'_, App>) -> egui::Rect {
+    let window = window_rect(harness);
+    harness.query_all_by_label("✖").map(|n| n.rect()).find(|r| window.contains(r.center())).expect("the window's close button")
 }
 
 #[test]
@@ -172,4 +188,97 @@ fn a_file_of_the_original_archive_has_no_button() {
     settle(&mut harness);
     assert_eq!(harness.state().preview_text(), Some("stock\n"));
     assert!(!has_compare_button(&harness));
+}
+
+#[test]
+fn the_side_by_side_view_marks_changed_lines_with_a_sign() {
+    let (_dir, root) = fake_game();
+    let mut harness = preview(&root, "a.txt");
+    click_compare(&mut harness);
+    harness.get_by_label("Side by side").click();
+    harness.run_steps(3);
+    assert!(harness.state().compare_summary().unwrap().contains("(side by side)"));
+    // The removed line on the left and the added one on the right, each with its sign.
+    harness.get_by_label("- two | + 2");
+}
+
+#[test]
+fn the_close_button_is_a_full_size_control_and_closes_the_window() {
+    let (_dir, root) = fake_game();
+    let mut harness = preview(&root, "a.txt");
+    click_compare(&mut harness);
+    let side = harness.ctx.global_style().spacing.interact_size.y;
+    let close = close_rect(&harness);
+    assert!(close.height() >= side - 0.01 && close.width() >= side - 0.01, "the close button is {:?}, controls are {side} high", close.size());
+
+    let window = window_rect(&harness);
+    harness.query_all_by_label("✖").find(|n| window.contains(n.rect().center())).expect("the window's close button").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().compare_summary(), None);
+}
+
+#[test]
+fn escape_closes_the_window_but_a_dialog_has_it_first() {
+    let (_dir, root) = fake_game();
+    let mut harness = preview(&root, "a.txt");
+    click_compare(&mut harness);
+    let ctx = harness.ctx.clone();
+    harness.state_mut().show_info(Some(Info::Shortcuts), &ctx);
+    harness.run_steps(3);
+    assert!(has_label(&harness, "Keyboard and mouse shortcuts"));
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    assert!(!has_label(&harness, "Keyboard and mouse shortcuts"), "Esc closes the dialog");
+    assert!(harness.state().compare_summary().is_some(), "and leaves the window");
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    assert_eq!(harness.state().compare_summary(), None);
+}
+
+/// egui takes the focus off a text field on Esc before the frame runs, so the window must go by the focus of the frame before.
+#[test]
+fn escape_in_the_browser_filter_leaves_the_window_open() {
+    let (_dir, root) = fake_game();
+    let mut harness = preview(&root, "a.txt");
+    click_compare(&mut harness);
+    let filter = harness.get_by_role(egui::accesskit::Role::TextInput);
+    filter.click();
+    harness.run_steps(3);
+    harness.get_by_role(egui::accesskit::Role::TextInput).type_text("zz");
+    harness.run_steps(3);
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    assert!(harness.state().compare_summary().is_some(), "Esc cleared the filter and closed the window as well");
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    assert_eq!(harness.state().compare_summary(), None, "with no text field focused Esc closes it");
+}
+
+#[test]
+fn the_window_opens_in_the_middle_and_moves_by_its_header() {
+    let (_dir, root) = fake_game();
+    let mut harness = preview(&root, "a.txt");
+    click_compare(&mut harness);
+    let before = window_rect(&harness);
+    let middle = harness.ctx.content_rect().center();
+    assert!((before.center() - middle).length() < 10.0, "the window is at {before:?}, the middle is {middle:?}");
+
+    // Between the title and the close button: nothing there takes the drag.
+    let grab = egui::pos2(before.center().x, close_rect(&harness).center().y);
+    harness.hover_at(grab);
+    harness.run_steps(2);
+    harness.drag_at(grab);
+    harness.run_steps(2);
+    for step in 1..=5 {
+        harness.hover_at(grab + egui::vec2(20.0, 10.0) * step as f32);
+        harness.run_steps(2);
+    }
+    harness.drop_at(grab + egui::vec2(100.0, 50.0));
+    harness.run_steps(3);
+    let after = window_rect(&harness);
+    assert!(after.min.x > before.min.x + 80.0 && after.min.y > before.min.y + 30.0, "the window was at {before:?} and is at {after:?}");
 }

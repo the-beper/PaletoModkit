@@ -15,6 +15,7 @@ use crate::mods_check::age;
 use crate::scripthook_window::{compat_now, incompatible_text, is_update};
 use crate::task::Task;
 use crate::theme;
+use crate::widgets::{DIALOG_MEDIUM, DIALOG_NARROW, SPACE_L};
 
 pub enum Notice {
     /// Changes an earlier run left half done: they are undone, or set aside, before anything else is changed.
@@ -239,13 +240,18 @@ impl Startup {
             Notice::Incompatible(_) => "Script Hook V is not compatible with this game version",
             Notice::Crash { .. } => "The game crashed",
         };
-        let (reply, closed) = crate::widgets::dialog_sized(ctx, "notice", title, 480.0, false, |ui| {
+        // The interrupted-change texts list file paths.
+        let width = match notice {
+            Notice::Interrupted(_) | Notice::Recovered { .. } => DIALOG_MEDIUM,
+            _ => DIALOG_NARROW,
+        };
+        let (reply, closed) = crate::widgets::dialog_sized(ctx, "notice", title, width, false, |ui| {
             let dark = ui.visuals().dark_mode;
             let mut reply = None;
             match notice {
                 Notice::Interrupted(pending) if self.confirming => {
                     ui.label(abandon_text(pending));
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_L);
                     ui.horizontal(|ui| {
                         if ui.add(crate::widgets::primary(ui, "Set aside")).on_hover_text("Moves the journal to the folder `abandoned`; no file is deleted or put back").clicked() {
                             reply = Some(Reply::Abandon(stuck(pending).map(|p| p.journal.clone()).collect()));
@@ -257,7 +263,7 @@ impl Startup {
                 }
                 Notice::Interrupted(pending) => {
                     ui.label(interrupted_text(pending));
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_L);
                     ui.horizontal(|ui| {
                         if ui.add(crate::widgets::primary(ui, "Undo")).on_hover_text("Puts the files back as they were, or finishes the clean-up if every file was already in place").clicked() {
                             reply = Some(Reply::Undo);
@@ -274,14 +280,14 @@ impl Startup {
                     let dark = ui.visuals().dark_mode;
                     let text = lines.join("\n");
                     ui.label(if *failed { RichText::new(text).color(theme::error(dark)) } else { RichText::new(text) });
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_L);
                     if ui.add(crate::widgets::primary(ui, "OK")).clicked() {
                         reply = Some(Reply::Dismiss);
                     }
                 }
                 Notice::Update { release, installed } => {
                     ui.label(update_text(release, installed.as_deref()));
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_L);
                     ui.horizontal(|ui| {
                         if ui.add(crate::widgets::primary(ui, "Update now")).on_hover_text("Replaces ScriptHookV.dll in the game folder, without a backup").clicked() {
                             reply = Some(Reply::Update(release.clone()));
@@ -293,7 +299,7 @@ impl Startup {
                 }
                 Notice::Incompatible(text) => {
                     ui.label(RichText::new(text).color(theme::error(dark)));
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_L);
                     ui.horizontal(|ui| {
                         if ui.add(crate::widgets::primary(ui, "Open Script Hook V")).clicked() {
                             reply = Some(Reply::OpenScriptHook);
@@ -306,7 +312,7 @@ impl Startup {
                 Notice::Crash { time, verdict } => {
                     ui.label(RichText::new(crash_text(*time)).strong());
                     ui.label(RichText::new(verdict).color(theme::warning(dark)));
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_L);
                     ui.horizontal(|ui| {
                         if ui.add(crate::widgets::primary(ui, "Open Crash detection")).clicked() {
                             reply = Some(Reply::OpenCrash);

@@ -23,10 +23,12 @@ How to browse the game files and change them with the desktop app. For installin
 
 ![The game folder](../screenshots/game-folder.png)
 
+The window cannot be made smaller than 720 × 420 (interface units, so the minimum grows with **Text and icon size**): below that the side tree (160), the file list (300) and the preview (240) would not all fit.
+
 - **Menu bar**: File, Game, Tools, View and Help. The filter box sits in the middle. At the right end, **Install package…** is the one place for `.oiv` and `.oivs` packages and add-on packs (`dlc.rpf`), with **Prefix tweaks…** beside it (the game's Wine prefix, for ScriptHookVDotNet mods; see [mods.md](mods.md#scripthookvdotnet-mods-net-on-linux)). Neither has a menu entry. [Menus at a glance](#menus-at-a-glance) lists what each menu holds.
 - **Location bar**: back, forward and up buttons, then the path as clickable parts. Inside the mods copy of an archive, the path shows **MODS**, and **Show original** at the right end shows the game's own archive instead (marked **ORIGINAL**; **Show mods copy** goes back). This lasts until you leave that archive.
-- **Side tree**: the game folder. Click a name to open it, its arrow to expand it. **Expand all** and **Collapse all** are above it. **View → Side tree** hides it when you want the room for the file list.
-- **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it, and again to reverse the order.
+- **Side tree**: the game folder. Click a name to open it (a row is a click target across the whole panel width), its arrow to expand it. **Expand all** and **Collapse all** are above it. **View → Side tree** hides it when you want the room for the file list.
+- **File list**: the open folder or archive folder, with its toolbar (add, new folder, rename, extract, delete). Click a column header to sort by it, and again to reverse the order; the headers are buttons, reachable with **Tab** and activated with **Enter** or **Space**. Long names, types and sizes end in an ellipsis and show the full text on hover.
 - **Preview panel**: opens on the right when you select a file: text, XML, textures, models or sounds, and any other file as hex. A file is read without blocking the window; one that takes long shows **Loading…** above the previous preview until it is ready.
 - **Status bar**: what is running and the result of the last operation on the left. One operation runs at a time: starting another one, or switching game, is refused until it is done, and closing the window while one runs asks for a second close, since it would stop halfway. Work that only reads shows **✖ Cancel** beside it: **Expand all**, and a folder, archive or preview that takes long to read (the list or the preview says so meanwhile, and the place shown stays until it is ready). Operations that change files have none: each runs as one change to the game, and if it is stopped halfway (the app closed or killed, a crash) the next change to that game undoes it first ([Troubleshooting](troubleshooting.md#one-change-at-a-time-and-interrupted-changes)). On the right: how many items the folder holds and what is selected (with its size), the files of the mods folder made for Legacy on the Enhanced edition (until they are converted; click the count to see them), and the edition (the game folder on hover).
 
@@ -43,11 +45,11 @@ Paleto Modkit finds the games installed in your Steam libraries. **Game → Choo
 
 ## Comparing with the original
 
-Selecting a file of the mods folder (inside a mods copy of an archive, or a loose one) shows **⬌ Compare with original** in the preview's toolbar. It opens a window that compares the file with the game's own, read-only:
+Selecting a file of the mods folder (inside a mods copy of an archive, or a loose one) shows **⬌ Compare with original** in the preview's toolbar. It opens a window that compares the file with the game's own, read-only. The window has its own header with a close button (**✖**); **Esc** closes it too, unless a dialog is open or a text field has focus. It opens in the middle of the app window and moves by dragging its header.
 
 | File | How it is compared |
 | :--- | :--- |
-| Text | Line by line, **Unified** or **Side by side**, with three unchanged lines around each change; a difference only in line endings is said so |
+| Text | Line by line, **Unified** or **Side by side**, with three unchanged lines around each change, and a `-` (removed) or `+` (added) beside the line number in both views; a difference only in line endings is said so |
 | XML, and binary metadata shown as XML | The same, once the formatting is set aside (indentation, attribute order, the declaration): a file only formatted differently is reported as having the same content. Text inside an element counts. Names one side knows and the other shows as a hash are shared first |
 | Anything else (`.ycd` too) | Sizes, SHA-256, and the stretches that differ; **Previous** and **Next** show each in the two files side by side, byte by byte |
 
@@ -175,7 +177,7 @@ Any other binary file is shown read-only as hex: the offset, 16 bytes per row (8
 | F5 | Read the folders again (the list also refreshes by itself after every change) |
 | Ctrl+S | Save the file being edited |
 | Ctrl+F | Search in the text being previewed |
-| Esc | Clear the filter, close dialogs |
+| Esc | Clear the filter, close dialogs and the Compare window |
 | Right click | Actions for the item |
 
 **Help → Keyboard and mouse shortcuts** shows the same list in the app.
@@ -193,13 +195,13 @@ Dropping on the window:
 
 - Write one name per line to hash it: each row shows the hash as hexadecimal, unsigned decimal and signed decimal (click one to copy). The mode picks how the game reads the name: lowercase (asset names and text labels), exact bytes (metadata names such as `CMapData`), or the 29-bit id of an audio stream.
 - Write one value per line to resolve it: the names that hold the hash. The game gives no way back from a hash, so resolution is only a lookup in the built-in metadata names and the names you saved; an unknown value stays unknown, and the same hash may be held by several names.
-- **Save these names…** (from the paste box) and **Import a text file…** add names to the store of the app, one name per line — the CLI's `hash resolve` resolves against them too. The store is a plain-text file at `~/.local/share/paleto/names.txt`.
+- **Save these names** (from the paste box) and **Import a text file…** add names to the store of the app, one name per line; the CLI's `hash resolve` resolves against them too. The store is a plain-text file at `~/.local/share/paleto/names.txt`.
 
 ## Favorites and recent locations
 
 **File → Favorites and recent locations…** keeps the places of the game you come back to: folders, `.rpf` archives and paths inside an archive (see [browsing](#browsing)). Every place is kept by its path *inside its game folder*, so an install that moved still resolves, and a place on a mods copy and on its original are one entry:
 
-- **Add the shown place…** keeps the place you are looking at, if it is of a game (the two lists open from this one window); **Forget** takes one out, and **Forget them all** empties the recents.
+- **Add the shown place** keeps the place you are looking at, if it is of a game (the two lists open from this one window); **Forget** takes one out, and **Forget them all** empties the recents.
 - The **recent locations** are kept by themselves as you visit them (newest first, 24 at most; places whose files are simply gone are taken out).
 - A click reopens the place: the archive shows its mods copy when the game has one, or the original when it does not, like browsing does. The list says why an entry cannot open now (`the file is gone…`) or not yet (`cannot verify yet`, the path inside an archive of the encrypted kind, checked when the keys load); a favorite is kept even then, but nothing opens from it.
 
@@ -209,7 +211,7 @@ Favorites are saved with the other settings of the app and survive the restart (
 
 The **View** menu:
 - **Theme**: light, dark, or the same as the desktop (followed live, also on Wayland; light when the desktop states no preference).
-- **Text and icon size** and **Density** (row spacing).
+- **Text and icon size** (Small 0.9, Normal 1.0, Large 1.15 times the base size; everything scales) and **Density**: the row spacing and the minimum height of buttons and text fields, 20 (Compact), 24 (Normal) or 28 (Comfortable) interface units at the Normal text size.
 - **Folders and files**: folders first, grouped by type, or mixed.
 - **Side tree** shows or hides the tree of the game folder; **Coloured icons**; **Show all files in the side tree** (by default it shows folders and archives only); **Remember open folders** (the side tree opens as you left it).
 

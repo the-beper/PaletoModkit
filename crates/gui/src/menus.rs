@@ -10,18 +10,13 @@ use paleto_formats::Format;
 
 use crate::actions::Action;
 use crate::app::{App, Info, Location, Status, right_width, INSTALL, INSTALL_SHORT, MODS_COPY, MODS_LINK, MODS_LINK_HOVER, ORIGINAL, REPO_URL, TWEAKS, TWEAKS_SHORT};
-use crate::browser::{Browser, filter_box};
+use crate::browser::{Browser, filter_box, icon_width, paint_icon};
 use crate::preview::PreviewSource;
 use crate::settings::{Density, FileClass, Grouping, TextSize, Theme};
 use crate::theme;
 
 impl App {
     // ---- UI ----------------------------------------------------------------
-
-    fn icon(&self, class: FileClass, dark: bool) -> RichText {
-        let text = RichText::new(class.icon());
-        if self.settings.colored_icons { text.color(class.color(dark)) } else { text }
-    }
 
     pub(crate) fn menu_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let can_install = self.keys.is_some();
@@ -228,26 +223,26 @@ impl App {
         let Some(root) = self.game.as_ref().map(|g| g.root.clone()) else { return };
         let current = self.tree_selection();
         let root_selected = current.as_deref() == Some(root.as_path());
-        // Two buttons sharing the width, as tall as the file toolbar beside them.
+        // Two buttons sharing the width, as tall as the file toolbar beside them; a label that does not fit is cut with an ellipsis.
         ui.horizontal(|ui| {
-            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-            if crate::widgets::bar_button(ui, egui::Button::new("⏷ Expand all"), width).on_hover_text("Expand every folder").clicked() {
+            let size = egui::vec2((ui.available_width() - ui.spacing().item_spacing.x) / 2.0, crate::widgets::bar_height(ui));
+            if ui.add_sized(size, egui::Button::new("⏷ Expand all").truncate()).on_hover_text("Expand every folder").clicked() {
                 actions.push(Action::ExpandAll);
             }
-            if crate::widgets::bar_button(ui, egui::Button::new("⏶ Collapse all"), width).on_hover_text("Collapse every folder").clicked() {
+            if ui.add_sized(size, egui::Button::new("⏶ Collapse all").truncate()).on_hover_text("Collapse every folder").clicked() {
                 actions.push(Action::CollapseAll);
             }
         });
         ui.separator();
+        let colored = self.settings.colored_icons;
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(self.icon(FileClass::Folder, ui.visuals().dark_mode));
-                let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if ui.selectable_label(root_selected, RichText::new(name).strong()).clicked() {
-                    actions.push(Action::Go(Location::Folder(root.clone())));
-                }
-            });
-            self.tree_dir(ui, &root, current.as_deref(), actions);
+            let rows = TreeRows { left: ui.cursor().left(), width: ui.available_width(), icon: icon_width(ui), colored };
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let row = TreeRow { id: egui::Id::unique("tree root"), selected: root_selected, lead: 0.0, class: FileClass::Folder, name: &name, strong: true, modded: false };
+            if tree_row(ui, rows, row).clicked() {
+                actions.push(Action::Go(Location::Folder(root.clone())));
+            }
+            self.tree_dir(ui, rows, &root, current.as_deref(), actions);
         });
         self.read_tree();
         // Until the location asked for is shown, and the folders above it read, it is still to reveal.
@@ -258,7 +253,7 @@ impl App {
 
     /// One folder of the side tree: clicking a name opens it, the arrow
     /// expands it.
-    fn tree_dir(&mut self, ui: &mut egui::Ui, dir: &Path, current: Option<&Path>, actions: &mut Vec<Action>) {
+    fn tree_dir(&mut self, ui: &mut egui::Ui, rows: TreeRows, dir: &Path, current: Option<&Path>, actions: &mut Vec<Action>) {
         let entries: Vec<(PathBuf, String, bool, bool)> =
             self.listing(dir).iter().map(|e| (e.path.clone(), e.name.clone(), e.is_dir, e.modded)).collect();
         if self.tree_loading.contains(dir) {
@@ -267,8 +262,10 @@ impl App {
                 ui.spinner();
             });
         }
+        let indent = ui.spacing().indent;
         for (path, name, is_dir, modded) in entries {
             let selected = current == Some(path.as_path());
+            let row_id = egui::Id::unique(("tree row", &path));
             if is_dir {
                 // Open/closed state lives in `open_dirs`, so it can be expanded,
                 // collapsed and remembered as a whole.
@@ -278,15 +275,22 @@ impl App {
                     self.open_dirs.insert(path.clone());
                 }
                 state.set_open(self.open_dirs.contains(&path));
-                let icon = self.icon(FileClass::Folder, ui.visuals().dark_mode);
-                state
-                    .show_header(ui, |ui| {
-                        ui.label(icon);
-                        if ui.selectable_label(selected, &name).clicked() {
-                            actions.push(Action::Go(Location::Folder(path.clone())));
-                        }
-                    })
-                    .body(|ui| self.tree_dir(ui, &path, current, actions));
+                // The arrow is registered after the row, so it takes the clicks on its own part of it.
+                let arrow_left = ui.cursor().left();
+                let row = tree_row(ui, rows, TreeRow { id: row_id, selected, lead: indent, class: FileClass::Folder, name: &name, strong: false, modded: false });
+                if row.clicked() {
+                    actions.push(Action::Go(Location::Folder(path.clone())));
+                }
+                let arrow = egui::Rect::from_min_size(egui::pos2(arrow_left, row.rect.top()), egui::vec2(indent, row.rect.height()));
+                let toggle = ui.interact(arrow, id, egui::Sense::click());
+                if toggle.clicked() {
+                    state.toggle(ui);
+                }
+                toggle.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{} {name}", if state.is_open() { "Collapse" } else { "Expand" })));
+                let icon = egui::Rect::from_center_size(arrow.center(), egui::Vec2::splat(ui.spacing().icon_width));
+                let openness = state.openness(ui.ctx());
+                egui::collapsing_header::paint_default_icon(ui, openness, &toggle.with_new_rect(icon));
+                state.show_body_indented(&row, ui, |ui| self.tree_dir(ui, rows, &path, current, actions));
                 if egui::collapsing_header::CollapsingState::load(ui.ctx(), id).is_some_and(|s| s.is_open()) {
                     self.open_dirs.insert(path);
                 } else {
@@ -294,29 +298,17 @@ impl App {
                 }
             } else {
                 let class = FileClass::of(&name);
-                ui.horizontal(|ui| {
-                    ui.add_space(ui.spacing().indent);
-                    ui.label(self.icon(class, ui.visuals().dark_mode));
-                    let text = if modded { RichText::new(&name).color(theme::modded(ui.visuals().dark_mode)) } else { RichText::new(&name) };
-                    let response = ui.selectable_label(selected, text);
-                    let response = if modded {
-                        let link = ui.label(RichText::new(MODS_LINK).color(theme::modded(ui.visuals().dark_mode)));
-                        link.on_hover_text(MODS_LINK_HOVER);
-                        response.on_hover_text(MODS_LINK_HOVER)
+                let response = tree_row(ui, rows, TreeRow { id: row_id, selected, lead: indent, class, name: &name, strong: false, modded });
+                if response.clicked() {
+                    actions.push(if class == FileClass::Archive {
+                        Action::Go(Location::Archive(ArchivePath::new(path.clone())))
                     } else {
-                        response
-                    };
-                    if response.clicked() {
-                        actions.push(if class == FileClass::Archive {
-                            Action::Go(Location::Archive(ArchivePath::new(path.clone())))
-                        } else {
-                            Action::Reveal(path.clone())
-                        });
-                    }
-                    if selected && self.reveal {
-                        response.scroll_to_me(None);
-                    }
-                });
+                        Action::Reveal(path.clone())
+                    });
+                }
+                if selected && self.reveal {
+                    response.scroll_to_me(None);
+                }
             }
         }
     }
@@ -513,6 +505,68 @@ impl App {
         });
     }
 
+}
+
+/// Where the rows of the side tree are: all as wide as the panel, with the names after an icon slot of one width.
+#[derive(Clone, Copy)]
+struct TreeRows {
+    left: f32,
+    width: f32,
+    icon: f32,
+    colored: bool,
+}
+
+struct TreeRow<'a> {
+    id: egui::Id,
+    selected: bool,
+    /// Room kept before the icon, for the arrow of a folder.
+    lead: f32,
+    class: FileClass,
+    name: &'a str,
+    strong: bool,
+    /// A file with a copy in the mods folder: its name is in that colour, followed by a mark.
+    modded: bool,
+}
+
+/// A row of the side tree: all of it, from the panel's left edge to its right, is a click target with the hover and selection fill. The name is cut with an ellipsis when it does not fit.
+fn tree_row(ui: &mut egui::Ui, rows: TreeRows, row: TreeRow<'_>) -> egui::Response {
+    let spacing = ui.spacing();
+    let (padding, gap) = (spacing.button_padding.x, spacing.item_spacing.x);
+    let height = spacing.interact_size.y.max(ui.text_style_height(&egui::TextStyle::Body) + 2.0 * spacing.button_padding.y);
+    let at = ui.cursor().left() + row.lead;
+    let rect = egui::Rect::from_min_size(egui::pos2(rows.left, ui.cursor().top()), egui::vec2(rows.width, height));
+    ui.advance_cursor_after_rect(rect);
+    let response = ui.interact(rect, row.id, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, row.selected, row.name));
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let visuals = ui.style().interact_selectable(&response, row.selected);
+    if row.selected || response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+    }
+    let dark = ui.visuals().dark_mode;
+    paint_icon(ui, egui::Rect::from_min_size(egui::pos2(at, rect.top()), egui::vec2(rows.icon, height)), row.class, rows.colored, visuals.text_color());
+    let mark = row.modded.then(|| egui::WidgetText::from(RichText::new(MODS_LINK).color(theme::modded(dark))).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body));
+    let left = at + rows.icon + gap;
+    let room = rect.right() - padding - left - mark.as_ref().map_or(0.0, |m| gap + m.size().x);
+    let name = RichText::new(row.name);
+    let name = if row.strong { name.strong() } else { name };
+    let name = if row.modded { name.color(theme::modded(dark)) } else { name };
+    let name = egui::WidgetText::from(name).into_galley(ui, Some(egui::TextWrapMode::Truncate), room.max(0.0), egui::TextStyle::Body);
+    let (elided, name_width) = (name.elided, name.size().x);
+    ui.painter().galley(egui::pos2(left, rect.center().y - name.size().y / 2.0), name, visuals.text_color());
+    if let Some(mark) = mark {
+        ui.painter().galley(egui::pos2(left + name_width + gap, rect.center().y - mark.size().y / 2.0), mark, visuals.text_color());
+    }
+    // One tooltip: the full name when it is cut, and what a modded name means.
+    if row.modded {
+        response.on_hover_text(format!("{}\n{MODS_LINK_HOVER}", row.name))
+    } else if elided {
+        response.on_hover_text(row.name)
+    } else {
+        response
+    }
 }
 
 /// A menu title that stays highlighted while its menu is open, as the hovered one is.

@@ -162,7 +162,7 @@ impl CrashWindow {
 
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> Option<Request> {
         self.poll();
-        let (request, closed) = crate::widgets::dialog(ctx, "crash", "Crash detection", 600.0, |ui| self.contents(ui, busy));
+        let (request, closed) = crate::widgets::dialog(ctx, "crash", "Crash detection", crate::widgets::DIALOG_WIDE, |ui| self.contents(ui, busy));
         if closed { Some(Request::Close) } else { request }
     }
 
@@ -240,7 +240,7 @@ impl CrashWindow {
         match &self.hunt {
             None => {
                 ui.label("For a game that crashes when you do not know which mod causes it:");
-                ui.add_space(4.0);
+                ui.add_space(crate::widgets::SPACE_S);
                 let steps = [
                     "Half of the suspects (.asi plugins, add-on packs, modified archives) are turned off.",
                     "You start the game and do what made it crash.",
@@ -252,13 +252,12 @@ impl CrashWindow {
                         ui.label(*step);
                     });
                 }
-                ui.add_space(4.0);
-                crate::widgets::hint(
-                    ui,
+                ui.add_space(crate::widgets::SPACE_S);
+                ui.label(
                     "Parts are moved to the game folder's mods_disabled folder and back. Copies of game files left \
                      unchanged are not suspects. Starting reads the mods folder whole, which can take a while.",
                 );
-                ui.add_space(6.0);
+                ui.add_space(crate::widgets::SPACE_M);
                 if !self.turned_off.is_empty() {
                     ui.label(RichText::new(format!("Turned off: {}", self.turned_off.join(", "))).color(theme::warning(dark)));
                     ui.label("If the game works without it, remove or update that mod; otherwise turn everything back on.");
@@ -294,7 +293,7 @@ impl CrashWindow {
                         ui.label(RichText::new(p).monospace().small());
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(crate::widgets::SPACE_M);
                 ui.label(RichText::new("Start the game and do what made it crash. Then:").strong());
                 ui.horizontal(|ui| {
                     if button(ui, "It crashed") {
@@ -416,7 +415,7 @@ impl CrashWindow {
                 for line in &log.lines {
                     ui.add(egui::Label::new(RichText::new(line).monospace().small()).wrap());
                 }
-                ui.add_space(4.0);
+                ui.add_space(crate::widgets::SPACE_S);
             }
         });
     }
@@ -457,7 +456,7 @@ fn causes_ui(ui: &mut egui::Ui, causes: &[Cause], busy: bool) -> Option<Fix> {
                 }
             });
         }
-        ui.add_space(2.0);
+        ui.add_space(crate::widgets::SPACE_S);
     }
     clicked
 }

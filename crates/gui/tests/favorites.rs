@@ -113,7 +113,7 @@ fn favorites_keep_between_sessions_and_reopen_where_they_point() {
     settle(&mut harness);
     harness.state_mut().open_favorites(&ctx);
     harness.run_steps(2);
-    harness.get_by_label("Add the shown place…").click_accesskit();
+    harness.get_by_label("Add the shown place").click_accesskit();
     settle(&mut harness);
     assert_eq!(harness.state().favorite_places(), [format!("{REL}/levels/gta5/vehicles.rpf")]);
 
@@ -141,7 +141,7 @@ fn favorites_keep_between_sessions_and_reopen_where_they_point() {
     harness.run_steps(2);
     harness.state_mut().go(Location::Folder(odd_dir.clone()));
     settle(&mut harness);
-    harness.get_by_label("Add the shown place…").click_accesskit();
+    harness.get_by_label("Add the shown place").click_accesskit();
     settle(&mut harness);
     store.0.clear();
     eframe::App::save(harness.state_mut(), &mut store);

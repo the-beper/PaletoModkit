@@ -63,7 +63,7 @@ impl HashesWindow {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Request> {
-        let (_, closed) = crate::widgets::dialog(ctx, "hashes", "Hash generator and name resolver", 660.0, |ui| self.contents(ui));
+        let (_, closed) = crate::widgets::dialog(ctx, "hashes", "Hash generator and name resolver", crate::widgets::DIALOG_WIDE, |ui| self.contents(ui));
         closed.then_some(Request::Close)
     }
 
@@ -76,7 +76,7 @@ impl HashesWindow {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("The game hashes names without a way back: a hash is only resolved through the names known here.").weak());
         });
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         ui.label(RichText::new("Mode").weak());
         for mode in Mode::ALL {
             let hover = match mode {
@@ -89,7 +89,7 @@ impl HashesWindow {
                 self.regen();
             }
         }
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         if ui
             .add(egui::TextEdit::multiline(&mut self.generate).hint_text("Names to hash, one per line").desired_rows(2).desired_width(f32::INFINITY).code_editor())
             .changed()
@@ -97,7 +97,7 @@ impl HashesWindow {
             self.regen();
         }
         if !self.generated.is_empty() {
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             egui::Grid::new("hashed").striped(true).num_columns(4).min_col_width(110.0).max_col_width(315.0).show(ui, |ui| {
                 for row in &self.generated {
                     ui.label(&row.input);
@@ -108,7 +108,7 @@ impl HashesWindow {
                 }
             });
         }
-        ui.add_space(8.0);
+        ui.add_space(crate::widgets::SPACE_L);
         if ui
             .add(egui::TextEdit::multiline(&mut self.resolve).hint_text("Values to resolve, one per line (0x3779A091, B779A091, hash_…, decimal)").desired_rows(2).desired_width(f32::INFINITY).code_editor())
             .changed()
@@ -116,7 +116,7 @@ impl HashesWindow {
             self.resolved = self.resolve.lines().filter(|l| !l.trim().is_empty()).map(|input| self.resolved_row(input)).collect();
         }
         if !self.resolved.is_empty() {
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             egui::Grid::new("resolved").striped(true).num_columns(2).min_col_width(110.0).max_col_width(430.0).show(ui, |ui| {
                 for row in &self.resolved {
                     ui.label(&row.input);
@@ -125,7 +125,7 @@ impl HashesWindow {
                 }
             });
         }
-        ui.add_space(8.0);
+        ui.add_space(crate::widgets::SPACE_L);
         ui.horizontal(|ui| {
             ui.label(RichText::new(match self.yours {
                 0 => "The resolution also knows names you saved: import a plain-text list, one name per line.".to_string(),
@@ -133,7 +133,7 @@ impl HashesWindow {
             }));
         });
         ui.horizontal(|ui| {
-            if ui.button("Save these names…").on_hover_text("Save the names pasted below (one name per line) to the store").clicked() {
+            if ui.button("Save these names").on_hover_text("Save the names pasted below (one name per line) to the store").clicked() {
                 match names_store::import_text(&self.pasted, &names_store::path()) {
                     Ok(0) => self.feedback = Some("They are in the store already; nothing was added.".into()),
                     Ok(n) => {
@@ -207,7 +207,7 @@ impl HashesWindow {
 
 /// A number shown as one text; clicking copies it.
 fn value_button(ui: &mut egui::Ui, text: String) {
-    if ui.small_button(&text).on_hover_text("Click to copy").clicked() {
+    if ui.button(&text).on_hover_text("Click to copy").clicked() {
         ui.ctx().copy_text(text);
     }
 }

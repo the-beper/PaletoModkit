@@ -225,7 +225,7 @@ impl TextureView {
         }
         painter.image(handle.id(), image, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         let zoom = format!("{}×{} · {:.0}%", size.x, size.y, scale * 100.0);
-        painter.text(rect.left_bottom(), egui::Align2::LEFT_BOTTOM, zoom, egui::FontId::proportional(11.0), ui.visuals().weak_text_color());
+        painter.text(rect.left_bottom(), egui::Align2::LEFT_BOTTOM, zoom, egui::TextStyle::Small.resolve(ui.style()), ui.visuals().weak_text_color());
         request
     }
 

@@ -351,7 +351,7 @@ impl App {
                 ui.set_min_height(height);
                 let controls = 3.0 * (height + spacing) + 90.0;
                 let field = ui.add(
-                    egui::TextEdit::singleline(&mut find.query)
+                    crate::widgets::single_line(&mut find.query)
                         .hint_text("Find in file")
                         .desired_width((ui.available_width() - controls).max(80.0))
                         .min_size(egui::vec2(0.0, height))
@@ -485,7 +485,7 @@ impl App {
                         ui.vertical_centered(|ui| {
                             ui.add_space((ui.available_height() / 2.0 - 40.0).max(0.0));
                             ui.label(RichText::new("🚫").size(32.0).weak());
-                            ui.label(RichText::new(format!("No preview for {kind}")).size(17.0).strong());
+                            ui.label(RichText::new(format!("No preview for {kind}")).size(crate::widgets::section_size(ui)).strong());
                             ui.label(RichText::new("Extract the file to open it with another program.").weak());
                         });
                     }

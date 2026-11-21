@@ -28,6 +28,8 @@ use crate::preview::{Loaded, Preview};
 
 /// Text files up to this size can be edited in the preview panel.
 pub(crate) const MAX_TEXT: usize = 8 << 20;
+/// The smallest window in egui points: the tree (160), the file list (300) and a preview (240) side by side.
+pub const MIN_WINDOW: [f32; 2] = [720.0, 420.0];
 /// The buttons at the right end of the menu and location bars, one width
 /// for all their labels so they line up and do not change size.
 pub(crate) const INSTALL: &str = "📦 Install package…";
@@ -168,6 +170,8 @@ pub struct App {
     /// The previewed text being saved (file name, text): marked saved once
     /// the save succeeds, so a failed save keeps the edits unsaved.
     pub(crate) saving: Option<(String, String)>,
+    /// The pixels per point the window's minimum size was last sent for.
+    min_size_scale: f32,
     /// The window was asked to close while a task ran: a second request closes it.
     close_while_busy: bool,
     /// Runs when the current task finishes (e.g. navigating after a save).
@@ -181,6 +185,8 @@ pub struct App {
     wayland_drops: Option<std::sync::mpsc::Receiver<crate::wayland_dnd::DndEvent>>,
     /// Files are being dragged over the window (Wayland).
     drag_hover: bool,
+    /// Whether a text field had the focus at the end of the last frame (see `CompareWindow::show`).
+    text_was_focused: bool,
     pub(crate) status: Status,
 }
 
@@ -266,6 +272,7 @@ impl App {
             select_after: None,
             task: None,
             saving: None,
+            min_size_scale: 0.0,
             close_while_busy: false,
             after_task: None,
             pending: None,
@@ -273,6 +280,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wayland_drops: crate::wayland_dnd::listen(cc, &cc.egui_ctx),
             drag_hover: false,
+            text_was_focused: false,
             status: Status::Info(String::new()),
         };
         match cc.storage {
@@ -620,6 +628,15 @@ impl App {
         self.task.is_some()
     }
 
+    /// Keeps the window from shrinking below `MIN_WINDOW` points. winit turns the command into pixels with the scale it has when it runs it, so it is sent again whenever the scale changes (the text size setting, a monitor of another scale).
+    fn keep_min_size(&mut self, ctx: &egui::Context) {
+        let scale = ctx.pixels_per_point();
+        if scale != self.min_size_scale {
+            self.min_size_scale = scale;
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(MIN_WINDOW.into()));
+        }
+    }
+
     /// With a preview open, selecting another file previews it. Acts once per
     /// change of selection, so declining to lose edits does not ask again.
     fn follow_selection(&mut self, actions: &mut Vec<Action>) {
@@ -950,6 +967,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         theme::apply(self.settings.theme, &self.system_theme, &ctx);
+        self.keep_min_size(&ctx);
         #[cfg(target_os = "linux")]
         self.take_requests(&ctx);
         self.poll_tasks(&ctx);
@@ -1114,7 +1132,7 @@ impl eframe::App for App {
                     match &self.status {
                         Status::Info(s) => ui.add(egui::Label::new(s).truncate()),
                         Status::Note(s, more) => ui.add(egui::Label::new(s).truncate()).on_hover_text(more),
-                        Status::Error(s) => ui.add(egui::Label::new(RichText::new(s).color(theme::error(dark))).truncate()).on_hover_text(s),
+                        Status::Error(s) => ui.add(egui::Label::new(RichText::new(s).color(theme::error(dark))).truncate()),
                     };
                 });
             });
@@ -1125,23 +1143,27 @@ impl eframe::App for App {
         } else {
             // The central panel's frame, so the tree's buttons line up with the file toolbar.
             let frame = egui::Frame::central_panel(ui.style()).inner_margin(crate::widgets::MARGIN);
-            // Side panels never squeeze the file list below a usable width.
+            // Widths of whole panels, frames included. The side panels never squeeze the file list below LIST_MIN; their minimums, with the tree's, add up to 700, inside MIN_WINDOW.
             const LIST_MIN: f32 = 300.0;
-            let width = ui.available_width();
-            let tree_max = (width * 0.35).max(160.0);
-            if self.settings.show_tree {
-                egui::Panel::left("tree").frame(frame).resizable(true).default_size(280.0).size_range(160.0..=tree_max).show(ui, |ui| {
-                    self.side_tree(ui, &mut actions);
-                });
-            }
+            const PREVIEW_MIN: f32 = 240.0;
+            const TREE_MIN: f32 = 160.0;
             // A load shows in the panel once it takes long enough to notice.
             let loading = self.preview_task.as_ref().filter(|t| t.elapsed() >= LOADING_SHOWN).map(|t| t.label.clone());
             if let Some(t) = self.preview_task.as_ref().filter(|t| t.elapsed() < LOADING_SHOWN) {
                 ctx.request_repaint_after(LOADING_SHOWN.saturating_sub(t.elapsed()));
             }
-            if self.preview.is_some() || loading.is_some() {
-                let preview_max = (ui.available_width() - LIST_MIN).max(240.0);
-                egui::Panel::right("preview").resizable(true).default_size(460.0).size_range(240.0..=preview_max).show(ui, |ui| {
+            let preview_open = self.preview.is_some() || loading.is_some();
+            let width = ui.available_width();
+            // What the tree may take leaves the list and, when it is open, the preview their minimums.
+            let tree_max = (width * 0.35).min(width - LIST_MIN - if preview_open { PREVIEW_MIN } else { 0.0 }).max(TREE_MIN);
+            if self.settings.show_tree {
+                egui::Panel::left("tree").frame(frame).resizable(true).default_size(280.0).size_range(TREE_MIN..=tree_max).show(ui, |ui| {
+                    self.side_tree(ui, &mut actions);
+                });
+            }
+            if preview_open {
+                let preview_max = (ui.available_width() - LIST_MIN).max(PREVIEW_MIN);
+                egui::Panel::right("preview").resizable(true).default_size(460.0).size_range(PREVIEW_MIN..=preview_max).show(ui, |ui| {
                     if let Some(label) = &loading {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -1201,7 +1223,7 @@ impl eframe::App for App {
                 hashes::Request::Close => actions.push(Action::Hashes(false)),
             }
         }
-        if let Some(request) = self.compare.as_mut().and_then(|w| w.show(&ctx)) {
+        if let Some(request) = self.compare.as_mut().and_then(|w| w.show(&ctx, self.text_was_focused)) {
             match request {
                 compare_window::Request::Close => actions.push(Action::CloseCompare),
             }
@@ -1274,6 +1296,7 @@ impl eframe::App for App {
                 }
             }
         }
+        self.text_was_focused = ctx.text_edit_focused();
         for action in actions {
             self.apply(action, &ctx);
         }

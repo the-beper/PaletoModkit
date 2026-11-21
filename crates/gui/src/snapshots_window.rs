@@ -44,7 +44,7 @@ impl SnapshotsWindow {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> Option<Request> {
-        let (request, closed) = crate::widgets::dialog(ctx, "snapshots", "Snapshots of the mods folder", 480.0, |ui| self.contents(ui, busy));
+        let (request, closed) = crate::widgets::dialog(ctx, "snapshots", "Snapshots of the mods folder", crate::widgets::DIALOG_NARROW, |ui| self.contents(ui, busy));
         if closed { Some(Request::Close) } else { request }
     }
 
@@ -60,9 +60,9 @@ impl SnapshotsWindow {
             })
             .weak(),
         );
-        ui.add_space(8.0);
+        ui.add_space(crate::widgets::SPACE_L);
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.label).hint_text("Note, e.g. before VisualV").desired_width(260.0));
+            ui.add(crate::widgets::single_line(&mut self.label).hint_text("Note, e.g. before VisualV").desired_width(260.0));
             if ui.add_enabled(!busy, crate::widgets::primary(ui, "Save a snapshot")).clicked() {
                 request = Some(Request::Save(std::mem::take(&mut self.label)));
             }

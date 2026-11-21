@@ -132,7 +132,7 @@ impl ScriptHookWindow {
     }
 
     pub fn show(&self, ctx: &egui::Context) -> Option<Request> {
-        let (request, closed) = crate::widgets::dialog_sized(ctx, "script_hook", "Script Hook V", 520.0, false, |ui| self.contents(ui));
+        let (request, closed) = crate::widgets::dialog_sized(ctx, "script_hook", "Script Hook V", crate::widgets::DIALOG_MEDIUM, false, |ui| self.contents(ui));
         if closed { Some(Request::Close) } else { request }
     }
 
@@ -175,7 +175,7 @@ impl ScriptHookWindow {
             ui.label(self.game_version.map_or("unknown".into(), format_version));
             ui.end_row();
         });
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         let (icon, color) = match &self.compat {
             Compat::Confirmed => ("✔", theme::ok(dark)),
             Compat::Likely => ("•", ui.visuals().weak_text_color()),
@@ -188,14 +188,18 @@ impl ScriptHookWindow {
             ui.label(RichText::new(if self.compat == Compat::Unknown { "Compatibility unknown".to_string() } else { capital(&text) }).color(color));
         });
         if let Some(r) = self.release().filter(|r| is_update(self.installed.as_deref(), r)) {
-            ui.add_space(6.0);
+            ui.add_space(crate::widgets::SPACE_M);
             let label = if self.installed.is_some() { format!("Update to v{}", r.version) } else { format!("Install v{}", r.version) };
             if ui.add(crate::widgets::primary(ui, label)).on_hover_text("Downloads it from dev-c.com and replaces ScriptHookV.dll in the game folder, without a backup").clicked() {
                 request = Some(Request::Update(r.clone()));
             }
         }
-        ui.add_space(6.0);
-        ui.hyperlink_to("dev-c.com/gtav/scripthookv", PAGE);
+        ui.add_space(crate::widgets::SPACE_M);
+        // A link inside a line of text is exempt from the minimum target size (WCAG 2.5.8).
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Release notes and downloads are on");
+            ui.hyperlink_to("dev-c.com/gtav/scripthookv", PAGE);
+        });
         request
     }
 }

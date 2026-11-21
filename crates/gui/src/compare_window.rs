@@ -69,19 +69,36 @@ impl CompareWindow {
         CompareWindow { name, modified: shown(root, &modified), original: original.as_ref().map(|p| shown(root, p)), kind: kind.label(), notes, body }
     }
 
-    pub(crate) fn show(&mut self, ctx: &egui::Context) -> Option<Request> {
+    /// `text_was_focused`: whether a text field had the focus at the end of the last frame. egui drops the focus of a text field on Esc before the frame runs, so by then `text_edit_focused` is already false.
+    pub(crate) fn show(&mut self, ctx: &egui::Context, text_was_focused: bool) -> Option<Request> {
         let screen = ctx.content_rect();
-        let mut open = true;
+        let size = egui::vec2((screen.width() - 80.0).min(980.0), (screen.height() - 120.0).min(680.0));
+        // A dialog, a menu or a text field has Esc first. The checks run before the key is taken, so it stays for them.
+        let escape = !text_was_focused && !ctx.text_edit_focused() && !ctx.any_popup_open() && ctx.memory(|m| m.top_modal_layer()).is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let mut close = escape;
+        // The title bar is drawn in `contents`: egui's buttons are 14 px. Without one egui lets the window be dragged from anywhere on it.
+        // The position is the top left, not a CENTER_CENTER pivot: egui keeps the pivot fixed while a window is resized, which moves the far edge too.
         egui::Window::new("Compare with original")
             .id(egui::Id::unique("compare window"))
-            .open(&mut open)
+            .title_bar(false)
             .resizable(true)
-            .default_size([(screen.width() - 80.0).min(980.0), (screen.height() - 120.0).min(680.0)])
-            .show(ctx, |ui| self.contents(ui));
-        (!open).then_some(Request::Close)
+            .default_size(size)
+            .default_pos(screen.center() - size / 2.0)
+            .show(ctx, |ui| close |= self.contents(ui));
+        close.then_some(Request::Close)
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui) {
+    /// The window's content; true when the close button was clicked.
+    fn contents(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Compare with original").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let side = ui.spacing().interact_size.y;
+                close = ui.add(egui::Button::new("✖").frame(false).min_size(egui::Vec2::splat(side))).on_hover_text("Close (Esc)").clicked();
+            });
+        });
+        ui.separator();
         ui.label(RichText::new(&self.name).strong().size(egui::TextStyle::Heading.resolve(ui.style()).size));
         ui.add(egui::Label::new(format!("Mods copy: {}", self.modified)).selectable(true));
         ui.add(egui::Label::new(match &self.original {
@@ -105,6 +122,7 @@ impl CompareWindow {
                 ui.label(stored_text(*same_stored));
             }
         }
+        close
     }
 
     /// What the window shows, in words (for the tests).
@@ -232,23 +250,12 @@ impl LineView {
         });
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let char_width = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
-        let dark = ui.visuals().dark_mode;
-        let (error, ok) = (crate::theme::error(dark), crate::theme::ok(dark));
-        let look = Look {
-            height: ui.text_style_height(&egui::TextStyle::Monospace),
-            font,
-            weak: ui.visuals().weak_text_color(),
-            strong: ui.visuals().text_color(),
-            faint: ui.visuals().faint_bg_color,
-            error,
-            ok,
-            removed: error.gamma_multiply(0.18),
-            added: ok.gamma_multiply(0.18),
-        };
+        let look = Look { height: ui.text_style_height(&egui::TextStyle::Monospace), font, faint: ui.visuals().faint_bg_color, colors: diff_colors(ui.visuals().dark_mode) };
         let viewport = ui.available_width() - ui.spacing().scroll.allocated_width();
         // Two numbers, a mark and a space, then the text.
         let unified_width = (char_width * (2 * self.digits + 4 + self.columns) as f32 + 8.0).max(viewport);
-        let half = (char_width * (self.digits + 1 + self.columns) as f32 + 8.0).max((viewport - SEPARATOR) / 2.0);
+        // One number, a mark and a space, then the text.
+        let half = (char_width * (self.digits + 3 + self.columns) as f32 + 8.0).max((viewport - SEPARATOR) / 2.0);
         let rows = if self.side_by_side { self.split.len() } else { self.unified.len() };
         ui.scope(|ui| {
             // The rows touch, so a tinted block has no stripes.
@@ -271,16 +278,12 @@ impl LineView {
             UnifiedRow::Line(i) => &self.lines[i],
         };
         let number = |n: Option<usize>| n.map_or_else(|| " ".repeat(self.digits), |n| format!("{n:>width$}", width = self.digits));
-        let (tint, color) = match line.op {
-            Op::Same => (None, look.strong),
-            Op::Removed => (Some(look.removed), look.error),
-            Op::Added => (Some(look.added), look.ok),
-        };
+        let colors = &look.colors;
         let mut job = LayoutJob::default();
-        job.append(&format!("{} {} ", number(line.old), number(line.new)), 0.0, egui::TextFormat::simple(look.font.clone(), look.weak));
-        job.append(&format!("{} ", mark(line.op)), 0.0, egui::TextFormat::simple(look.font.clone(), color));
-        job.append(&line.text, 0.0, egui::TextFormat::simple(look.font.clone(), look.strong));
-        paint_row(ui, look, width, tint, job, format!("{} {}", mark(line.op), line.text));
+        job.append(&format!("{} {} ", number(line.old), number(line.new)), 0.0, egui::TextFormat::simple(look.font.clone(), colors.gutter));
+        job.append(&format!("{} ", mark(line.op)), 0.0, egui::TextFormat::simple(look.font.clone(), colors.mark_color(line.op)));
+        job.append(&line.text, 0.0, egui::TextFormat::simple(look.font.clone(), colors.text));
+        paint_row(ui, look, width, colors.fill(line.op), job, format!("{} {}", mark(line.op), line.text));
     }
 
     fn split_row(&self, ui: &mut egui::Ui, look: &Look, row: &SplitRow, half: f32) {
@@ -291,44 +294,81 @@ impl LineView {
         };
         let (rect, response) = ui.allocate_exact_size(egui::vec2(width, look.height), egui::Sense::hover());
         let cells = [
-            (egui::Rect::from_min_size(rect.min, egui::vec2(half, look.height)), left, look.removed, false),
-            (egui::Rect::from_min_size(rect.min + egui::vec2(half + SEPARATOR, 0.0), egui::vec2(half, look.height)), right, look.added, true),
+            (egui::Rect::from_min_size(rect.min, egui::vec2(half, look.height)), left, false),
+            (egui::Rect::from_min_size(rect.min + egui::vec2(half + SEPARATOR, 0.0), egui::vec2(half, look.height)), right, true),
         ];
+        let colors = &look.colors;
         let mut label = Vec::new();
-        for (cell, index, tint, modified) in cells {
+        for (cell, index, modified) in cells {
             let painter = ui.painter().with_clip_rect(cell);
             let Some(line) = index.map(|i| &self.lines[i]) else {
                 painter.rect_filled(cell, egui::CornerRadius::ZERO, look.faint);
                 label.push(String::new());
                 continue;
             };
-            if line.op != Op::Same {
-                painter.rect_filled(cell, egui::CornerRadius::ZERO, tint);
+            if let Some(fill) = colors.fill(line.op) {
+                painter.rect_filled(cell, egui::CornerRadius::ZERO, fill);
             }
             let number = if modified { line.new } else { line.old };
             let mut job = LayoutJob::default();
-            job.append(&format!("{:>width$} ", number.map_or_else(String::new, |n| n.to_string()), width = self.digits), 0.0, egui::TextFormat::simple(look.font.clone(), look.weak));
-            job.append(&line.text, 0.0, egui::TextFormat::simple(look.font.clone(), look.strong));
+            job.append(&format!("{:>width$} ", number.map_or_else(String::new, |n| n.to_string()), width = self.digits), 0.0, egui::TextFormat::simple(look.font.clone(), colors.gutter));
+            job.append(&format!("{} ", mark(line.op)), 0.0, egui::TextFormat::simple(look.font.clone(), colors.mark_color(line.op)));
+            job.append(&line.text, 0.0, egui::TextFormat::simple(look.font.clone(), colors.text));
             let galley = painter.layout_job(job);
-            painter.galley(cell.min + egui::vec2(2.0, 0.0), galley, look.strong);
-            label.push(line.text.clone());
+            painter.galley(cell.min + egui::vec2(2.0, 0.0), galley, colors.text);
+            label.push(format!("{} {}", mark(line.op), line.text));
         }
         let label = format!("{} | {}", label[0], label[1]);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
     }
 }
 
-/// The colours and the font the rows are drawn with.
+/// The font and the colours the rows are drawn with.
 struct Look {
     font: egui::FontId,
     height: f32,
-    weak: Color32,
-    strong: Color32,
     faint: Color32,
-    error: Color32,
-    ok: Color32,
+    colors: DiffColors,
+}
+
+/// The colours of the rows: opaque fills and the text drawn on them, so the contrast does not depend on what is behind. Each pair is at least 4.5:1 (a test checks it), the fills are red for removed and green for added.
+#[derive(Clone, Copy)]
+struct DiffColors {
+    text: Color32,
+    /// The line numbers and the "unchanged lines" rows.
+    gutter: Color32,
     removed: Color32,
     added: Color32,
+    removed_mark: Color32,
+    added_mark: Color32,
+    gap: Color32,
+}
+
+fn diff_colors(dark: bool) -> DiffColors {
+    let rgb = |r, g, b| Color32::from_rgb(r, g, b);
+    match dark {
+        true => DiffColors { text: Color32::from_gray(230), gutter: Color32::from_gray(184), removed: rgb(0x58, 0x27, 0x2D), added: rgb(0x1E, 0x4A, 0x2C), removed_mark: rgb(0xFF, 0x9A, 0x9A), added_mark: rgb(0x8A, 0xE8, 0x96), gap: Color32::from_gray(40) },
+        false => DiffColors { text: Color32::from_gray(25), gutter: Color32::from_gray(88), removed: rgb(0xFF, 0xCC, 0xCC), added: rgb(0xBC, 0xEB, 0xC6), removed_mark: rgb(0x9E, 0x14, 0x14), added_mark: rgb(0x0F, 0x5E, 0x1A), gap: Color32::from_gray(234) },
+    }
+}
+
+impl DiffColors {
+    /// The fill of a changed line; none for an unchanged one.
+    fn fill(&self, op: Op) -> Option<Color32> {
+        match op {
+            Op::Same => None,
+            Op::Removed => Some(self.removed),
+            Op::Added => Some(self.added),
+        }
+    }
+
+    fn mark_color(&self, op: Op) -> Color32 {
+        match op {
+            Op::Same => self.text,
+            Op::Removed => self.removed_mark,
+            Op::Added => self.added_mark,
+        }
+    }
 }
 
 /// A row of `width`, with its text drawn at the left (it is not a label of its own: a screen reader and the tests get `label`).
@@ -338,15 +378,15 @@ fn paint_row(ui: &mut egui::Ui, look: &Look, width: f32, tint: Option<Color32>, 
         ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, tint);
     }
     let galley = ui.painter().layout_job(job);
-    ui.painter().galley(rect.min, galley, look.strong);
+    ui.painter().galley(rect.min, galley, look.colors.text);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
 }
 
 fn gap_row(ui: &mut egui::Ui, look: &Look, n: usize, width: f32) {
     let text = if n == 1 { "… 1 unchanged line".to_string() } else { format!("… {n} unchanged lines") };
     let mut job = LayoutJob::default();
-    job.append(&text, 0.0, egui::TextFormat::simple(look.font.clone(), look.weak));
-    paint_row(ui, look, width, Some(look.faint), job, text);
+    job.append(&text, 0.0, egui::TextFormat::simple(look.font.clone(), look.colors.gutter));
+    paint_row(ui, look, width, Some(look.colors.gap), job, text);
 }
 
 fn mark(op: Op) -> char {
@@ -464,6 +504,48 @@ mod tests {
 
     fn line(op: Op, text: &str, old: Option<usize>, new: Option<usize>) -> Line {
         Line { op, text: text.into(), old, new }
+    }
+
+    /// WCAG 2.x contrast ratio of two opaque colours.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let linear = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        let luminance = |c: Color32| 0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b());
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn every_text_on_a_tint_of_the_diff_reads_at_4_5_to_1_in_both_themes() {
+        for dark in [true, false] {
+            let theme = if dark { "dark" } else { "light" };
+            let visuals = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+            let colors = diff_colors(dark);
+            let bytes = crate::hex_view::changed_bytes(dark);
+            let pairs = [
+                ("text on removed", colors.text, colors.removed),
+                ("text on added", colors.text, colors.added),
+                ("text on the window", colors.text, visuals.window_fill),
+                ("line numbers on removed", colors.gutter, colors.removed),
+                ("line numbers on added", colors.gutter, colors.added),
+                ("line numbers on the window", colors.gutter, visuals.window_fill),
+                ("unchanged lines row", colors.gutter, colors.gap),
+                ("- mark", colors.removed_mark, colors.removed),
+                ("+ mark", colors.added_mark, colors.added),
+                ("differing byte of the original", bytes.text, bytes.removed),
+                ("differing byte of the mods copy", bytes.text, bytes.added),
+            ];
+            for (what, text, fill) in pairs {
+                assert_eq!(fill.a(), 255, "{what} ({theme}): the fill is not opaque");
+                let ratio = contrast(text, fill);
+                assert!(ratio >= 4.5, "{what} ({theme}): {ratio:.2}:1");
+            }
+            // Red still means removed and green added.
+            assert!(colors.removed.r() > colors.removed.g() && colors.added.g() > colors.added.r(), "{theme}");
+            assert!(bytes.removed.r() > bytes.removed.g() && bytes.added.g() > bytes.added.r(), "{theme}");
+        }
     }
 
     #[test]

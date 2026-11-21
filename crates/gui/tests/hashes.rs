@@ -100,7 +100,7 @@ fn generate_resolve_and_import_without_a_game() {
     harness.run_steps(2);
     edit_boxes(&harness)[2].type_text("My_adder\nPuwaaa\nThaeaa\n");
     harness.run_steps(2);
-    harness.get_by_label("Save these names…").click_accesskit();
+    harness.get_by_label("Save these names").click_accesskit();
     settle(&mut harness);
     // The names just saved now resolve the rows typed above in place.
     harness.get_by_label("3 names saved.");
