@@ -16,8 +16,8 @@ fn main() -> eframe::Result {
             .with_app_id(paleto_modkit::APP_ID)
             .with_icon(paleto_modkit::icon())
             .with_inner_size([1200.0, 760.0])
-            // Below this the file list, the tree and a preview no longer fit side by side.
-            .with_min_inner_size([640.0, 420.0])
+            // Below this the file list, the tree and a preview no longer fit side by side; the app sends it again when the text size changes.
+            .with_min_inner_size(paleto_modkit::app::MIN_WINDOW)
             .with_drag_and_drop(true),
         ..Default::default()
     };

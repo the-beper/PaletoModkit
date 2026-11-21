@@ -275,7 +275,7 @@ impl ModsCheck {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Request> {
-        let (request, closed) = crate::widgets::dialog(ctx, "mods_check", "Mods in game", 620.0, |ui| self.contents(ui));
+        let (request, closed) = crate::widgets::dialog(ctx, "mods_check", "Mods in game", crate::widgets::DIALOG_WIDE, |ui| self.contents(ui));
         if closed { Some(Request::Close) } else { request }
     }
 
@@ -310,7 +310,7 @@ impl ModsCheck {
                 ui.label("Checking the file formats…");
             });
         }
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         egui::CollapsingHeader::new(RichText::new("Setup").strong()).default_open(!problems.is_empty()).show(ui, |ui| self.setup_ui(ui));
 
         crate::widgets::section(ui, "Mods");
@@ -323,22 +323,22 @@ impl ModsCheck {
                 }
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         if let Some(r) = self.inventory_ui(ui) {
             request = Some(r);
         }
         if self.session.is_none() {
             let log = self.setup.plugin.trim_end_matches(".asi");
-            crate::widgets::hint(ui, format!("No {log} log yet: start the game once, then refresh to see which mods it reads."));
+            ui.label(format!("No {log} log yet: start the game once, then refresh to see which mods it reads."));
         }
 
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         egui::CollapsingHeader::new(RichText::new("Maintenance").strong()).show(ui, |ui| {
             if let Some(r) = self.maintenance_ui(ui) {
                 request = Some(r);
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         if ui.button("Refresh").clicked() {
             request = Some(Request::Refresh);
         }
@@ -403,10 +403,10 @@ impl ModsCheck {
                         if more > 0 {
                             ui.label(RichText::new(format!("and {more} more")).small().weak());
                         }
-                        if entry.status.contains(&ModStatus::NotInDlcList) && ui.small_button("Add to DLC list").clicked() {
+                        if entry.status.contains(&ModStatus::NotInDlcList) && ui.button("Add to DLC list").clicked() {
                             request = Some(Request::AddDlcPacks(vec![entry.name.clone()]));
                         }
-                        if !foreign.is_empty() && self.can_convert && ui.small_button("Convert to Enhanced").on_hover_text("The Legacy files are kept in the game folder's mods_legacy folder").clicked() {
+                        if !foreign.is_empty() && self.can_convert && ui.button("Convert to Enhanced").on_hover_text("The Legacy files are kept in the game folder's mods_legacy folder").clicked() {
                             request = Some(Request::Convert(foreign));
                         }
                     });
@@ -430,7 +430,7 @@ impl ModsCheck {
                         }
                     });
                 } else {
-                    crate::widgets::hint(ui, format!("{} (the converter) is not installed: convert the Legacy files with CodeWalker's Asset Converter, or set ${} to point at the converter installed with Paleto.", paleto_core::convert::TOOL, paleto_core::convert::ENV));
+                    ui.label(format!("{} (the converter) is not installed: convert the Legacy files with CodeWalker's Asset Converter, or set ${} to point at the converter installed with Paleto.", paleto_core::convert::TOOL, paleto_core::convert::ENV));
                 }
                 ui.collapsing("Legacy files", |ui| {
                     egui::ScrollArea::vertical().id_salt("foreign-files").max_height(crate::widgets::dialog_list_height(ui.ctx()) / 2.0).show(ui, |ui| {
@@ -461,7 +461,7 @@ impl ModsCheck {
                 }
             });
         }
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         match &self.copies {
             None => {
                 ui.horizontal_wrapped(|ui| {
@@ -494,7 +494,7 @@ impl ModsCheck {
             }
         }
         if let Some(session) = &self.session {
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             let when = session.time.and_then(|t| t.elapsed().ok()).map(|d| format!(" ({} ago)", age(d.as_secs()))).unwrap_or_default();
             ui.label(RichText::new(format!("{}{when}", session.log.display())).weak());
             if !session.errors.is_empty() {

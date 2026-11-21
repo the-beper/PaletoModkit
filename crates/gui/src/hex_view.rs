@@ -1,6 +1,6 @@
 //! Read-only hex dump of files that have no other preview.
 
-use eframe::egui::{self, text::LayoutJob};
+use eframe::egui::{self, Color32, text::LayoutJob};
 
 /// How much of a file is kept and shown; the rest is left out, and the summary says so.
 pub const MAX_HEX: usize = 8 << 20;
@@ -73,16 +73,15 @@ fn row(offset: usize, bytes: &[u8], per_row: usize) -> (String, String) {
 pub fn compare(ui: &mut egui::Ui, a: &[u8], b: &[u8], around: usize, rows: usize) {
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let (weak, strong) = (ui.visuals().weak_text_color(), ui.visuals().text_color());
-    let dark = ui.visuals().dark_mode;
+    let changed = changed_bytes(ui.visuals().dark_mode);
     let char_width = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
     // Offset, two buffers of 3 characters per byte and a gap in the middle of each.
     let per_row = if char_width * (10 + 2 * (3 * PER_ROW + 2) + 2) as f32 <= ui.available_width() { PER_ROW } else { PER_ROW / 2 };
     let first = around / per_row * per_row;
-    let tints = [crate::theme::error(dark).gamma_multiply(0.35), crate::theme::ok(dark).gamma_multiply(0.35)];
     for offset in (first..a.len().max(b.len())).step_by(per_row).take(rows) {
         let mut job = LayoutJob::default();
         job.append(&format!("{offset:08X}  "), 0.0, egui::TextFormat::simple(font.clone(), weak));
-        for (buffer, other, tint) in [(a, b, tints[0]), (b, a, tints[1])] {
+        for (buffer, other, fill) in [(a, b, changed.removed), (b, a, changed.added)] {
             for i in 0..per_row {
                 if i == 8 {
                     job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), strong));
@@ -90,7 +89,8 @@ pub fn compare(ui: &mut egui::Ui, a: &[u8], b: &[u8], around: usize, rows: usize
                 let (cell, differs) = hex_cell(buffer, other, offset + i);
                 let mut format = egui::TextFormat::simple(font.clone(), strong);
                 if differs {
-                    format.background = tint;
+                    format.background = fill;
+                    format.color = changed.text;
                 }
                 job.append(&cell, 0.0, format);
                 job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), strong));
@@ -98,6 +98,20 @@ pub fn compare(ui: &mut egui::Ui, a: &[u8], b: &[u8], around: usize, rows: usize
             job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), strong));
         }
         ui.add(egui::Label::new(job).extend());
+    }
+}
+
+/// The text and the fills of the bytes that differ, for the original and for the mods copy: opaque, so the contrast (at least 4.5:1, a test checks it) does not depend on what is behind.
+pub(crate) struct ChangedBytes {
+    pub(crate) text: Color32,
+    pub(crate) removed: Color32,
+    pub(crate) added: Color32,
+}
+
+pub(crate) fn changed_bytes(dark: bool) -> ChangedBytes {
+    match dark {
+        true => ChangedBytes { text: Color32::from_gray(250), removed: Color32::from_rgb(0x8A, 0x2E, 0x32), added: Color32::from_rgb(0x1F, 0x6E, 0x38) },
+        false => ChangedBytes { text: Color32::from_gray(10), removed: Color32::from_rgb(0xFF, 0xA8, 0xA8), added: Color32::from_rgb(0x8E, 0xE0, 0x9A) },
     }
 }
 

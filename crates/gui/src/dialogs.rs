@@ -17,7 +17,7 @@ use crate::actions::{Action, Unsaved};
 use crate::app::{App, Info, Status};
 use crate::menus::{about, format_combo, getting_started, shortcuts};
 use crate::preview::{PreviewSource, load_icon, load_picture};
-
+use crate::widgets::{DIALOG_MEDIUM, DIALOG_NARROW, SPACE_L, SPACE_M, SPACE_S};
 
 /// Add-on packs (dlc.rpf) dropped or chosen, to install into the mods folder.
 pub(crate) struct AddonDialog {
@@ -141,7 +141,7 @@ fn choices_list(ui: &mut egui::Ui, d: &mut InstallDialog) {
         if !part.media.is_empty() && (block.inner.clicked() || block.response.contains_pointer()) {
             *focus = Some(Focus::Module(m));
         }
-        ui.add_space(4.0);
+        ui.add_space(SPACE_S);
     }
     for (g, group) in choices.groups.iter().enumerate() {
         ui.separator();
@@ -163,7 +163,7 @@ fn choices_list(ui: &mut egui::Ui, d: &mut InstallDialog) {
             {
                 *focus = Some(Focus::Option(g, option));
             }
-            ui.add_space(2.0);
+            ui.add_space(SPACE_S);
         }
     }
 }
@@ -175,7 +175,7 @@ fn describe(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, text:
     }
     ui.scope(|ui| {
         ui.visuals_mut().indent_has_left_vline = false;
-        ui.indent(id, |ui| ui.label(RichText::new(text.trim()).weak()));
+        ui.indent(id, |ui| crate::widgets::hint(ui, text.trim()));
     });
 }
 
@@ -198,7 +198,7 @@ fn pictures(ui: &mut egui::Ui, d: &mut InstallDialog, height: f32) {
                     let captioned = !caption.trim().is_empty();
                     show_picture(ui, &texture, egui::vec2(width, height - trail - row * if captioned { 2.0 } else { 1.0 }));
                     if captioned {
-                        ui.label(RichText::new(caption.trim()).weak());
+                        crate::widgets::hint(ui, caption.trim());
                     }
                 }
                 Media::Compare { title, before, after } => {
@@ -217,8 +217,8 @@ fn pictures(ui: &mut egui::Ui, d: &mut InstallDialog, height: f32) {
                             let Some(texture) = texture else { continue };
                             ui.vertical(|ui| {
                                 ui.set_width(half);
-                                ui.label(RichText::new(*name).weak());
                                 show_picture(ui, texture, room);
+                                crate::widgets::hint(ui, *name);
                             });
                         }
                     });
@@ -230,7 +230,7 @@ fn pictures(ui: &mut egui::Ui, d: &mut InstallDialog, height: f32) {
 }
 
 /// The space after each picture item.
-const ITEM_GAP: f32 = 6.0;
+const ITEM_GAP: f32 = SPACE_M;
 
 /// A picture as large as it fits in `room`, in the middle of its width.
 fn show_picture(ui: &mut egui::Ui, texture: &egui::TextureHandle, room: egui::Vec2) {
@@ -419,6 +419,13 @@ impl App {
         dialog.result = Some(result);
     }
 
+    /// The outside widths of the three dialog sizes (the frame included), for the layout tests.
+    #[doc(hidden)]
+    pub fn dialog_widths(ctx: &egui::Context) -> [f32; 3] {
+        let padding = crate::widgets::modal_frame(ctx).total_margin().sum().x;
+        [DIALOG_NARROW, DIALOG_MEDIUM, crate::widgets::DIALOG_WIDE].map(|width| width + padding)
+    }
+
     /// What the install dialog has chosen of a super package, while it is open.
     #[doc(hidden)]
     pub fn install_selection(&self) -> Option<&Selection> {
@@ -480,13 +487,13 @@ impl App {
         let screen = ctx.content_rect();
         // The dialog keeps about this much for its header, description, notes and buttons; the rest may go to the pictures.
         let picture_height = (screen.height() - 340.0).clamp(100.0, 540.0);
-        egui::Modal::new(egui::Id::unique("install")).show(ctx, |ui| {
+        crate::widgets::modal(ctx, "install").show(ctx, |ui| {
             // A row of pictures with the part's name above and "Before"/"After" over a comparison.
             let section_height = picture_height + 2.0 * label_row(ui);
             let width = match (&d.choices, d.widest) {
-                (None, _) => 520.0,
-                (Some(_), None) => 560.0,
-                (Some(_), Some(widest)) => (LIST_WIDTH + 3.0 * ui.spacing().item_spacing.x + picture_height * widest).clamp(560.0, (screen.width() - 60.0).max(560.0)),
+                (None, _) | (Some(_), None) => DIALOG_MEDIUM,
+                // Sized by its pictures, not by a measure of text.
+                (Some(_), Some(widest)) => (LIST_WIDTH + 3.0 * ui.spacing().item_spacing.x + picture_height * widest).clamp(DIALOG_MEDIUM, (screen.width() - 60.0).max(DIALOG_MEDIUM)),
             };
             ui.set_width(width);
             ui.horizontal(|ui| {
@@ -494,7 +501,7 @@ impl App {
                     ui.add(egui::Image::new(icon).fit_to_exact_size(egui::vec2(64.0, 64.0)));
                 }
                 ui.vertical(|ui| {
-                    ui.heading(&d.metadata.name);
+                    ui.heading(crate::widgets::title_text(&d.metadata.name));
                     let version = (!d.metadata.version.is_empty()).then(|| format!("Version {}", d.metadata.version));
                     let author = (!d.metadata.author.is_empty()).then(|| format!("by {}", d.metadata.author));
                     let line: Vec<String> = version.into_iter().chain(author).collect();
@@ -546,17 +553,10 @@ impl App {
                             let it = if d.legacy.len() == 1 { "it" } else { "them" };
                             ui.checkbox(&mut d.convert, format!("Convert {it} to Enhanced while installing (with CodeWalker's converter)"));
                         } else {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} (the converter) is not installed: convert {} with CodeWalker's Asset Converter.",
-                                    paleto_core::convert::TOOL,
-                                    if d.legacy.len() == 1 { "it" } else { "them" }
-                                ))
-                                .weak(),
-                            );
+                            crate::widgets::hint(ui, format!("{} (the converter) is not installed: convert {} with CodeWalker's Asset Converter.", paleto_core::convert::TOOL, if d.legacy.len() == 1 { "it" } else { "them" }));
                         }
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(SPACE_L);
                     ui.horizontal(|ui| {
                         if busy {
                             ui.spinner();
@@ -614,7 +614,7 @@ impl App {
                             }
                         });
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(SPACE_L);
                     if ui.add(crate::widgets::primary(ui, "Close")).clicked() {
                         actions.push(Action::CloseInstall);
                     }
@@ -629,7 +629,7 @@ impl App {
         let program = &mut self.model_program;
         let folder = d.report.xml.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut close = false;
-        let ((), closed) = crate::widgets::dialog_sized(ctx, "model-export", "Model exported", 520.0, false, |ui| {
+        let ((), closed) = crate::widgets::dialog_sized(ctx, "model-export", "Model exported", DIALOG_MEDIUM, false, |ui| {
             let dark = ui.visuals().dark_mode;
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("{} and {} in", file_name(&d.report.xml), count_textures(d.report.textures)));
@@ -647,15 +647,16 @@ impl App {
                 .response
                 .on_hover_text(missing.join("\n"));
             }
-            ui.add_space(6.0);
+            ui.add_space(SPACE_M);
             if ui.button("📂 Open folder").clicked() {
                 d.message = Some(paleto_core::launch::open_folder(&folder).map(|()| "Opened the folder".to_string()));
             }
-            ui.add_space(6.0);
+            ui.add_space(SPACE_M);
             let mut enter = false;
             ui.horizontal(|ui| {
                 ui.label("Open with");
-                let field = ui.add(egui::TextEdit::singleline(program).desired_width(ui.available_width() - 70.0).hint_text("a program and its arguments"));
+                let width = (ui.available_width() - crate::widgets::button_width(ui, "Open") - ui.spacing().item_spacing.x).max(0.0);
+                let field = ui.add(crate::widgets::single_line(program).desired_width(width).hint_text("a program and its arguments"));
                 enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let open = ui.add_enabled(!program.trim().is_empty(), egui::Button::new("Open")).on_disabled_hover_text("Enter a command line first");
                 if open.clicked() || (enter && !program.trim().is_empty()) {
@@ -676,7 +677,7 @@ impl App {
                 }
                 None => {}
             }
-            ui.add_space(6.0);
+            ui.add_space(SPACE_L);
             if ui.add(crate::widgets::primary(ui, "Close")).clicked() {
                 close = true;
             }
@@ -692,10 +693,12 @@ impl App {
         }
         let name = self.preview.as_ref().map_or(String::new(), |p| p.name.clone());
         let can_save = !self.busy();
-        let response = egui::Modal::new(egui::Id::unique("unsaved")).show(ctx, |ui| {
-            ui.heading("Unsaved changes");
+        let response = crate::widgets::modal(ctx, "unsaved").show(ctx, |ui| {
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_NARROW));
+            ui.heading(crate::widgets::title_text("Unsaved changes"));
+            ui.add_space(SPACE_M);
             ui.label(format!("{name} has changes that are not saved. Save them before going on?"));
-            ui.add_space(6.0);
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 if ui.add_enabled(can_save, crate::widgets::primary(ui, "💾 Save")).clicked() {
                     actions.push(Action::Unsaved(Unsaved::Save));
@@ -720,7 +723,7 @@ impl App {
             Info::Shortcuts => "Keyboard and mouse shortcuts",
             Info::About => "About",
         };
-        let ((), closed) = crate::widgets::dialog(ctx, "info", title, 460.0, |ui| match info {
+        let ((), closed) = crate::widgets::dialog(ctx, "info", title, DIALOG_MEDIUM, |ui| match info {
             Info::GettingStarted => getting_started(ui),
             Info::Shortcuts => shortcuts(ui),
             Info::About => about(ui),
@@ -755,10 +758,12 @@ impl App {
             }
         };
         let mut submit = None;
-        let response = egui::Modal::new(egui::Id::unique("name")).show(ctx, |ui| {
-            ui.heading(if renaming.is_some() { "Rename" } else { "New folder" });
+        let response = crate::widgets::modal(ctx, "name").show(ctx, |ui| {
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_NARROW));
+            ui.heading(crate::widgets::title_text(if renaming.is_some() { "Rename" } else { "New folder" }));
+            ui.add_space(SPACE_M);
             let id = egui::Id::unique("name-field");
-            let field = ui.add(egui::TextEdit::singleline(&mut d.name).id(id).desired_width(320.0));
+            let field = ui.add(crate::widgets::single_line(&mut d.name).id(id).desired_width(f32::INFINITY));
             if d.focus {
                 d.focus = false;
                 field.request_focus();
@@ -776,10 +781,10 @@ impl App {
                 ui.label(RichText::new(problem).color(theme::error(ui.visuals().dark_mode)));
             }
             if !on_disk {
-                ui.label(RichText::new("Names are stored in lower case. Original game archives are copied to the mods folder first.").weak());
+                crate::widgets::hint(ui, "Names are stored in lower case. Original game archives are copied to the mods folder first.");
             }
             let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.add_space(6.0);
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 let ok = ui.add_enabled(checked.is_ok(), crate::widgets::primary(ui, if renaming.is_some() { "Rename" } else { "Create" }));
                 if checked.is_ok() && (ok.clicked() || enter) {
@@ -810,14 +815,16 @@ impl App {
         let (dict, ytd_name) = (view.dict.clone(), self.preview.as_ref().map(|p| p.name.clone()).unwrap_or_default());
         let Some(d) = &mut self.texture_dialog else { return };
         let mut submit = false;
-        let response = egui::Modal::new(egui::Id::unique("texture")).show(ctx, |ui| {
+        let response = crate::widgets::modal(ctx, "texture").show(ctx, |ui| {
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_NARROW));
             let (title, button) = match &d.edit {
                 TextureEdit::Replace { .. } => ("Replace texture", "Replace"),
                 TextureEdit::Add { .. } => ("Add texture", "Add"),
                 TextureEdit::Rename { .. } => ("Rename texture", "Rename"),
                 TextureEdit::Remove(_) => ("Remove texture?", "Remove"),
             };
-            ui.heading(title);
+            ui.heading(crate::widgets::title_text(title));
+            ui.add_space(SPACE_M);
             let mut problem = None;
             let mut enter = false;
             // The name to enter, with the current one when renaming.
@@ -828,7 +835,7 @@ impl App {
             };
             if let Some(name) = name {
                 let id = egui::Id::unique("texture-name");
-                let field = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(320.0));
+                let field = ui.add(crate::widgets::single_line(name).id(id).desired_width(f32::INFINITY));
                 if d.focus {
                     d.focus = false;
                     field.request_focus();
@@ -867,9 +874,9 @@ impl App {
                             None => "Automatic: BC1, or BC3 with transparency".to_string(),
                         };
                         format_combo(ui, format, auto);
-                        ui.label(RichText::new("Mipmaps are generated when the size is a power of two.").weak());
+                        crate::widgets::hint(ui, "Mipmaps are generated when the size is a power of two.");
                     } else {
-                        ui.label(RichText::new("The DDS file is used as it is, with its format and mipmaps.").weak());
+                        crate::widgets::hint(ui, "The DDS file is used as it is, with its format and mipmaps.");
                     }
                 }
                 TextureEdit::Remove(name) => {
@@ -877,7 +884,8 @@ impl App {
                 }
                 TextureEdit::Rename { .. } => {}
             }
-            ui.label(RichText::new("Original game archives are copied to the mods folder first.").weak());
+            crate::widgets::hint(ui, "Original game archives are copied to the mods folder first.");
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 let ok = ui.add_enabled(
                     problem.is_none(),
@@ -921,9 +929,10 @@ impl App {
         let Some(d) = &mut self.texture_batch else { return };
         let file_name = |f: &PathBuf| f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut confirm = false;
-        let response = egui::Modal::new(egui::Id::unique("texture-batch")).show(ctx, |ui| {
-            ui.set_max_width(520.0);
-            ui.heading(format!("Replace textures in {ytd_name}"));
+        let response = crate::widgets::modal(ctx, "texture-batch").show(ctx, |ui| {
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_MEDIUM));
+            ui.heading(crate::widgets::title_text(&format!("Replace textures in {ytd_name}")));
+            ui.add_space(SPACE_M);
             let height = crate::widgets::dialog_list_height(ui.ctx()) / 2.0;
             let batch = &d.batch;
             if batch.replace.is_empty() {
@@ -937,7 +946,7 @@ impl App {
                 });
             }
             if !batch.unmatched.is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(SPACE_M);
                 ui.label(format!("{} {} no texture:", batch.unmatched.len(), if batch.unmatched.len() == 1 { "file matches" } else { "files match" }));
                 egui::ScrollArea::vertical().id_salt("batch-unmatched").max_height(height).show(ui, |ui| {
                     for file in &batch.unmatched {
@@ -947,10 +956,11 @@ impl App {
                 ui.checkbox(&mut d.add_unmatched, "Add them as new textures");
             }
             if !batch.duplicates.is_empty() {
-                ui.label(RichText::new(format!("{} skipped: another file has the same name (DDS files win over PNG).", batch.duplicates.len())).weak());
+                crate::widgets::hint(ui, format!("{} skipped: another file has the same name (DDS files win over PNG).", batch.duplicates.len()));
             }
-            ui.add_space(6.0);
-            ui.label(RichText::new("DDS files are used as they are; PNG files keep each texture's format. Original game archives are copied to the mods folder first.").weak());
+            ui.add_space(SPACE_M);
+            crate::widgets::hint(ui, "DDS files are used as they are; PNG files keep each texture's format. Original game archives are copied to the mods folder first.");
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 let count = batch.replace.len() + if d.add_unmatched { batch.unmatched.len() } else { 0 };
                 confirm = ui.add_enabled(count > 0, crate::widgets::primary(ui, "Replace")).clicked();
@@ -970,18 +980,19 @@ impl App {
         let can_convert = paleto_core::convert::converter().is_some();
         let Some(game) = &self.game else { return };
         let Some(dialog) = &mut self.addon_dialog else { return };
-        let response = egui::Modal::new(egui::Id::unique("addon-packs")).show(ctx, |ui| {
+        let response = crate::widgets::modal(ctx, "addon-packs").show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
-            ui.set_max_width(560.0);
-            ui.heading(if dialog.packs.len() == 1 { "Install add-on pack" } else { "Install add-on packs" });
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_MEDIUM));
+            ui.heading(crate::widgets::title_text(if dialog.packs.len() == 1 { "Install add-on pack" } else { "Install add-on packs" }));
+            ui.add_space(SPACE_M);
             ui.label("Copied to the mods folder as update/x64/dlcpacks/<name>/dlc.rpf and added to its DLC list, so the game loads it.");
             let mut valid = true;
             for (dlc, name) in &mut dialog.packs {
-                ui.add_space(4.0);
+                ui.add_space(SPACE_S);
                 ui.label(RichText::new(dlc.display().to_string()).weak().small());
                 ui.horizontal(|ui| {
                     ui.label("Name:");
-                    ui.text_edit_singleline(name);
+                    ui.add(crate::widgets::single_line(name).desired_width(f32::INFINITY));
                 });
                 let lower = name.to_ascii_lowercase();
                 if !paleto_core::addon::valid_name(&lower) {
@@ -992,7 +1003,7 @@ impl App {
                 }
             }
             if dialog.legacy > 0 {
-                ui.add_space(4.0);
+                ui.add_space(SPACE_S);
                 let (what, it) = match dialog.legacy {
                     1 => ("1 file in it is".to_string(), "it"),
                     n => (format!("{n} files in them are"), "them"),
@@ -1002,6 +1013,7 @@ impl App {
                     ui.checkbox(&mut dialog.convert, format!("Convert {it} to Enhanced (with CodeWalker's converter)"));
                 }
             }
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 if ui.add_enabled(valid, crate::widgets::primary(ui, "Install")).clicked() {
                     actions.push(Action::InstallAddonPacks);
@@ -1018,9 +1030,10 @@ impl App {
     pub(crate) fn legacy_add_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let can_convert = paleto_core::convert::converter().is_some();
         let Some(add) = &mut self.legacy_add else { return };
-        let response = egui::Modal::new(egui::Id::unique("legacy-add")).show(ctx, |ui| {
-            ui.set_max_width(520.0);
-            ui.heading("Files made for Legacy");
+        let response = crate::widgets::modal(ctx, "legacy-add").show(ctx, |ui| {
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_MEDIUM));
+            ui.heading(crate::widgets::title_text("Files made for Legacy"));
+            ui.add_space(SPACE_M);
             let (what, it) = match add.legacy.len() {
                 1 => ("1 file is".to_string(), "it"),
                 n => (format!("{n} files are"), "them"),
@@ -1033,16 +1046,11 @@ impl App {
             }
             if can_convert {
                 ui.checkbox(&mut add.convert, format!("Convert {it} to Enhanced (with CodeWalker's converter)"));
-                ui.label(RichText::new("The files on disk are not changed.").weak());
+                crate::widgets::hint(ui, "The files on disk are not changed.");
             } else {
-                ui.label(
-                    RichText::new(format!(
-                        "{} (the converter) is not installed: convert {it} with CodeWalker's Asset Converter.",
-                        paleto_core::convert::TOOL
-                    ))
-                    .weak(),
-                );
+                crate::widgets::hint(ui, format!("{} (the converter) is not installed: convert {it} with CodeWalker's Asset Converter.", paleto_core::convert::TOOL));
             }
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 if ui.add(crate::widgets::primary(ui, "Add")).clicked() {
                     actions.push(Action::AddLegacy { convert: can_convert && add.convert });
@@ -1065,17 +1073,18 @@ impl App {
             (Some(dir), Some(game)) => dir.starts_with(&game.root) && !dir.starts_with(game.mods_dir()) && !(dir == &game.root && names.iter().all(|n| n == "mods")),
             _ => false,
         };
-        let response = egui::Modal::new(egui::Id::unique("delete")).show(ctx, |ui| {
+        let response = crate::widgets::modal(ctx, "delete").show(ctx, |ui| {
             let dark = ui.visuals().dark_mode;
-            ui.heading(if names.len() == 1 { "Delete this item?".to_string() } else { format!("Delete these {} items?", names.len()) });
-            ui.add_space(4.0);
+            ui.set_width(crate::widgets::dialog_width(ctx, DIALOG_NARROW));
+            ui.heading(crate::widgets::title_text(&if names.len() == 1 { "Delete this item?".to_string() } else { format!("Delete these {} items?", names.len()) }));
+            ui.add_space(SPACE_M);
             for name in names.iter().take(8) {
                 ui.label(RichText::new(name).monospace());
             }
             if names.len() > 8 {
                 ui.label(format!("…and {} more", names.len() - 8));
             }
-            ui.add_space(4.0);
+            ui.add_space(SPACE_M);
             if dir.is_some() {
                 if original.is_none() {
                     let what = if names.len() == 1 { "It is" } else { "They are" };
@@ -1090,9 +1099,9 @@ impl App {
                     );
                 }
             } else {
-                ui.label(RichText::new("Original game archives are copied to the mods folder first.").weak());
+                crate::widgets::hint(ui, "Original game archives are copied to the mods folder first.");
             }
-            ui.add_space(6.0);
+            ui.add_space(SPACE_L);
             ui.horizontal(|ui| {
                 if ui.add_enabled(original.is_none(), crate::widgets::danger(ui, "Delete")).clicked() {
                     actions.push(Action::Delete);

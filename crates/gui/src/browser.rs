@@ -368,7 +368,7 @@ impl App {
             return;
         };
         let crumbs = self.breadcrumbs(b);
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + self.settings.density.row_padding();
+        let row_height = (ui.text_style_height(&egui::TextStyle::Body) + self.settings.density.row_padding()).max(ui.spacing().interact_size.y);
         let settings = self.settings.clone();
         let colored = settings.colored_icons;
         // Keys and tools act on the rows shown: not while another place is being read.
@@ -512,7 +512,13 @@ impl App {
                 (true, true) => " ⏷",
                 _ => "",
             };
-            let response = ui.add(egui::Label::new(RichText::new(format!("{label}{arrow}")).strong()).sense(egui::Sense::click()));
+            let name = format!("Sort by {}", label.to_lowercase());
+            // No frame, so the text stays on the column's left edge (a frame brings the button padding back); strong text has one colour, so hover and focus are an underline.
+            let button = egui::Button::new(RichText::new(format!("{label}{arrow}")).strong()).frame(false).truncate();
+            let response = ui.add(button).on_hover_text(format!("{name}, click again to reverse")).accessible_name(name);
+            if response.hovered() || response.has_focus() {
+                ui.painter().hline(response.rect.x_range(), response.rect.bottom() - 1.0, ui.visuals().widgets.hovered.fg_stroke);
+            }
             if response.clicked() {
                 let mut s = settings.clone();
                 s.descending = s.sort_by == column && !s.descending;
@@ -520,6 +526,7 @@ impl App {
                 actions.push(Action::Settings(s));
             }
         };
+        let slot_width = icon_width(ui);
         // Type and size give up room first when the list is narrow; the name keeps the rest.
         let width = ui.available_width();
         let mut table = TableBuilder::new(ui)
@@ -551,29 +558,39 @@ impl App {
                         RowKind::Resource(v) => format!("{} (v{v})", extension(&r.name)),
                     };
                     row.col(|ui| {
-                        let icon = RichText::new(class.icon());
-                        ui.label(if colored { icon.color(class.color(ui.visuals().dark_mode)) } else { icon });
+                        let dark = ui.visuals().dark_mode;
+                        let (slot, _) = ui.allocate_exact_size(egui::vec2(slot_width, ui.text_style_height(&egui::TextStyle::Body)), egui::Sense::hover());
+                        paint_icon(ui, slot, class, colored, ui.visuals().text_color());
                         let name = RichText::new(&r.name);
-                        let response = ui.label(if r.modded { name.color(theme::modded(ui.visuals().dark_mode)) } else { name });
+                        let name = if r.modded { name.color(theme::modded(dark)) } else { name };
+                        // A game file the game reads from the mods folder instead: marked after its name, which gives up the room for it.
+                        let mark = (r.modded && !b.from_mods).then(|| RichText::new(MODS_LINK).color(theme::modded(dark)));
+                        let reserved = mark.as_ref().map_or(0.0, |m| ui.spacing().item_spacing.x + egui::WidgetText::from(m.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x);
+                        let response = ui
+                            .scope(|ui| {
+                                ui.set_max_width((ui.available_width() - reserved).max(0.0));
+                                ui.add(egui::Label::new(name).truncate().show_tooltip_when_elided(!r.modded))
+                            })
+                            .inner;
                         if r.modded {
                             let hover = match (b.from_mods, r.added) {
                                 (true, true) => "Not in the original game files",
                                 (true, false) => "Different from the original game file",
                                 (false, _) => MODS_LINK_HOVER,
                             };
-                            // A game file the game reads from the mods folder instead.
-                            if !b.from_mods {
-                                ui.label(RichText::new(MODS_LINK).color(theme::modded(ui.visuals().dark_mode))).on_hover_text(hover);
+                            if let Some(mark) = mark {
+                                ui.label(mark).on_hover_text(hover);
                             }
-                            response.on_hover_text(hover);
+                            // The name in full too: the label's own tooltip for a cut name is off here, so the two do not stack.
+                            response.on_hover_text(format!("{}\n{hover}", r.name));
                         }
                     });
                     row.col(|ui| {
-                        ui.label(kind);
+                        ui.add(egui::Label::new(kind).truncate());
                     });
                     row.col(|ui| {
                         if r.kind != RowKind::Folder {
-                            ui.label(size(r.size));
+                            ui.add(egui::Label::new(size(r.size)).truncate());
                         }
                     });
                     let response = row.response();
@@ -706,13 +723,29 @@ fn tree_entries(dir: &Path, game: Option<&Game>, show_originals: bool, all_files
     entries
 }
 
+fn icon_galley(ui: &egui::Ui, class: FileClass) -> std::sync::Arc<egui::Galley> {
+    egui::WidgetText::from(class.icon()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+}
+
+/// The width every file icon is given: that of the widest, so a name starts at the same x after any of them.
+pub(crate) fn icon_width(ui: &egui::Ui) -> f32 {
+    FileClass::ALL.iter().map(|&class| icon_galley(ui, class).size().x).fold(0.0, f32::max)
+}
+
+/// Draws the icon of `class` centred in `slot`: in the class colour when `colored`, else in `plain`.
+pub(crate) fn paint_icon(ui: &egui::Ui, slot: egui::Rect, class: FileClass, colored: bool, plain: egui::Color32) {
+    let galley = icon_galley(ui, class);
+    let color = if colored { class.color(ui.visuals().dark_mode) } else { plain };
+    ui.painter().galley(slot.center() - galley.size() / 2.0, galley, color);
+}
+
 /// The filter box of the file list (in the menu bar).
 const FILTER_ID: &str = "browser filter";
 
 /// The box that filters the file list by name, at `rect`; typing in the list goes there.
 pub(crate) fn filter_box(ui: &mut egui::Ui, b: &mut Browser, rect: egui::Rect) {
     let id = egui::Id::unique(FILTER_ID);
-    let field = egui::TextEdit::singleline(&mut b.filter)
+    let field = crate::widgets::single_line(&mut b.filter)
         .id(id)
         .hint_text("🔍 Filter this folder…")
         .desired_width(rect.width())

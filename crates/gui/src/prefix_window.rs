@@ -57,6 +57,12 @@ fn paint_mark(ui: &egui::Ui, rect: egui::Rect, mark: Mark, color: egui::Color32)
     }
 }
 
+/// Names a status icon, for the pointer (a tooltip) and for screen readers.
+fn name_mark(response: egui::Response, text: &str) {
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, text));
+    response.on_hover_text(text);
+}
+
 /// What the prefix looks like now.
 struct Found {
     prefix: Prefix,
@@ -234,7 +240,7 @@ impl PrefixWindow {
         // The permission gate is short: it is only as tall as its text.
         let fill = self.gate.is_none();
         let (action, closed) =
-            crate::widgets::dialog_sized(ctx, "prefix_tweaks", "Prefix tweaks", 580.0, fill, |ui| {
+            crate::widgets::dialog_sized(ctx, "prefix_tweaks", "Prefix tweaks", crate::widgets::DIALOG_MEDIUM, fill, |ui| {
                 self.contents(ui)
             });
         match action {
@@ -332,9 +338,9 @@ impl PrefixWindow {
         ui.vertical_centered(|ui| {
             ui.label(RichText::new("Prefix tweaks need a permission first").strong());
             ui.label("Wine runs on the host, and this Flatpak is not allowed to run commands there. Allow it once, in a terminal:");
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             ui.label(RichText::new(&command).monospace());
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             // Each button has an icon slot beside it. The slots are always there, so the
             // icon appearing does not move anything.
             let height = ui.spacing().interact_size.y;
@@ -346,9 +352,10 @@ impl PrefixWindow {
             let row = height + gap + text_width(ui, "Copy command") + gap + text_width(ui, "Check again") + gap + height;
             ui.horizontal(|ui| {
                 ui.add_space(((ui.available_width() - row) / 2.0).max(0.0));
-                let (left, _) = ui.allocate_exact_size(egui::vec2(height, height), egui::Sense::hover());
+                let (left, left_response) = ui.allocate_exact_size(egui::vec2(height, height), egui::Sense::hover());
                 if let Some(at) = self.copied_at.filter(|at| at.elapsed() < COPIED_SHOWN) {
                     paint_mark(ui, left, Mark::Copied, theme::ok(dark));
+                    name_mark(left_response, "Command copied to the clipboard");
                     ui.ctx().request_repaint_after(COPIED_SHOWN - at.elapsed());
                 }
                 if ui.button("Copy command").clicked() {
@@ -358,22 +365,20 @@ impl PrefixWindow {
                 if ui.button("Check again").clicked() {
                     request = Some(Do::Check);
                 }
-                let (right, _) = ui.allocate_exact_size(egui::vec2(height, height), egui::Sense::hover());
+                let (right, right_response) = ui.allocate_exact_size(egui::vec2(height, height), egui::Sense::hover());
                 if let Some((at, granted)) = self.checked_at {
                     let shown = if granted { GRANTED_SHOWN } else { REFUSED_SHOWN };
                     if at.elapsed() < shown {
                         let mark = if granted { Mark::Granted } else { Mark::Refused };
                         let color = if granted { theme::ok(dark) } else { theme::error(dark) };
                         paint_mark(ui, right, mark, color);
+                        name_mark(right_response, if granted { "Permission granted" } else { "The permission is still missing" });
                         ui.ctx().request_repaint_after(shown - at.elapsed());
                     }
                 }
             });
-            ui.add_space(4.0);
-            crate::widgets::hint(
-                ui,
-                "A permission applies when the app starts: after allowing it, close and reopen Paleto Modkit, then check again. Until it is allowed, nothing in this window can run. To take it back, run the same command with --no-talk-name in place of --talk-name.",
-            );
+            ui.add_space(crate::widgets::SPACE_S);
+            ui.label("A permission applies when the app starts: after allowing it, close and reopen Paleto Modkit, then check again. Until it is allowed, nothing in this window can run. To take it back, run the same command with --no-talk-name in place of --talk-name.");
         });
         request
     }
@@ -393,12 +398,9 @@ impl PrefixWindow {
                 if let Some(Err(e)) = self.outcome.as_ref().filter(|o| o.as_ref().err() != Some(why)) {
                     ui.label(RichText::new(e).color(theme::error(dark)));
                 }
-                ui.add_space(4.0);
-                crate::widgets::hint(
-                    ui,
-                    "Prefix tweaks need the game started once with Proton. If it is not in Steam's library, or Steam knows it as a non-Steam game, choose its prefix: the game's compatdata/<app id> folder (the one that has pfx inside).",
-                );
-                ui.add_space(4.0);
+                ui.add_space(crate::widgets::SPACE_S);
+                ui.label("Prefix tweaks need the game started once with Proton. If it is not in Steam's library, or Steam knows it as a non-Steam game, choose its prefix: the game's compatdata/<app id> folder (the one that has pfx inside).");
+                ui.add_space(crate::widgets::SPACE_S);
                 let mut request = None;
                 if ui.button("Choose prefix folder…").clicked() {
                     request = Some(Do::Choose);
@@ -413,7 +415,7 @@ impl PrefixWindow {
         let busy = self.job.is_some();
 
         ui.label("Changes to the game's Wine prefix that some mods need. They never touch the game's files or the mods folder.");
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Prefix").weak());
             ui.label(found.prefix.path.display().to_string());
@@ -424,13 +426,13 @@ impl PrefixWindow {
         });
 
         if found.own_pfx {
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             ui.label(RichText::new(format!("⚠ {}", prefix::OWN_PFX_NOTE)).color(theme::warning(dark)));
         }
 
         crate::widgets::section(ui, ".NET Framework 4.8");
         ui.label("ScriptHookVDotNet and the mods written for it (scripts/*.dll) run on .NET. Paleto installs it in the prefix; ScriptHookVDotNet and the mods themselves you add yourself.");
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         let state = &found.dotnet;
         ui.horizontal_wrapped(|ui| {
             match (state.installed(), state.windows_ok()) {
@@ -441,12 +443,9 @@ impl PrefixWindow {
             ui.label(state.describe());
         });
         if !state.windows_ok() {
-            crate::widgets::hint(
-                ui,
-                "A failed install can leave the prefix set to an old Windows. Installing again sets it back.",
-            );
+            ui.label("A failed install can leave the prefix set to an old Windows. Installing again sets it back.");
         }
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         let label = if state.installed() && state.windows_ok() {
             "Reinstall…"
         } else if state.installed() {
@@ -551,6 +550,7 @@ impl PrefixWindow {
                     }
                 });
             });
+            let log_font = egui::FontId::monospace(egui::TextStyle::Small.resolve(ui.style()).size);
             egui::ScrollArea::vertical()
                 .id_salt("prefix_log")
                 .max_height(200.0)
@@ -558,7 +558,7 @@ impl PrefixWindow {
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for line in job.log.lock().unwrap().iter() {
-                        ui.label(RichText::new(line).monospace().size(12.0));
+                        ui.label(RichText::new(line).font(log_font.clone()));
                     }
                 });
         } else if let Some(outcome) = &self.outcome {
@@ -577,7 +577,7 @@ impl PrefixWindow {
 
         crate::widgets::section(ui, "Backups of the prefix");
         ui.label("A backup keeps the whole prefix as it is now. If a change breaks the game, restore it to go back.");
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         if ui
             .add_enabled(!busy && !found.in_use, egui::Button::new("Back up now"))
             .clicked()
@@ -634,7 +634,7 @@ impl PrefixWindow {
                 }
             });
         }
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         if ui
             .add_enabled(!busy, egui::Button::new("Refresh"))
             .on_hover_text("Look at the prefix again")
@@ -643,7 +643,7 @@ impl PrefixWindow {
             request = Some(Do::Refresh);
         }
         if prefix::chosen(&self.game).is_some() {
-            ui.add_space(4.0);
+            ui.add_space(crate::widgets::SPACE_S);
             if ui.button("Use Steam's prefix again").on_hover_text("Forget the folder you chose and look in Steam's library").clicked() {
                 request = Some(Do::Forget);
             }

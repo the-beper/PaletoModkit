@@ -54,7 +54,7 @@ impl ExportWindow {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, busy: bool) -> Option<Request> {
-        let (request, closed) = crate::widgets::dialog(ctx, "export", "Export mods as an OIV package", 620.0, |ui| self.contents(ui, busy));
+        let (request, closed) = crate::widgets::dialog(ctx, "export", "Export mods as an OIV package", crate::widgets::DIALOG_WIDE, |ui| self.contents(ui, busy));
         if closed { Some(Request::Close) } else { request }
     }
 
@@ -77,7 +77,7 @@ impl ExportWindow {
              (with their DLC list entry). Installed on a clean mods folder, it rebuilds these changes.",
         );
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(filter).hint_text("Filter, e.g. timecycle").desired_width(220.0));
+            ui.add(crate::widgets::single_line(filter).hint_text("Filter, e.g. timecycle").desired_width(260.0));
             let shown: Vec<usize> = (0..changes.len()).filter(|&i| matches(filter, &changes[i])).collect();
             if ui.button("Select shown").clicked() {
                 shown.iter().for_each(|&i| selected[i] = true);
@@ -97,7 +97,8 @@ impl ExportWindow {
                 let on = items.iter().filter(|&&i| selected[i]).count();
                 ui.horizontal(|ui| {
                     let mut all = on == items.len();
-                    if ui.checkbox(&mut all, "").changed() {
+                    // No visible label: the tooltip is also the checkbox's accessible name.
+                    if ui.checkbox(&mut all, "").on_hover_text(format!("Select or unselect every change of {name}")).changed() {
                         items.iter().for_each(|&i| selected[i] = all);
                     }
                     egui::CollapsingHeader::new(format!("{name}  ({on} of {})", items.len())).id_salt(name).show(ui, |ui| {
@@ -122,13 +123,13 @@ impl ExportWindow {
         crate::widgets::section(ui, "Package");
         egui::Grid::new("export-meta").num_columns(2).show(ui, |ui| {
             ui.label("Name");
-            ui.text_edit_singleline(&mut meta.name);
+            ui.add(crate::widgets::single_line(&mut meta.name));
             ui.end_row();
             ui.label("Version");
-            ui.text_edit_singleline(&mut meta.version);
+            ui.add(crate::widgets::single_line(&mut meta.version));
             ui.end_row();
             ui.label("Author");
-            ui.text_edit_singleline(&mut meta.author);
+            ui.add(crate::widgets::single_line(&mut meta.author));
             ui.end_row();
         });
         let chosen: Vec<Changed> = changes.iter().zip(selected.iter()).filter(|(_, s)| **s).map(|(c, _)| c.clone()).collect();

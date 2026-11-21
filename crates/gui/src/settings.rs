@@ -109,6 +109,15 @@ impl Density {
             Self::Comfortable => (5.0, 3.0),
         }
     }
+
+    /// Minimum height of a control in points. Compact is the deliberate dense mode, below the 24 that WCAG 2.5.8 asks for.
+    fn interact_height(self) -> f32 {
+        match self {
+            Self::Compact => 20.0,
+            Self::Normal => 24.0,
+            Self::Comfortable => 28.0,
+        }
+    }
 }
 
 impl Grouping {
@@ -119,22 +128,29 @@ impl Grouping {
 /// How much larger than egui's default the text is.
 const TEXT_SCALE: f32 = 1.1;
 
+/// Size of `TextStyle::Small` in points before the zoom factor. It carries information in many windows, and egui's 9 scaled would be 9.9.
+const SMALL_TEXT: f32 = 12.5;
+
 impl Settings {
-    /// Applies text size and density to the whole interface.
+    /// Applies text size, density and the readable colours to the whole interface.
     pub fn apply(&self, ctx: &egui::Context) {
         ctx.set_zoom_factor(self.text_size.zoom());
         let (item, button) = self.density.spacing();
+        let interact = self.density.interact_height();
         ctx.all_styles_mut(|style| {
             // Text a little larger than egui's, at every size (from egui's
             // sizes each time, so applying twice changes nothing).
             for (text_style, font) in egui::Style::default().text_styles {
-                style.text_styles.insert(text_style, egui::FontId::new(font.size * TEXT_SCALE, font.family));
+                let size = if text_style == egui::TextStyle::Small { SMALL_TEXT } else { font.size * TEXT_SCALE };
+                style.text_styles.insert(text_style, egui::FontId::new(size, font.family));
             }
             // Names are click targets, not text to select.
             style.interaction.selectable_labels = false;
             style.spacing.item_spacing.y = item;
             style.spacing.button_padding.y = button;
+            style.spacing.interact_size.y = interact;
         });
+        crate::theme::readable(ctx);
     }
 
     pub fn to_storage(&self) -> String {
@@ -191,6 +207,9 @@ pub enum FileClass {
 }
 
 impl FileClass {
+    /// Every class, for sizing what shows the icon of any of them.
+    pub const ALL: [FileClass; 9] = [Self::Folder, Self::Archive, Self::Texture, Self::Model, Self::Map, Self::Audio, Self::Script, Self::Text, Self::Other];
+
     pub fn of(name: &str) -> Self {
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
         match ext.as_str() {
@@ -258,5 +277,24 @@ mod tests {
         assert!(Settings::from_storage(&s.to_storage()) == s);
         // Older saved settings have no "tree" key: the tree is shown.
         assert!(Settings::from_storage("theme=1;text=1").show_tree);
+    }
+
+    // The exhaustive match stops compiling when a class is added, which is the reminder to extend `FileClass::ALL`.
+    #[test]
+    fn all_lists_every_file_class_once() {
+        let index = |c: FileClass| match c {
+            FileClass::Folder => 0,
+            FileClass::Archive => 1,
+            FileClass::Texture => 2,
+            FileClass::Model => 3,
+            FileClass::Map => 4,
+            FileClass::Audio => 5,
+            FileClass::Script => 6,
+            FileClass::Text => 7,
+            FileClass::Other => 8,
+        };
+        let mut seen: Vec<usize> = FileClass::ALL.iter().map(|&c| index(c)).collect();
+        seen.sort();
+        assert_eq!(seen, (0..9).collect::<Vec<_>>());
     }
 }

@@ -26,6 +26,32 @@ pub fn warning(dark: bool) -> Color32 {
     modded(dark)
 }
 
+/// The weak text colour (hints, secondary labels) and the outline of fields, boxes and buttons, each with enough contrast on its own theme's surfaces: 4.5:1 for the text, 3:1 for the outline (WCAG 1.4.3, 1.4.11). egui's are 2.7:1 and no outline. Each theme gets its own value, so they survive a switch.
+pub fn readable(ctx: &egui::Context) {
+    for (theme, weak, outline) in [(egui::Theme::Dark, 140, 110), (egui::Theme::Light, 102, 138)] {
+        ctx.style_mut_of(theme, |style| {
+            style.visuals.weak_text_color = Some(Color32::from_gray(weak));
+            style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, Color32::from_gray(outline));
+        });
+    }
+}
+
+/// Width in points of a separator or panel line: a whole number of device pixels. egui's 1 point is 1.5 pixels at a scale of 1.5, which comes out one pixel wide in one place and two in another.
+fn hairline_width(pixels_per_point: f32) -> f32 {
+    pixels_per_point.round().max(1.0) / pixels_per_point
+}
+
+/// The scale changes with the text size, the monitor and the keyboard zoom, so this runs every frame.
+fn align_hairlines(ctx: &egui::Context) {
+    let width = hairline_width(ctx.pixels_per_point());
+    let stale = |theme| ctx.style_of(theme).visuals.widgets.noninteractive.bg_stroke.width != width;
+    if stale(egui::Theme::Dark) || stale(egui::Theme::Light) {
+        ctx.all_styles_mut(|style| style.visuals.widgets.noninteractive.bg_stroke.width = width);
+        // The frame in progress has already taken its style.
+        ctx.request_repaint();
+    }
+}
+
 /// The desktop's colour scheme preference: 0 unknown, 1 dark, 2 light (the
 /// portal's own values).
 #[derive(Clone, Default)]
@@ -103,6 +129,7 @@ pub fn apply(choice: Theme, system: &SystemTheme, ctx: &egui::Context) {
     if ctx.theme() != wanted {
         ctx.set_theme(wanted);
     }
+    align_hairlines(ctx);
 }
 
 #[cfg(test)]
@@ -127,6 +154,28 @@ mod tests {
         // Every colour differs between the themes.
         for f in [modded, error, ok] {
             assert_ne!(f(true), f(false));
+        }
+    }
+
+    #[test]
+    fn hairlines_are_whole_device_pixels() {
+        for ppp in [0.9, 1.0, 1.15, 1.25, 1.5, 1.65, 1.75, 2.0, 2.3, 3.0] {
+            let pixels = hairline_width(ppp) * ppp;
+            assert!(pixels >= 1.0 && (pixels - pixels.round()).abs() < 1e-4, "{ppp}: {pixels} pixels");
+            // Panels reserve room for the width rounded to whole points.
+            assert_eq!(hairline_width(ppp).round(), 1.0, "{ppp}");
+        }
+    }
+
+    #[test]
+    fn both_themes_follow_the_scale() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.5);
+        let system = SystemTheme::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| apply(Theme::Dark, &system, ui.ctx())).drop_without_applying_deltas();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let width = ctx.style_of(theme).visuals.widgets.noninteractive.bg_stroke.width;
+            assert!((width * 1.5 - 2.0).abs() < 1e-4, "{theme:?}: {width}");
         }
     }
 }

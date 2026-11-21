@@ -2,6 +2,16 @@
 
 use eframe::egui::{self, Color32, RichText};
 
+/// KDE's small, medium and large spacing.
+pub const SPACE_S: f32 = 4.0;
+pub const SPACE_M: f32 = 6.0;
+pub const SPACE_L: f32 = 8.0;
+
+/// The widths of a dialog: a short question or a form, text with a list, and a table or a log. At the Body size the widest gives a line of about 85 characters.
+pub const DIALOG_NARROW: f32 = 480.0;
+pub const DIALOG_MEDIUM: f32 = 560.0;
+pub const DIALOG_WIDE: f32 = 640.0;
+
 /// A dialog over the window: the rest of the app is dimmed and does not react
 /// until it is closed. It has a title bar with a close button, and scrolls when
 /// taller than the window. Returns the content's value, and whether the user
@@ -15,12 +25,13 @@ pub fn dialog<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, content
 pub fn dialog_sized<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, fill: bool, content: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
     let max_height = ctx.content_rect().height() - 140.0;
     let mut closed = false;
-    let response = egui::Modal::new(egui::Id::unique(id)).show(ctx, |ui| {
-        ui.set_width(width.min(ctx.content_rect().width() - 60.0));
+    let response = modal(ctx, id).show(ctx, |ui| {
+        ui.set_width(dialog_width(ctx, width));
         ui.horizontal(|ui| {
-            ui.heading(title);
+            ui.heading(title_text(title));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                closed = ui.add(egui::Button::new("✖").frame(false)).on_hover_text("Close (Esc)").clicked();
+                let side = ui.spacing().interact_size.y;
+                closed = ui.add(egui::Button::new("✖").frame(false).min_size(egui::Vec2::splat(side))).on_hover_text("Close (Esc)").clicked();
             });
         });
         ui.separator();
@@ -33,8 +44,34 @@ pub fn dialog_sized<R>(ctx: &egui::Context, id: &str, title: &str, width: f32, f
     (response.inner, close)
 }
 
-/// The margin around the bars and panels of the main window.
-pub const MARGIN: i8 = 6;
+/// The margin around the bars and panels of the main window, and inside every dialog.
+pub const MARGIN: i8 = 8;
+
+/// The frame of a dialog: the popup frame with the same padding all round.
+pub fn modal_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::popup(&ctx.global_style()).inner_margin(MARGIN)
+}
+
+/// The modal a dialog is shown in.
+pub fn modal(ctx: &egui::Context, id: &str) -> egui::Modal {
+    egui::Modal::new(egui::Id::unique(id)).frame(modal_frame(ctx))
+}
+
+/// `width`, less on a window too narrow for it.
+pub fn dialog_width(ctx: &egui::Context, width: f32) -> f32 {
+    width.min(ctx.content_rect().width() - 60.0)
+}
+
+/// The title of a dialog, for `ui.heading`: strong, like the titles of its sections, so that it is not weaker than the text under it.
+pub fn title_text(title: &str) -> RichText {
+    RichText::new(title).strong()
+}
+
+/// The width `ui.button(text)` has, to leave room for it beside a field.
+pub fn button_width(ui: &egui::Ui, text: &str) -> f32 {
+    let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+    (galley.size().x + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x)
+}
 
 /// The height of every button of the window's bars and toolbars, in whole
 /// pixels so rows side by side line up at any display scale.
@@ -83,17 +120,26 @@ pub fn danger(ui: &egui::Ui, text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(RichText::new(text).strong().color(Color32::WHITE)).fill(fill)
 }
 
+/// The size of the title of a part of a window.
+pub fn section_size(ui: &egui::Ui) -> f32 {
+    egui::TextStyle::Body.resolve(ui.style()).size * 1.15
+}
+
 /// The title of a part of a window, set apart from the part above.
 pub fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    let size = egui::TextStyle::Body.resolve(ui.style()).size * 1.15;
+    ui.add_space(SPACE_L);
+    let size = section_size(ui);
     ui.label(RichText::new(title).strong().size(size));
-    ui.add_space(2.0);
 }
 
 /// A line of secondary explanation.
 pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
     ui.label(RichText::new(text).weak());
+}
+
+/// A one-line text field with its text centred vertically. egui puts the text at the top of a field taller than it when the layout runs top to bottom (a grid, a dialog) and centres it only inside `ui.horizontal`; fields are `interact_size.y` high, so all of them go through here.
+pub fn single_line(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(text).align(egui::Align2::LEFT_CENTER)
 }
 
 /// A selectable list row as wide as the space: the name on the left,
@@ -148,4 +194,38 @@ pub fn fit_combo(ui: &mut egui::Ui, text: &str) {
 /// short window so the dialog's buttons stay on screen.
 pub fn dialog_list_height(ctx: &egui::Context) -> f32 {
     (ctx.content_rect().height() - 330.0).clamp(80.0, 260.0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn single_line_text_is_centred_in_a_tall_field() {
+        let mut text = String::from("My mods");
+        let mut centres = Vec::new();
+        // The field has no label here, which the harness's accessibility check would refuse.
+        let mut harness = egui_kittest::Harness::builder().with_accessibility_check(false).build_ui(|ui| {
+            ui.spacing_mut().interact_size.y = 28.0;
+            // A top-down layout, where egui would put the text at the top.
+            let output = super::single_line(&mut text).show(ui);
+            centres.push((output.galley_pos.y + output.galley.size().y / 2.0, output.response.rect.center().y));
+        });
+        harness.run_steps(3);
+        drop(harness);
+        let (text_y, field_y) = *centres.last().expect("a frame ran");
+        assert!((text_y - field_y).abs() <= 1.0, "text centre {text_y}, field centre {field_y}");
+    }
+
+    #[test]
+    fn single_line_fields_go_through_the_helper() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("widgets.rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                for forbidden in ["TextEdit::singleline(", "text_edit_singleline("] {
+                    assert!(!source.contains(forbidden), "{}: use widgets::single_line, which centres the text", path.display());
+                }
+            }
+        }
+    }
 }

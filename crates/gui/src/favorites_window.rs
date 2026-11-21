@@ -243,7 +243,7 @@ impl FavoritesWindow {
 
     #[allow(clippy::too_many_arguments)] // the two lists, the shown place and the state around them
     pub fn show(&mut self, ctx: &egui::Context, busy: bool, keys: Option<&Keys>, game: Option<&Game>, favorites: &[Place], recents: &[Place], current: Option<&Place>) -> Option<Request> {
-        let (request, closed) = crate::widgets::dialog(ctx, "favorites", "Favorites and recent locations", 640.0, |ui| self.contents(ui, busy, keys, game, favorites, recents, current));
+        let (request, closed) = crate::widgets::dialog(ctx, "favorites", "Favorites and recent locations", crate::widgets::DIALOG_WIDE, |ui| self.contents(ui, busy, keys, game, favorites, recents, current));
         if closed {
             Some(Request::Close)
         } else {
@@ -259,7 +259,7 @@ impl FavoritesWindow {
             self.revalidate(keys, game, favorites);
         }
         ui.label("Keep the places of the game you come back to. A favorite remembers its game folder, so an install that moved still resolves, and the mods copy and its original are one place.");
-        ui.add_space(4.0);
+        ui.add_space(crate::widgets::SPACE_S);
         if favorites.is_empty() {
             ui.label(RichText::new("No favorites yet: open somewhere, then 'add the shown place'.").weak());
         }
@@ -276,13 +276,13 @@ impl FavoritesWindow {
                 if let Some(why) = status.and_then(|s| s.text()) {
                     ui.label(RichText::new(why).weak());
                 }
-                if ui.small_button("Forget").on_hover_text("Take it out of the favorites").clicked() {
+                if ui.button("Forget").on_hover_text("Take it out of the favorites").clicked() {
                     request = Some(Request::ForgetFavorite(i));
                 }
                 ui.end_row();
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(crate::widgets::SPACE_M);
         ui.horizontal(|ui| {
             let already = current.is_some_and(|p| favorites.contains(p));
             let hover = match &current {
@@ -290,7 +290,7 @@ impl FavoritesWindow {
                 None => "Open the game folder, an archive or a folder in it, then add it here".into(),
             };
             if ui
-                .add_enabled(current.is_some() && !already && !busy, egui::Button::new("Add the shown place…"))
+                .add_enabled(current.is_some() && !already && !busy, egui::Button::new("Add the shown place"))
                 .on_hover_text(hover)
                 .on_disabled_hover_text(match (already, busy, current.is_some()) {
                     (true, _, _) => "It is a favorite already",
@@ -317,13 +317,13 @@ impl FavoritesWindow {
                 {
                     request = Some(Request::Open(location));
                 }
-                if ui.small_button("Forget").on_hover_text("Take it out of the list").clicked() {
+                if ui.button("Forget").on_hover_text("Take it out of the list").clicked() {
                     request = Some(Request::ForgetRecent(i));
                 }
                 ui.end_row();
             }
         });
-        if !recents.is_empty() && ui.small_button("Forget them all").on_hover_text("Take every recent location out").clicked() {
+        if !recents.is_empty() && ui.button("Forget them all").on_hover_text("Take every recent location out").clicked() {
             request = Some(Request::ClearRecents);
         }
         request
