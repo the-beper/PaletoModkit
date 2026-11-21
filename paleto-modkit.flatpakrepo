@@ -1,0 +1,8 @@
+[Flatpak Repo]
+Title=Paleto Modkit
+Url=https://the-beper.github.io/PaletoModkit/repo/
+Homepage=https://github.com/the-beper/PaletoModkit
+Comment=Mod manager for GTA V on Linux
+Description=A Linux-native replacement for OpenIV: browse and edit GTA V archives, install mods.
+Icon=https://the-beper.github.io/PaletoModkit/icon.svg
+GPGKey=mDMEatcrhxYJKwYBBAHaRw8BAQdANMdtt9+TUy3y4bW5trmWE/EmqVJEAA0UPcRhlgEPHHm0FVBhbGV0byBNb2RraXQgRmxhdHBha4iTBBMWCgA7FiEE+8H6YxrVbwUyLbaTMgs1VciFBwsFAmrXK4cCGwMFCwkIBwICIgIGFQoJCAsCBBYCAwECHgcCF4AACgkQMgs1VciFBwtBCQEAsCdBBk3SdY+0/tTkQsKmCOc7MxHZ2wERnqt92+I036YA/j4sbZnWlxb0Jnv0Kdf7UvhFxORo+sRiBMI3qp5dfskPuDgEatcrhxIKKwYBBAGXVQEFAQEHQHsIp+7L3CtnuHaleNl/2RjflqBAUj57UuiEbgngF+A+AwEIB4h4BBgWCgAgFiEE+8H6YxrVbwUyLbaTMgs1VciFBwsFAmrXK4cCGwwACgkQMgs1VciFBwtJYAEA3cB20qsuMJoBq+vb6E/k910Q7VZC/Pc75zuQkbkZRTgA/0Pyu4QsKVTAmxQpKYlV8Hf20frdDqvdilcbLRM0ge8J
