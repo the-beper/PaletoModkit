@@ -91,6 +91,18 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.9.0" date="2026-11-21">
+      <description>
+        <p>A Compare window and paleto diff, models ready for CodeWalker and Sollumz, .oivs super packages, and a more readable interface.</p>
+        <ul>
+          <li>Compare with original, in the preview's toolbar for a file of the mods folder, shows what a mods copy changes against the game's own file: text line by line, XML and binary metadata once the formatting is set aside, anything else by size, SHA-256 and the bytes that differ. paleto diff does the same from a terminal, and neither writes anything.</li>
+          <li>Export as XML makes a model ready for CodeWalker and for Blender with the Sollumz add-on: the XML, its textures as DDS files where those tools look for them, and a note of where each came from and which textures were found nowhere. The dialog opens the folder, or the model in a program of your choice. paleto model does the same from a terminal, with the dictionaries you name.</li>
+          <li>Install package… opens .oivs super packages, made for CodeWalker's OIV Package Installer. The dialog lists their modules and options with their pictures. paleto install pack.oivs --list shows the parts and --select picks them from a terminal.</li>
+          <li>The 3D preview of a tuning part, such as gauntlet5_blower_a, reads the textures of its +hifr dictionary, so the part shows with its own textures.</li>
+          <li>Buttons and text fields are 24 interface units high at the default density (20 in Compact, 28 in Comfortable), secondary text has at least 4.5:1 contrast and field outlines 3:1 in both themes, and dialogs share one title, margin and set of widths. The Compare window has its own close button and closes with Esc. Tree rows are clickable across the whole panel, and the window cannot be made smaller than 720 × 420 interface units.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.8.0" date="2026-11-03">
       <description>
         <p>Hash generator, favorites and recent locations, and a warning in the 3D preview for textures a model cannot find.</p>
