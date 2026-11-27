@@ -3781,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "paleto-cli"
-version = "1.9.0"
+version = "1.9.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3795,7 +3795,7 @@ dependencies = [
 
 [[package]]
 name = "paleto-core"
-version = "1.9.0"
+version = "1.9.1"
 dependencies = [
  "libc",
  "paleto-formats",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "paleto-formats"
-version = "1.9.0"
+version = "1.9.1"
 dependencies = [
  "flate2",
  "image",
@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "paleto-modkit"
-version = "1.9.0"
+version = "1.9.1"
 dependencies = [
  "eframe",
  "egui",
@@ -3850,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "paleto-rpf"
-version = "1.9.0"
+version = "1.9.1"
 dependencies = [
  "aes",
  "flate2",

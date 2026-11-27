@@ -91,6 +91,15 @@
   </requires>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.9.1" date="2026-11-27">
+      <description>
+        <p>A maintenance release: updated libraries and a new place for the build scripts, with no change in what the app does.</p>
+        <ul>
+          <li>Patch updates of 21 Rust libraries, among them zip, zlib-rs, sha2 and clap.</li>
+          <li>In the source tree the build, packaging and release scripts moved from packaging/ to build/. This matters only to people who build Paleto Modkit themselves.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.9.0" date="2026-11-21">
       <description>
         <p>A Compare window and paleto diff, models ready for CodeWalker and Sollumz, .oivs super packages, and a more readable interface.</p>
