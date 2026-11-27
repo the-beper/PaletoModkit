@@ -6,7 +6,7 @@
 #   flatpak-sign.sh --prepare --tag vX.Y.Z --commit SHA --manifest release-manifest.txt --unsigned flatpak-unsigned-repo.tar \
 #                   (--site DIR [--bootstrap] | --fresh) --work DIR --out DIR      job prepare-flatpak, NO secret
 #       Everything that reads untrusted data: the unsigned repository against the manifest and its structure, the
-#       published repository (packaging/release-pages.sh fetch DIR) verified like a client does with the pinned
+#       published repository (build/release-pages.sh fetch DIR) verified like a client does with the pinned
 #       public key, the version rules, the base commits; then the new, UNSIGNED commits are added to a copy of
 #       the published repository (parent chain) and its summary and appstream data are generated and old commits
 #       pruned. Writes to --out: flatpak-prepared-repo.tar and flatpak-prepared.txt (what it is, the base, the
@@ -17,7 +17,7 @@
 #                   (--site DIR [--bootstrap] | --fresh) [--check-remote]
 #                                                         job check-flatpak, NO secret (refuses to run with it)
 #       DIR of --in is the --out of --prepare, which is no proof of anything (another job made it), and the --site is gh-pages
-#       fetched again by this job (packaging/release-pages.sh fetch), so the base does not come from the preparation
+#       fetched again by this job (build/release-pages.sh fetch), so the base does not come from the preparation
 #       either. Checks the hash of the tar against its description, that it is for this tag and commit, that its mode is
 #       the one of the flags, and (--check-remote) that gh-pages is still at the base the preparation had; a skip=1 in the
 #       description is believed only if this gh-pages has this tag and commit (exit 5), else it ends here; verifies the

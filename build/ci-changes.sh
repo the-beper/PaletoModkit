@@ -1,7 +1,7 @@
 #!/bin/sh
 # Decides whether a change needs the CI jobs. Reads the changed file names, one per line, on stdin and writes
 # "code=true" or "code=false" to $GITHUB_OUTPUT (stdout when it is not set).
-#   git diff --name-only "$BASE" HEAD | sh packaging/ci-changes.sh
+#   git diff --name-only "$BASE" HEAD | sh build/ci-changes.sh
 # false only when every file is documentation or repository chrome. An empty list is true: when in doubt, run everything.
 set -eu
 

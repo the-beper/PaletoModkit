@@ -1,7 +1,7 @@
 # Paleto Modkit
 
 <p align="center">
-  <img src="packaging/icons/hicolor/256x256/apps/io.github.the_beper.PaletoModkit.png" width="112" alt="Paleto Modkit Icon" />
+  <img src="build/icons/hicolor/256x256/apps/io.github.the_beper.PaletoModkit.png" width="112" alt="Paleto Modkit Icon" />
 </p>
 
 <p align="center">

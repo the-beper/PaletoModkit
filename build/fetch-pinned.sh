@@ -1,6 +1,6 @@
 #!/bin/sh
 # Downloads a file whose SHA-256 is known beforehand, and only then makes it usable.
-# Usage: packaging/fetch-pinned.sh <url> <sha256> <dest> [executable]
+# Usage: build/fetch-pinned.sh <url> <sha256> <dest> [executable]
 #   The file is fetched to <dest>.part, checked with sha256sum, and moved to <dest> (made executable if the
 #   fourth argument is "executable"). A <dest> that already has the right hash is kept as it is; one that has
 #   not is replaced. On a mismatch nothing is left behind and nothing is ever run: exit 2.

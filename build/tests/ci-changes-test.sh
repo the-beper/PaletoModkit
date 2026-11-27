@@ -1,6 +1,6 @@
 #!/bin/sh
-# Checks packaging/ci-changes.sh: which changes make CI run. No network, no git.
-#   sh packaging/tests/ci-changes-test.sh
+# Checks build/ci-changes.sh: which changes make CI run. No network, no git.
+#   sh build/tests/ci-changes-test.sh
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -23,11 +23,11 @@ expect() {
 expect false README.md
 expect false docs/user-guide.md docs/images/a.png screenshots/main.png LICENSE .gitignore
 expect false .github/ISSUE_TEMPLATE/bug_report.yml .github/dependabot.yml crates/gui/NOTES.md
-expect true packaging/flatpak-bg.sh
+expect true build/flatpak-bg.sh
 expect true crates/core/src/lib.rs
 expect true README.md crates/core/src/lib.rs
 expect true .github/workflows/ci.yml
-expect true packaging/release-lib.sh
+expect true build/release-lib.sh
 expect true Cargo.lock
 expect true -
 

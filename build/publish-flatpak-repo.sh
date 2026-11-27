@@ -1,7 +1,7 @@
 #!/bin/sh
 # Writes the files users add the Flatpak repository with, next to the signed OSTree repository made by
-# packaging/flatpak-sign.sh, for hosting on GitHub Pages.
-# Usage: packaging/publish-flatpak-repo.sh <site-dir> <base-url> <pubkey-file>
+# build/flatpak-sign.sh, for hosting on GitHub Pages.
+# Usage: build/publish-flatpak-repo.sh <site-dir> <base-url> <pubkey-file>
 #   <site-dir>/repo      the OSTree repository
 #   <base-url>           where <site-dir> is served, e.g. https://the-beper.github.io/PaletoModkit
 #   <pubkey-file>        the public key (binary) the repository is signed with, that goes in the files; it takes

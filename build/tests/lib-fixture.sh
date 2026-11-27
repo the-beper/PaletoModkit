@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builders of synthetic test data for packaging/tests/release-sim.sh (sourced, never run): a sandboxed
+# Builders of synthetic test data for build/tests/release-sim.sh (sourced, never run): a sandboxed
 # environment, throwaway signing keys, a project that looks like this one, files that look like the build
 # outputs (and are structurally valid, nothing more), and an unsigned Flatpak repository made with
 # "flatpak build-export" from a synthetic app, no runtime and no network needed.
@@ -82,17 +82,17 @@ fx_set_version() {
     mv "$1/Cargo.lock.new" "$1/Cargo.lock"
     type=""
     case $2 in *-rc.*) type=development ;; esac
-    fx_metainfo "$1/packaging/io.github.the_beper.PaletoModkit.metainfo.xml" io.github.the_beper.PaletoModkit "$2" 2026-10-29 "$type"
+    fx_metainfo "$1/build/io.github.the_beper.PaletoModkit.metainfo.xml" io.github.the_beper.PaletoModkit "$2" 2026-10-29 "$type"
 }
 
 # fx_project DIR VERSION CODEWALKER_URL REAL_PACKAGING: the files of a project with the shape the release scripts
-# check, with the real scripts of this repository in packaging/ (not the submodule: the caller adds it).
+# check, with the real scripts of this repository in build/ (not the submodule: the caller adds it).
 fx_project() {
-    mkdir -p "$1/packaging" "$1/crates"
-    cp "$4"/*.sh "$4"/release-notes.py "$4"/release.conf "$1/packaging/"
-    cp -r "$4/icons" "$1/packaging/icons"
-    mkdir -p "$1/packaging/tests"
-    cp "$4/tests/gh" "$1/packaging/tests/gh"
+    mkdir -p "$1/build" "$1/crates"
+    cp "$4"/*.sh "$4"/release-notes.py "$4"/release.conf "$1/build/"
+    cp -r "$4/icons" "$1/build/icons"
+    mkdir -p "$1/build/tests"
+    cp "$4/tests/gh" "$1/build/tests/gh"
     printf '[workspace]\nmembers = ["crates/*"]\n\n[workspace.package]\nversion = "%s"\nedition = "2024"\n' "$2" > "$1/Cargo.toml"
     {
         echo 'version = 4'
@@ -122,7 +122,7 @@ fx_linux() {
     echo "cli" > "$p/bin/paleto"
     [ "${3:-}" = nocwconv ] || echo "cwconv" > "$p/lib/paleto-modkit/cwconv/paleto-cwconv"
     echo "install" > "$p/install.sh"
-    cp "$1/packaging/$id.metainfo.xml" "$p/share/metainfo/$id.metainfo.xml"
+    cp "$1/build/$id.metainfo.xml" "$p/share/metainfo/$id.metainfo.xml"
     cp "$1/marker.txt" "$p/MARKER"
     tar -C "$t" -czf "$2/PaletoModkit-x86_64.tar.gz" "paleto-modkit-$v"
     rm -rf "$t"
@@ -186,7 +186,7 @@ fx_flatpak() {
     id=io.github.the_beper.PaletoModkit
     mkdir -p "$2"
     t=$(mktemp -d "${TMPDIR:-/tmp}/fx-flatpak.XXXXXX")
-    fx_unsigned_repo "$t" "$1/packaging/$id.metainfo.xml" "$id"
+    fx_unsigned_repo "$t" "$1/build/$id.metainfo.xml" "$id"
     tar -C "$t" --owner=0 --group=0 --numeric-owner -cf "$2/flatpak-unsigned-repo.tar" repo
     {
         echo "format=1"

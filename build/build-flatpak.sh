@@ -1,14 +1,14 @@
 #!/bin/sh
 # Builds the Flatpak, unsigned, with flatpak-builder in the Flathub build image (podman, or docker for local
-# use), as the release workflow does. Signing is a separate step with the key (packaging/flatpak-sign.sh): no
+# use), as the release workflow does. Signing is a separate step with the key (build/flatpak-sign.sh): no
 # key ever enters the build container, and the script refuses to run with GPG_KEY_ID or GNUPGHOME set.
 #   WORK=dir        builder cache, Flatpak installation (WORK/flatpak) and repository (default ~/.cache/paleto-flatpak)
 #   OUT=dir         where the results are copied (default dist/)
 #   CPUS=n          cores the build may use, to leave the rest of the machine free (default: all)
 #   BUNDLE=1|0      make the unsigned bundle PaletoModkit-x86_64.flatpak in OUT (default 1, for local use)
 #   EXPORT_REPO=1   release mode: start from an empty repository, write flatpak-unsigned-repo.tar and
-#                   flatpak-build.txt to OUT (what packaging/release-verify.sh checks), and refuse (exit 2) if a
-#                   pin of packaging/release.conf (image, SDK and extension commits) is empty
+#                   flatpak-build.txt to OUT (what build/release-verify.sh checks), and refuse (exit 2) if a
+#                   pin of build/release.conf (image, SDK and extension commits) is empty
 #   RELEASE_CONF    another pins file
 #   ALLOW_ROOTFUL=1 accept docker or rootful podman (local use; the container is privileged, which is only
 #                   acceptable inside a rootless user namespace)
@@ -21,14 +21,14 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=/dev/null
-. "$ROOT/packaging/release-lib.sh"
+. "$ROOT/build/release-lib.sh"
 WORK=${WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/paleto-flatpak}
 OUT=${OUT:-$ROOT/dist}
 BUNDLE=${BUNDLE:-1}
 EXPORT_REPO=${EXPORT_REPO:-0}
 BUNDLE_FILE=PaletoModkit-x86_64.flatpak
 
-[ -z "${GPG_KEY_ID:-}" ] && [ -z "${GNUPGHOME:-}" ] || die 1 "GPG_KEY_ID or GNUPGHOME is set: the build is unsigned and never sees a key (see packaging/flatpak-sign.sh)"
+[ -z "${GPG_KEY_ID:-}" ] && [ -z "${GNUPGHOME:-}" ] || die 1 "GPG_KEY_ID or GNUPGHOME is set: the build is unsigned and never sees a key (see build/flatpak-sign.sh)"
 ID=$(conf APP_ID)
 IMAGE=$(conf FLATPAK_IMAGE)
 SDK_COMMIT=$(conf SDK_COMMIT)
@@ -74,7 +74,7 @@ container_script() {
 set -e
 git config --global --add safe.directory /src
 git config --global --add safe.directory /src/third_party/codewalker
-./packaging/flatpak-cargo-sources.sh
+./build/flatpak-cargo-sources.sh
 # The Flatpak system installation lives in the bind-mounted work folder: the image ships the SDK in its overlay
 # layers, and updating it there fails with EXDEV (rename across layers). libflatpak, so flatpak and
 # flatpak-builder, read FLATPAK_SYSTEM_DIR; the image's own installation is not used.
@@ -96,8 +96,8 @@ pin() {
 pin "$SDK" "$SDK_COMMIT"
 pin "$RUST" "$RUST_EXT_COMMIT"
 pin "$DOTNET" "$DOTNET_EXT_COMMIT"
-./packaging/flatpak-nuget-sources.sh
-flatpak-builder --jobs="${JOBS:-$(nproc)}" --repo=/work/repo --disable-rofiles-fuse --force-clean --default-branch=master --arch=x86_64 --state-dir=/work/state /work/build packaging/io.github.the_beper.PaletoModkit.yml
+./build/flatpak-nuget-sources.sh
+flatpak-builder --jobs="${JOBS:-$(nproc)}" --repo=/work/repo --disable-rofiles-fuse --force-clean --default-branch=master --arch=x86_64 --state-dir=/work/state /work/build build/io.github.the_beper.PaletoModkit.yml
 flatpak build-update-repo --generate-static-deltas --prune --prune-depth=3 /work/repo
 {
     echo "sdk_commit=$(flatpak info --show-commit "$SDK")"

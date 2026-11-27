@@ -1,8 +1,8 @@
 #!/bin/sh
-# Checks packaging/release-check-env.sh, the pre-flight check of the signing environment: saved API answers (the
+# Checks build/release-check-env.sh, the pre-flight check of the signing environment: saved API answers (the
 # shape GitHub returns for GET /repos/OWNER/REPO/environments/NAME) and a stub of gh for the missing and unreadable
 # cases. Needs jq. No network.
-#   sh packaging/tests/check-env-test.sh
+#   sh build/tests/check-env-test.sh
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)

@@ -21,7 +21,7 @@ fn converting_says_where_the_converter_was_searched_for() {
     let err = String::from_utf8_lossy(&out.stderr);
     for piece in [
         "$PALETO_CWCONV (/nonexistent/paleto-cwconv): not found",
-        "packaging/build-cwconv.sh",
+        "build/build-cwconv.sh",
         "docs/troubleshooting.md",
     ] {
         assert!(err.contains(piece), "{err}");

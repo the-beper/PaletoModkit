@@ -9,7 +9,7 @@
 #   RELEASE_CONF  the pins file (default: release.conf next to the scripts)
 #   REMOTE        git URL of the repository (default: https://github.com/$GITHUB_REPOSITORY.git)
 #   GH_REPO, GH_TOKEN  for the gh wrappers; the token never goes in a URL, a git config or a command line
-#   RELEASE_SIM=1 (set by packaging/tests/release-sim.sh) refuses a REMOTE, repository or site on GitHub, or a
+#   RELEASE_SIM=1 (set by build/tests/release-sim.sh) refuses a REMOTE, repository or site on GitHub, or a
 #                 gh that is not the test stub, so a test can never touch the real repository
 # This file is not executable: every script starts with  . "$(dirname "$0")/release-lib.sh"
 

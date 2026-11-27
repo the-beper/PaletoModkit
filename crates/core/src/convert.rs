@@ -32,7 +32,7 @@ pub const ENV: &str = "PALETO_CWCONV";
 
 /// The converter: `$PALETO_CWCONV`, or `paleto-cwconv` in `../lib/paleto-modkit/cwconv/`
 /// next to this program (installed layout), in `cwconv/` next to it (a copied
-/// program), or in `../cwconv/` (a cargo build: `packaging/build-cwconv.sh`
+/// program), or in `../cwconv/` (a cargo build: `build/build-cwconv.sh`
 /// puts it in `target/cwconv`).
 pub fn converter() -> Option<PathBuf> {
     search(std::env::var_os(ENV), this_dir()).0
@@ -112,7 +112,7 @@ fn unfound(looked: &[String]) -> String {
     }
     text.push_str(&format!(
         "\nSet ${ENV} to a paleto-cwconv program file, or reinstall Paleto, which ships the converter; \
-         a cargo build makes it with packaging/build-cwconv.sh (docs/troubleshooting.md)"
+         a cargo build makes it with build/build-cwconv.sh (docs/troubleshooting.md)"
     ));
     text
 }
@@ -716,7 +716,7 @@ pub(crate) mod tests {
         let report = unfound(&looked);
         assert!(report.contains("$PALETO_CWCONV (/nonexistent/paleto-cwconv): not found"), "{report}");
         assert!(report.contains("Set $PALETO_CWCONV"), "{report}");
-        assert!(report.contains("packaging/build-cwconv.sh"), "{report}");
+        assert!(report.contains("build/build-cwconv.sh"), "{report}");
         assert!(report.contains("docs/troubleshooting.md"), "{report}");
         // A folder of the same name is not the converter.
         let dir = tempfile::tempdir().unwrap();

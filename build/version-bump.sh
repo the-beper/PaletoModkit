@@ -25,7 +25,7 @@ fi
 ROOT=${BUMP_ROOT:-$(cd "$PKG_DIR/.." && pwd)}
 cd "$ROOT"
 git rev-parse --git-dir > /dev/null 2>&1 || die 1 "$ROOT is not a git checkout"
-META=packaging/io.github.the_beper.PaletoModkit.metainfo.xml
+META=build/io.github.the_beper.PaletoModkit.metainfo.xml
 for f in Cargo.toml Cargo.lock "$META"; do [ -f "$f" ] || die 2 "$f is missing"; done
 
 semver_valid "v$NEW" || die 2 "$NEW is not X.Y.Z or X.Y.Z-rc.N (numbers without leading zeros, N from 1)"

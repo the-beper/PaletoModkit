@@ -2,7 +2,7 @@ name: CI
 
 # Pull requests and pushes to main. There is no path filter on the triggers: a workflow skipped by one leaves the
 # required checks (`check`, `release-tooling`, `msrv`) pending for ever. They always run and report; a pull request that is
-# only documentation or repository chrome (packaging/ci-changes.sh) skips their steps, so they end in seconds.
+# only documentation or repository chrome (build/ci-changes.sh) skips their steps, so they end in seconds.
 # The weekly run (Monday, on main) is only for `deny`: new advisories appear without any change here.
 on:
   push:
@@ -51,7 +51,7 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
             files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
-            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+            printf '%s\n' "$files" | sh build/ci-changes.sh
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
@@ -74,9 +74,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq desktop-file-utils appstream libxml2-utils
-          desktop-file-validate packaging/io.github.the_beper.PaletoModkit.desktop
-          appstreamcli validate --no-net packaging/io.github.the_beper.PaletoModkit.metainfo.xml
-          xmllint --noout packaging/io.github.the_beper.PaletoModkit.mime.xml
+          desktop-file-validate build/io.github.the_beper.PaletoModkit.desktop
+          appstreamcli validate --no-net build/io.github.the_beper.PaletoModkit.metainfo.xml
+          xmllint --noout build/io.github.the_beper.PaletoModkit.mime.xml
 
   # The oldest compiler the workspace claims to support: `rust-version` of Cargo.toml, read from there so that the
   # claim and the test cannot drift. A required check: when code or a dependency update needs a newer compiler, raise
@@ -98,7 +98,7 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
             files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
-            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+            printf '%s\n' "$files" | sh build/ci-changes.sh
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
@@ -143,25 +143,25 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = pull_request ]; then
             files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD)
-            printf '%s\n' "$files" | sh packaging/ci-changes.sh
+            printf '%s\n' "$files" | sh build/ci-changes.sh
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Which changes run CI
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/ci-changes-test.sh
+        run: sh build/tests/ci-changes-test.sh
       - name: Reproducible tarball
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/tarball-test.sh
+        run: sh build/tests/tarball-test.sh
       - name: Cleaning of dist/ by the release build
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/clean-dist-test.sh
+        run: sh build/tests/clean-dist-test.sh
       - name: Version bump
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/version-bump-test.sh
+        run: sh build/tests/version-bump-test.sh
       - name: Pre-flight check of the signing environment
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/check-env-test.sh
+        run: sh build/tests/check-env-test.sh
       - name: Install the tools
         if: steps.changes.outputs.code == 'true'
         run: |
@@ -170,7 +170,7 @@ jobs:
       - name: shellcheck
         if: steps.changes.outputs.code == 'true'
         # Warnings and errors fail the job; info and style notes differ between shellcheck versions (the runner's apt one is older).
-        run: shellcheck -s sh -S warning packaging/*.sh packaging/tests/*.sh packaging/tests/gh
+        run: shellcheck -s sh -S warning build/*.sh build/tests/*.sh build/tests/gh
       - name: Install actionlint and zizmor
         if: steps.changes.outputs.code == 'true'
         env:
@@ -204,7 +204,7 @@ jobs:
         run: zizmor --offline .github/workflows
       - name: Simulate the release pipeline
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/release-sim.sh
+        run: sh build/tests/release-sim.sh
       - name: Offline test of the signed Flatpak repository
         if: steps.changes.outputs.code == 'true'
-        run: sh packaging/tests/flatpak-repo-test.sh
+        run: sh build/tests/flatpak-repo-test.sh

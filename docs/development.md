@@ -23,7 +23,7 @@ A Cargo workspace, in Rust (edition 2024, Rust 1.95 or later):
 Next to them:
 
 - [`tools/cwconv`](../tools/cwconv): `paleto-cwconv`, the Legacy → Enhanced converter. A small .NET program around CodeWalker.Core, from the [`third_party/codewalker`](../third_party/codewalker) git submodule; `paleto-core` runs it as a separate process (`src/convert.rs`).
-- [`packaging/`](../packaging): desktop entry, AppStream metadata, MIME types, icons, the local Flatpak manifest and the build scripts.
+- [`build/`](../build): desktop entry, AppStream metadata, MIME types, icons, the local Flatpak manifest and the build scripts.
 - [`screenshots/`](../screenshots) and [`docs/images/`](images): the pictures of the README and of these pages.
 
 ## Building
@@ -32,7 +32,7 @@ Next to them:
 git clone --recurse-submodules https://github.com/the-beper/PaletoModkit.git
 cd paleto-modkit
 cargo build --release              # target/release/paleto-modkit and paleto
-./packaging/build-cwconv.sh        # target/cwconv/paleto-cwconv
+./build/build-cwconv.sh            # target/cwconv/paleto-cwconv
 ```
 
 `build-cwconv.sh` uses the .NET 10 SDK when it is installed, otherwise Microsoft's SDK container through podman. The converter is found at run time in `$PALETO_CWCONV`, in `../lib/paleto-modkit/cwconv/` next to the program (installed layout), in `cwconv/` next to it, or in `../cwconv/` (so `target/release/paleto` finds `target/cwconv/`).
@@ -49,7 +49,7 @@ The tests need no game files: they build small archives, packages and game folde
 The tests must not depend on your computer either: on yours the app finds your installed game and cached keys, on CI there are none. Run them as CI does, with an empty home folder:
 
 ```bash
-HOME=$(mktemp -d) CARGO_HOME=~/.cargo RUSTUP_HOME=~/.rustup cargo test
+CARGO_HOME=~/.cargo RUSTUP_HOME=~/.rustup HOME=$(mktemp -d) cargo test
 ```
 
 ## Panics in the code
@@ -88,7 +88,7 @@ cargo run --release -p paleto-formats --example scan_formats -- <game folder> [k
 cargo run --release -p paleto-formats --example scan_ytd -- <game folder> <keys.bin> [--rebuild] # every texture dictionary
 cargo run --release -p paleto-rpf --example compare -- <keys.bin> <a.rpf> <b.rpf> [c.rpf]   # what differs between archives
 
-PROJECT=cwxml ./packaging/build-cwconv.sh   # target/cwxml/paleto-cwxml (tools/cwxml, not shipped), for roundtrip_xml
+PROJECT=cwxml ./build/build-cwconv.sh   # target/cwxml/paleto-cwxml (tools/cwxml, not shipped), for roundtrip_xml
 cargo run --release -p paleto-formats --example roundtrip_xml -- <game folder> <N> [kinds…] [--keep] # every Nth model's XML export, imported by CodeWalker and compared
 ```
 
@@ -106,32 +106,32 @@ Pull requests and issues are welcome; [CONTRIBUTING.md](../CONTRIBUTING.md) says
 
 | Script | What it does |
 | :--- | :--- |
-| `packaging/build-release.sh` | Builds the tarball (`PaletoModkit-x86_64.tar.gz`) and the AppImage (`PaletoModkit-x86_64.AppImage`, with its `.zsync`) in `dist/`, with `paleto-cwconv`, and `dist/linux-build.txt`. It first removes from `dist/` only what it makes (`clean-dist.sh`), so other files kept there stay. appimagetool and the AppImage runtime are downloaded by URL and SHA-256 from `packaging/release.conf` (`fetch-pinned.sh`) and hashed again before use; `EXPECT_VERSION` must match `Cargo.toml`. The tarball is packed by `reproducible_tar` (`release-lib.sh`: sorted names, owner 0:0, normalised modes, mtime = commit time of `HEAD` or `SOURCE_DATE_EPOCH`, `gzip -n`), so the same files give the same archive. It writes no checksum file: `SHA256SUMS` is made for the final files by `release-verify.sh`. |
-| `packaging/build-flatpak.sh` | Builds `PaletoModkit-x86_64.flatpak` in `dist/` (or `OUT`), unsigned, with flatpak-builder in the Flathub build image (by digest) through rootless podman (docker or rootful podman only with `ALLOW_ROOTFUL=1`). It needs the network and about 15 GB; `WORK` sets where its cache lives (default `~/.cache/paleto-flatpak`), including the Flatpak installation of the SDK (`WORK/flatpak`, kept between builds: the image's own copy sits in overlay layers, where an update fails). The SDK and its extensions are updated to the commits pinned in `release.conf` and checked. It refuses to run with `GPG_KEY_ID` or `GNUPGHOME` set: no key enters the container. `EXPORT_REPO=1` (release mode) also writes `flatpak-unsigned-repo.tar` and `flatpak-build.txt` and refuses an empty pin; `BUNDLE=0` skips the bundle. |
-| `packaging/flatpak-sign.sh` | Signs the repository, outside the build, in steps run by different jobs: `--prepare` (no key) adds the new commits on top of the published ones and makes the summary; `--check-prepared` (no key, a job of its own) checks all of it again and hands over the checked repository as a pinned tar; `--unpack` (no key) unpacks that tar in the signing job, then `--sign` signs the commits and the summary with the key; `--finish` (no key) checks the result with the public key only, makes the static delta from the published head (when there is one) and tries it, and makes the bundle. The key comes in `FLATPAK_GPG_PRIVATE_KEY` and must be the one of `release.conf`. |
-| `packaging/publish-flatpak-repo.sh` | Writes `paleto-modkit.flatpakrepo`, `.flatpakref` and the icon next to the signed repository, for GitHub Pages; it takes the public key file as its third argument and needs no keyring. |
-| `packaging/release.conf` | The pins of the release: identity of the Flatpak, signing key fingerprint, build image digest, Flathub commits of the SDK, tool downloads with their hashes, the files of a release. |
-| `packaging/release-lib.sh`, `release-validate.sh`, `release-verify.sh`, `release-pages.sh`, `release-publish.sh`, `release-notes.py`, `fetch-pinned.sh` | The release pipeline: checks of the tag and the versions, of the build outputs and of the signed repository; the published Flatpak repository; draft release (its notes from the metainfo), gh-pages and publication, safe to run again. Exit codes: 0 ok, 1 usage, 2 validation, 3 refused by policy, 4 signing, 5 conflict on the remote or remote unreadable. |
-| `packaging/tests/release-sim.sh` | Simulates the whole pipeline against a throwaway remote, a stub of `gh` and throwaway keys (needs `flatpak`, `ostree`, `gpg`, `jq`; no network). |
-| `packaging/release-check-env.sh` | Pre-flight check of the signing environment: exit 3 unless `flatpak-signing` exists with a required reviewer and restricted deployment refs, exit 5 when GitHub cannot be read. The release workflow runs it in `check-signing-env`, a job without the environment; `packaging/tests/check-env-test.sh` tests it. |
-| `packaging/tests/tarball-test.sh` | Tests `reproducible_tar`: a fixture tree packed twice with other file times, creation order and umask gives the same hash; another epoch or content does not (needs GNU tar; no network). |
-| `packaging/clean-dist.sh` | Used by `build-release.sh`: removes from `dist/` the tarball, AppImage, `.zsync`, `linux-build.txt` and the two working folders, and nothing else; `packaging/tests/clean-dist-test.sh` tests it (a foreign file, folder or link in `dist/` survives). |
-| `packaging/version-bump.sh` | Sets the version of a release in `Cargo.toml`, `Cargo.lock` and the metainfo ([release.md](release.md#cutting-a-release)); `packaging/tests/version-bump-test.sh` tests it. |
-| `packaging/ci-changes.sh` | Says from the list of changed files (stdin) whether CI has code to check or only documentation and repository files; `packaging/tests/ci-changes-test.sh` tests it. |
-| `packaging/install.sh` | Installs into `~/.local` (or `$PREFIX`) from a release tarball or from a source tree; `--uninstall` removes it. |
-| `packaging/build-cwconv.sh` | Builds `paleto-cwconv`, self-contained. |
-| `packaging/flatpak-cargo-sources.sh` | Generates `cargo-sources.json` from `Cargo.lock` with flatpak-cargo-generator, for offline Flatpak builds (`build-flatpak.sh` runs it). |
-| `packaging/flatpak-nuget-sources.sh` | Generates `nuget-sources.json` for the converter with flatpak-dotnet-generator (`build-flatpak.sh` runs it too). |
+| `build/build-release.sh` | Builds the tarball (`PaletoModkit-x86_64.tar.gz`) and the AppImage (`PaletoModkit-x86_64.AppImage`, with its `.zsync`) in `dist/`, with `paleto-cwconv`, and `dist/linux-build.txt`. It first removes from `dist/` only what it makes (`clean-dist.sh`), so other files kept there stay. appimagetool and the AppImage runtime are downloaded by URL and SHA-256 from `build/release.conf` (`fetch-pinned.sh`) and hashed again before use; `EXPECT_VERSION` must match `Cargo.toml`. The tarball is packed by `reproducible_tar` (`release-lib.sh`: sorted names, owner 0:0, normalised modes, mtime = commit time of `HEAD` or `SOURCE_DATE_EPOCH`, `gzip -n`), so the same files give the same archive. It writes no checksum file: `SHA256SUMS` is made for the final files by `release-verify.sh`. |
+| `build/build-flatpak.sh` | Builds `PaletoModkit-x86_64.flatpak` in `dist/` (or `OUT`), unsigned, with flatpak-builder in the Flathub build image (by digest) through rootless podman (docker or rootful podman only with `ALLOW_ROOTFUL=1`). It needs the network and about 15 GB; `WORK` sets where its cache lives (default `~/.cache/paleto-flatpak`), including the Flatpak installation of the SDK (`WORK/flatpak`, kept between builds: the image's own copy sits in overlay layers, where an update fails). The SDK and its extensions are updated to the commits pinned in `release.conf` and checked. It refuses to run with `GPG_KEY_ID` or `GNUPGHOME` set: no key enters the container. `EXPORT_REPO=1` (release mode) also writes `flatpak-unsigned-repo.tar` and `flatpak-build.txt` and refuses an empty pin; `BUNDLE=0` skips the bundle. |
+| `build/flatpak-sign.sh` | Signs the repository, outside the build, in steps run by different jobs: `--prepare` (no key) adds the new commits on top of the published ones and makes the summary; `--check-prepared` (no key, a job of its own) checks all of it again and hands over the checked repository as a pinned tar; `--unpack` (no key) unpacks that tar in the signing job, then `--sign` signs the commits and the summary with the key; `--finish` (no key) checks the result with the public key only, makes the static delta from the published head (when there is one) and tries it, and makes the bundle. The key comes in `FLATPAK_GPG_PRIVATE_KEY` and must be the one of `release.conf`. |
+| `build/publish-flatpak-repo.sh` | Writes `paleto-modkit.flatpakrepo`, `.flatpakref` and the icon next to the signed repository, for GitHub Pages; it takes the public key file as its third argument and needs no keyring. |
+| `build/release.conf` | The pins of the release: identity of the Flatpak, signing key fingerprint, build image digest, Flathub commits of the SDK, tool downloads with their hashes, the files of a release. |
+| `build/release-lib.sh`, `release-validate.sh`, `release-verify.sh`, `release-pages.sh`, `release-publish.sh`, `release-notes.py`, `fetch-pinned.sh` | The release pipeline: checks of the tag and the versions, of the build outputs and of the signed repository; the published Flatpak repository; draft release (its notes from the metainfo), gh-pages and publication, safe to run again. Exit codes: 0 ok, 1 usage, 2 validation, 3 refused by policy, 4 signing, 5 conflict on the remote or remote unreadable. |
+| `build/tests/release-sim.sh` | Simulates the whole pipeline against a throwaway remote, a stub of `gh` and throwaway keys (needs `flatpak`, `ostree`, `gpg`, `jq`; no network). |
+| `build/release-check-env.sh` | Pre-flight check of the signing environment: exit 3 unless `flatpak-signing` exists with a required reviewer and restricted deployment refs, exit 5 when GitHub cannot be read. The release workflow runs it in `check-signing-env`, a job without the environment; `build/tests/check-env-test.sh` tests it. |
+| `build/tests/tarball-test.sh` | Tests `reproducible_tar`: a fixture tree packed twice with other file times, creation order and umask gives the same hash; another epoch or content does not (needs GNU tar; no network). |
+| `build/clean-dist.sh` | Used by `build-release.sh`: removes from `dist/` the tarball, AppImage, `.zsync`, `linux-build.txt` and the two working folders, and nothing else; `build/tests/clean-dist-test.sh` tests it (a foreign file, folder or link in `dist/` survives). |
+| `build/version-bump.sh` | Sets the version of a release in `Cargo.toml`, `Cargo.lock` and the metainfo ([release.md](release.md#cutting-a-release)); `build/tests/version-bump-test.sh` tests it. |
+| `build/ci-changes.sh` | Says from the list of changed files (stdin) whether CI has code to check or only documentation and repository files; `build/tests/ci-changes-test.sh` tests it. |
+| `build/install.sh` | Installs into `~/.local` (or `$PREFIX`) from a release tarball or from a source tree; `--uninstall` removes it. |
+| `build/build-cwconv.sh` | Builds `paleto-cwconv`, self-contained. |
+| `build/flatpak-cargo-sources.sh` | Generates `cargo-sources.json` from `Cargo.lock` with flatpak-cargo-generator, for offline Flatpak builds (`build-flatpak.sh` runs it). |
+| `build/flatpak-nuget-sources.sh` | Generates `nuget-sources.json` for the converter with flatpak-dotnet-generator (`build-flatpak.sh` runs it too). |
 
-`packaging/io.github.the_beper.PaletoModkit.yml` is the Flatpak manifest; it builds from the working tree. To install what `build-flatpak.sh` made:
+`build/io.github.the_beper.PaletoModkit.yml` is the Flatpak manifest; it builds from the working tree. To install what `build-flatpak.sh` made:
 
 ```bash
-./packaging/build-flatpak.sh
+./build/build-flatpak.sh
 flatpak install --user dist/PaletoModkit-x86_64.flatpak
 ```
 
 The release workflow (`.github/workflows/release.yml`) builds the tarball and the AppImage (on `ubuntu-22.04`, so the AppImage links an old glibc and carries `libxkbcommon-x11`, which winit loads when there is no Wayland session) and the Flatpak (on the runner itself, after freeing its disk: the build needs more room than a container job has) for each `v*` tag. The builds never see the signing key: it is only in the approved `sign-flatpak` job, and `publish` then makes the release and the `gh-pages` branch (served by GitHub Pages). The one-time setup, cutting a release, recovery and pin bumps are in [release.md](release.md).
 
-Dependabot updates the GitHub Actions weekly; they are pinned to commit SHAs. CI has no path filter on its triggers (a skipped workflow leaves the required checks pending): for a pull request that only touches documentation, screenshots or other non-code files, `check`, `release-tooling` and `msrv` still run and report, but skip their steps (`packaging/ci-changes.sh` decides). `release-tooling` also runs `actionlint` and `zizmor --offline` on the workflows, as release binaries checked by SHA-256 (version and hash in `ci.yml`; Dependabot does not bump them). Run both locally before changing a workflow. The `msrv` job runs `cargo check --locked --workspace --all-targets --all-features` with exactly the `rust-version` of `Cargo.toml` (it reads it from there), which is the minimum stated here and in [installation.md](installation.md). It is a required check: if code or a dependency needs a newer compiler, raise `rust-version` and those two pages together or hold the change back. The `deny` job runs `cargo deny check` (licences, advisories, sources; [`deny.toml`](../deny.toml)) on every run and weekly on `main`, because advisories appear without any change here; a new dependency under another licence needs an entry in `deny.toml` and in [THIRD_PARTY.md](../THIRD_PARTY.md).
+Dependabot updates the GitHub Actions weekly; they are pinned to commit SHAs. CI has no path filter on its triggers (a skipped workflow leaves the required checks pending): for a pull request that only touches documentation, screenshots or other non-code files, `check`, `release-tooling` and `msrv` still run and report, but skip their steps (`build/ci-changes.sh` decides). `release-tooling` also runs `actionlint` and `zizmor --offline` on the workflows, as release binaries checked by SHA-256 (version and hash in `ci.yml`; Dependabot does not bump them). Run both locally before changing a workflow. The `msrv` job runs `cargo check --locked --workspace --all-targets --all-features` with exactly the `rust-version` of `Cargo.toml` (it reads it from there), which is the minimum stated here and in [installation.md](installation.md). It is a required check: if code or a dependency needs a newer compiler, raise `rust-version` and those two pages together or hold the change back. The `deny` job runs `cargo deny check` (licences, advisories, sources; [`deny.toml`](../deny.toml)) on every run and weekly on `main`, because advisories appear without any change here; a new dependency under another licence needs an entry in `deny.toml` and in [THIRD_PARTY.md](../THIRD_PARTY.md).
 
 Third-party code and data, and their licences, are listed in [THIRD_PARTY.md](../THIRD_PARTY.md).

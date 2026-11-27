@@ -13,4 +13,4 @@ if ! echo "$sha256  $script" | sha256sum -c --status 2>/dev/null; then
         "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$commit/cargo/flatpak-cargo-generator.py"
     echo "$sha256  $script" | sha256sum -c --quiet
 fi
-python3 "$script" Cargo.lock -o packaging/cargo-sources.json
+python3 "$script" Cargo.lock -o build/cargo-sources.json

@@ -2,7 +2,7 @@
 # Checks version-bump.sh on a small checkout of its own (a git repository with Cargo.toml, Cargo.lock and the
 # metainfo): the three places move together, the notes become the new <release>, candidates are replaced, and every
 # refusal leaves the files as they were. No network.
-#   sh packaging/tests/version-bump-test.sh
+#   sh build/tests/version-bump-test.sh
 set -eu
 unset BUMP_ROOT
 
@@ -16,15 +16,15 @@ bad() {
     fail=1
 }
 same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi; }
-META=packaging/io.github.the_beper.PaletoModkit.metainfo.xml
+META=build/io.github.the_beper.PaletoModkit.metainfo.xml
 TODAY=$(date -u +%F)
 
 # fixture VERSION [TYPE]: a fresh checkout at VERSION, committed; a dependency shares the version string.
 fixture() {
     R=$T/repo
     rm -rf "$R"
-    mkdir -p "$R/packaging"
-    cp "$HERE/../version-bump.sh" "$HERE/../release-lib.sh" "$R/packaging/"
+    mkdir -p "$R/build"
+    cp "$HERE/../version-bump.sh" "$HERE/../release-lib.sh" "$R/build/"
     printf '[workspace]\nmembers = ["a", "b"]\n\n[workspace.package]\nversion = "%s"\nedition = "2024"\n\n[workspace.dependencies]\nzed = { version = "%s" }\n' "$1" "$1" > "$R/Cargo.toml"
     for n in paleto-a zed paleto-b; do printf '[[package]]\nname = "%s"\nversion = "%s"\n\n' "$n" "$1"; done > "$R/Cargo.lock"
     cat > "$R/$META" << EOF
@@ -51,7 +51,7 @@ EOF
     git -C "$R" add -A
     git -C "$R" -c user.name=t -c user.email=t@t commit -q -m fixture
 }
-bump() { (cd "$R" && sh packaging/version-bump.sh "$@") > "$T/out" 2>&1; }
+bump() { (cd "$R" && sh build/version-bump.sh "$@") > "$T/out" 2>&1; }
 state() { cat "$R/Cargo.toml" "$R/Cargo.lock" "$R/$META" | sha256sum; }
 lockv() { awk -v n="$1" '$0 == "name = \"" n "\"" { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' "$R/Cargo.lock"; }
 first() { awk '/<release / { print; exit }' "$R/$META" | sed 's/^ *//'; }

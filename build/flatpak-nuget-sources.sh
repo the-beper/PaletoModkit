@@ -28,11 +28,11 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/tools" "$work/third_party"
 cp -r tools/cwconv "$work/tools/"
 cp -r third_party/codewalker "$work/third_party/"
-python3 "$script" packaging/nuget-sources.json "$work/tools/cwconv/paleto-cwconv.csproj" \
+python3 "$script" build/nuget-sources.json "$work/tools/cwconv/paleto-cwconv.csproj" \
     --runtime linux-x64 --freedesktop 26.08 --dotnet 10 --dotnet-args -p:SelfContained=true
 
-if [ "$(tr -d '[:space:]' < packaging/nuget-sources.json)" = "[]" ]; then
+if [ "$(tr -d '[:space:]' < build/nuget-sources.json)" = "[]" ]; then
     echo "no NuGet package found: the restore failed" >&2
     exit 1
 fi
-echo "wrote packaging/nuget-sources.json"
+echo "wrote build/nuget-sources.json"

@@ -1,6 +1,6 @@
 # Release and recovery
 
-For the maintainer who cuts releases and fixes them when they fail. The workflow is [`.github/workflows/release.yml`](../.github/workflows/release.yml); the scripts are in [`packaging/`](../packaging) (see [development.md](development.md#packaging) for what each one does). The pins are in [`packaging/release.conf`](../packaging/release.conf).
+For the maintainer who cuts releases and fixes them when they fail. The workflow is [`.github/workflows/release.yml`](../.github/workflows/release.yml); the scripts are in [`build/`](../build) (see [development.md](development.md#packaging) for what each one does). The pins are in [`build/release.conf`](../build/release.conf).
 
 - [One-time setup](#one-time-setup)
 - [Cutting a release](#cutting-a-release)
@@ -40,13 +40,13 @@ These are GitHub settings. Only the maintainer can change them, from the web pag
 
 The tag must point to a commit that is on `main`. `release-validate.sh` refuses anything else.
 
-1. Bump the version to `X.Y.Z` (or `X.Y.Z-rc.N` for a candidate) with `packaging/version-bump.sh X.Y.Z NOTES`, on a branch with no other uncommitted change to these files. `NOTES` is a plain text file (no markup): the first line is the summary, every other line an item `- text`. The script refuses a version that is not above the current one and the newest release tag of this clone (run `git fetch --tags` first), and a new `<release>` without notes; a version that follows candidates of the same `X.Y.Z` replaces their entries and, when `NOTES` is left out, keeps their notes (a stable version drops the "Release candidate: " opening of the summary). It changes the three places the check compares with the tag, and never commits:
+1. Bump the version to `X.Y.Z` (or `X.Y.Z-rc.N` for a candidate) with `build/version-bump.sh X.Y.Z NOTES`, on a branch with no other uncommitted change to these files. `NOTES` is a plain text file (no markup): the first line is the summary, every other line an item `- text`. The script refuses a version that is not above the current one and the newest release tag of this clone (run `git fetch --tags` first), and a new `<release>` without notes; a version that follows candidates of the same `X.Y.Z` replaces their entries and, when `NOTES` is left out, keeps their notes (a stable version drops the "Release candidate: " opening of the summary). It changes the three places the check compares with the tag, and never commits:
 
    | File | What |
    | :--- | :--- |
    | `Cargo.toml` | `[workspace.package] version`. Every crate must use `version.workspace = true`. |
    | `Cargo.lock` | Every `paleto-*` package at the same version. |
-   | `packaging/io.github.the_beper.PaletoModkit.metainfo.xml` | A new first `<release version="X.Y.Z" date="YYYY-MM-DD">`. A candidate needs `type="development"`, a stable release must not have it. A stable release replaces the `<release>` entries of its own candidates: AppStream sorts `X.Y.Z-rc.N` above `X.Y.Z`, and CI's `appstreamcli validate` fails with `releases-not-in-order`. The items of its `<ul>` become the notes of the GitHub release (`packaging/release-notes.py`, with a "Full Changelog" link to the next older `<release>`); the `<p>` is only for software centers. |
+   | `build/io.github.the_beper.PaletoModkit.metainfo.xml` | A new first `<release version="X.Y.Z" date="YYYY-MM-DD">`. A candidate needs `type="development"`, a stable release must not have it. A stable release replaces the `<release>` entries of its own candidates: AppStream sorts `X.Y.Z-rc.N` above `X.Y.Z`, and CI's `appstreamcli validate` fails with `releases-not-in-order`. The items of its `<ul>` become the notes of the GitHub release (`build/release-notes.py`, with a "Full Changelog" link to the next older `<release>`); the `<p>` is only for software centers. |
 
 2. Merge it to `main` through a pull request, with CI green.
 3. Tag and push:
@@ -66,6 +66,8 @@ The tag must point to a commit that is on `main`. `release-validate.sh` refuses 
 A release candidate becomes a GitHub prerelease. It never touches `gh-pages`, and its Flatpak repository is a fresh one of its own.
 
 To try the builds without publishing, start the workflow by hand from `main` with the tag and `mode: build-only` (the default). The graph ends at `verify`.
+
+A manual run checks out the tag and runs the scripts of that tag from `build/`, the folder the workflow on `main` names. Tags up to v1.9.0 keep them in `packaging/`, so every manual mode (`build-only`, `publish-flatpak`, the bootstrap of [Broken gh-pages](#broken-gh-pages)) fails in `validate` for them. While v1.9.0 is the highest release, repairing a broken `gh-pages` therefore needs a temporary change of the workflow.
 
 ## The job graph
 
@@ -205,7 +207,7 @@ Every release keeps the previous state in the branch `gh-pages-previous`. If `gh
    git push --force-with-lease=gh-pages:<broken-sha> origin origin/gh-pages-previous:gh-pages
    ```
 
-2. Start the workflow by hand from `main`, with the highest published tag that has its files and `mode: publish-flatpak`. It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched. It is the only mode that runs while `gh-pages` is below the highest release.
+2. Start the workflow by hand from `main`, with the highest published tag that has its files and `mode: publish-flatpak` (not possible for v1.9.0 or older, see [Cutting a release](#cutting-a-release)). It signs the new version on top of the restored repository and pushes `gh-pages` again. The release itself is not touched. It is the only mode that runs while `gh-pages` is below the highest release.
 
 A refused `repo/config` (exit 2 in `prepare-flatpak` or `check-flatpak`) means someone changed the unsigned file on `gh-pages`: treat it as an incident, restore from `gh-pages-previous` the same way.
 
@@ -318,13 +320,13 @@ An empty or malformed hash or commit makes `release-validate.sh` stop with exit 
 A test prints `SKIP` and exits 77 when a tool is missing. They use throwaway keys and folders, no network and no GitHub, and never touch your real Flatpak installation or home. In the simulation `RELEASE_SIM=1` makes the scripts refuse a remote, repository or site on GitHub.
 
 ```bash
-sh packaging/tests/tarball-test.sh           # the tarball packing is deterministic
-sh packaging/tests/clean-dist-test.sh        # the release build leaves foreign files in dist/ alone
-sh packaging/tests/check-env-test.sh         # the pre-flight check of the signing environment
-sh packaging/tests/release-sim.sh            # the whole pipeline against a local remote and a stub of gh
-sh packaging/tests/release-sim.sh -l         # list the scenarios
-sh packaging/tests/release-sim.sh <name>     # one scenario
-sh packaging/tests/flatpak-repo-test.sh      # signing, install, update and tampering with the real flatpak client
+sh build/tests/tarball-test.sh           # the tarball packing is deterministic
+sh build/tests/clean-dist-test.sh        # the release build leaves foreign files in dist/ alone
+sh build/tests/check-env-test.sh         # the pre-flight check of the signing environment
+sh build/tests/release-sim.sh            # the whole pipeline against a local remote and a stub of gh
+sh build/tests/release-sim.sh -l         # list the scenarios
+sh build/tests/release-sim.sh <name>     # one scenario
+sh build/tests/flatpak-repo-test.sh      # signing, install, update and tampering with the real flatpak client
 ```
 
 `KEEP=1` keeps the scratch folder and `VERBOSE=1` prints the log of a failed scenario. The simulation uses synthetic build output, so it does not prove the container build or the real appimagetool. The repository test does not prove the build with the Flathub SDK, runtime dependencies, the HTTP serving of GitHub Pages (a local `http.server` stands in) or the software center. `build-only` runs on a real runner are the proof for the builds.

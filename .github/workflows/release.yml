@@ -12,8 +12,8 @@ name: Release
 # there, and no static deltas) and removes it. `finish-flatpak` verifies the signed repository like a client does, makes the
 # static delta from the published head and tries it, and makes the bundle, on a machine that never held the key. Only
 # `publish` can write (the draft release, then gh-pages through a credential helper, then the release). The rules are
-# in docs/release.md, the scripts in packaging/release-*.sh and flatpak-sign.sh, simulated by
-# packaging/tests/release-sim.sh.
+# in docs/release.md, the scripts in build/release-*.sh and flatpak-sign.sh, simulated by
+# build/tests/release-sim.sh.
 #
 #   validate -> build-linux  \
 #            -> build-flatpak -> verify -> prepare-flatpak -> check-flatpak -> sign-flatpak -> finish-flatpak -> publish
@@ -82,7 +82,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-        run: packaging/release-validate.sh --tag "$TAG" --mode "$MODE" --event "$EVENT"
+        run: build/release-validate.sh --tag "$TAG" --mode "$MODE" --event "$EVENT"
 
   build-linux:
     needs: validate
@@ -99,7 +99,7 @@ jobs:
           submodules: true
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT"
+        run: build/release-validate.sh --check-head "$COMMIT"
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
@@ -113,7 +113,7 @@ jobs:
       - name: Build release artifacts
         env:
           EXPECT_VERSION: ${{ needs.validate.outputs.version }}
-        run: packaging/build-release.sh
+        run: build/build-release.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-dist-${{ needs.validate.outputs.commit }}
@@ -142,7 +142,7 @@ jobs:
           submodules: true
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT"
+        run: build/release-validate.sh --check-head "$COMMIT"
       # No secret, no signing key and no token is in this job: the build runs unreviewed dependencies in a container.
       - name: Build the unsigned Flatpak repository
         env:
@@ -150,7 +150,7 @@ jobs:
           OUT: ${{ runner.temp }}/out
           BUNDLE: "0"
           EXPORT_REPO: "1"
-        run: packaging/build-flatpak.sh
+        run: build/build-flatpak.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flatpak-unsigned-${{ needs.validate.outputs.commit }}
@@ -162,7 +162,7 @@ jobs:
 
   # build-windows (milestone M2): needs validate, runs-on windows-2025, permissions contents: read, checkout of the
   # validated commit with persist-credentials: false, uploads windows-dist-<commit>. To switch it on: add it to
-  # `verify.needs`, add `release-verify.sh --windows DIR`, and its files to RELEASE_FILES in packaging/release.conf.
+  # `verify.needs`, add `release-verify.sh --windows DIR`, and its files to RELEASE_FILES in build/release.conf.
 
   verify:
     needs: [validate, build-linux, build-flatpak]
@@ -182,7 +182,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Install ostree
         run: sudo apt-get install -y --no-install-recommends ostree
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -197,11 +197,11 @@ jobs:
       - name: Verify the builds (Linux and Flatpak)
         id: verify_linux
         if: ${{ needs.validate.outputs.build_linux == 'true' }}
-        run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --linux in/linux --flatpak in/fp --out out
+        run: build/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --linux in/linux --flatpak in/fp --out out
       - name: Verify the build (Flatpak only)
         id: verify_flatpak
         if: ${{ needs.validate.outputs.build_linux != 'true' }}
-        run: packaging/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --flatpak in/fp --out out
+        run: build/release-verify.sh builds --tag "$TAG" --commit "$COMMIT" --flatpak in/fp --out out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verified-${{ needs.validate.outputs.commit }}
@@ -211,7 +211,7 @@ jobs:
 
   # A job that names an environment which does not exist makes GitHub create it, without reviewers. So before anything
   # is prepared or signed, this job (no environment, read-only token, runs in parallel with the builds) fails unless
-  # `flatpak-signing` exists with a required reviewer and restricted deployment refs (packaging/release-check-env.sh).
+  # `flatpak-signing` exists with a required reviewer and restricted deployment refs (build/release-check-env.sh).
   check-signing-env:
     needs: validate
     if: ${{ needs.validate.outputs.publish == 'true' }}
@@ -229,12 +229,12 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Check the environment flatpak-signing is protected
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: packaging/release-check-env.sh
+        run: build/release-check-env.sh
 
   # Reads the build output and gh-pages, makes the new commits (unsigned) and the summary. No secret, no
   # environment, read-only token: this is where untrusted data is parsed, on a machine that never sees the key.
@@ -258,7 +258,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Install flatpak and ostree
         run: sudo apt-get install -y --no-install-recommends flatpak ostree
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -272,22 +272,22 @@ jobs:
       # The published repository, without credentials: only a stable release is added to it.
       - name: Fetch gh-pages
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
-        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages"
+        run: build/release-pages.sh fetch "$RUNNER_TEMP/pages"
       - name: Fetch gh-pages (first publication)
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
-        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
+        run: build/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
       - name: Check the builds and gh-pages, prepare the repository
         id: prep_site
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
-        run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
+        run: build/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
       - name: Check the builds and gh-pages, prepare the repository (first publication)
         id: prep_bootstrap
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
-        run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --bootstrap --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
+        run: build/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --site "$RUNNER_TEMP/pages" --bootstrap --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
       - name: Check the builds, prepare the repository (release candidate, a repository of its own)
         id: prep_fresh
         if: ${{ needs.validate.outputs.prerelease == 'true' }}
-        run: packaging/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --fresh --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
+        run: build/flatpak-sign.sh --prepare --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --unsigned in/flatpak-unsigned-repo.tar --fresh --work "$RUNNER_TEMP/prepwork" --out "$RUNNER_TEMP/prepared"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flatpak-prepared-${{ needs.validate.outputs.commit }}
@@ -321,7 +321,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Install flatpak and ostree
         run: sudo apt-get install -y --no-install-recommends flatpak ostree
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -335,24 +335,24 @@ jobs:
       # The published repository again, without credentials: the base of the checks below is not what prepare-flatpak says.
       - name: Fetch gh-pages
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
-        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages"
+        run: build/release-pages.sh fetch "$RUNNER_TEMP/pages"
       - name: Fetch gh-pages (first publication)
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
-        run: packaging/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
+        run: build/release-pages.sh fetch "$RUNNER_TEMP/pages" --bootstrap
       # Unpacks what prepare-flatpak made, checks its refs, config and new commits against gh-pages and its content against the
       # manifest of the verify job; this names the commits the key may sign.
       - name: Check the prepared repository
         id: check_site
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP != 'true' }}
-        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/checkwork" --out "$RUNNER_TEMP/checked" --site "$RUNNER_TEMP/pages" --check-remote
+        run: build/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/checkwork" --out "$RUNNER_TEMP/checked" --site "$RUNNER_TEMP/pages" --check-remote
       - name: Check the prepared repository (first publication)
         id: check_bootstrap
         if: ${{ needs.validate.outputs.prerelease != 'true' && env.BOOTSTRAP == 'true' }}
-        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/checkwork" --out "$RUNNER_TEMP/checked" --site "$RUNNER_TEMP/pages" --bootstrap --check-remote
+        run: build/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/checkwork" --out "$RUNNER_TEMP/checked" --site "$RUNNER_TEMP/pages" --bootstrap --check-remote
       - name: Check the prepared repository (release candidate, a repository of its own)
         id: check_fresh
         if: ${{ needs.validate.outputs.prerelease == 'true' }}
-        run: packaging/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/checkwork" --out "$RUNNER_TEMP/checked" --fresh
+        run: build/flatpak-sign.sh --check-prepared --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in prepared --work "$RUNNER_TEMP/checkwork" --out "$RUNNER_TEMP/checked" --fresh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
@@ -381,7 +381,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Install flatpak and ostree
         run: sudo apt-get install -y --no-install-recommends flatpak ostree
       # By the id that check-flatpak pinned: an artifact of the same name uploaded again later has another id. An empty id would
@@ -398,16 +398,16 @@ jobs:
         env:
           CHECKED_SHA256: ${{ needs.check-flatpak.outputs.checked_sha256 }}
           PREPARED_SHA256: ${{ needs.prepare-flatpak.outputs.prepared_sha256 }}
-        run: packaging/flatpak-sign.sh --unpack --tag "$TAG" --commit "$COMMIT" --in checked --work "$RUNNER_TEMP/signwork"
+        run: build/flatpak-sign.sh --unpack --tag "$TAG" --commit "$COMMIT" --in checked --work "$RUNNER_TEMP/signwork"
       # The only step with the key: it signs the named commits and the summary, in a keyring in memory.
       - name: Sign
         id: sign
         env:
           FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
-        run: packaging/flatpak-sign.sh --sign --tag "$TAG" --commit "$COMMIT" --work "$RUNNER_TEMP/signwork" --out "$RUNNER_TEMP/signres"
+        run: build/flatpak-sign.sh --sign --tag "$TAG" --commit "$COMMIT" --work "$RUNNER_TEMP/signwork" --out "$RUNNER_TEMP/signres"
       - name: Remove the keyring and the work folder
         if: ${{ always() }}
-        run: packaging/flatpak-sign.sh --cleanup --work "$RUNNER_TEMP/signwork"
+        run: build/flatpak-sign.sh --cleanup --work "$RUNNER_TEMP/signwork"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flatpak-sign-result-${{ needs.validate.outputs.commit }}
@@ -441,7 +441,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Install flatpak and ostree
         run: sudo apt-get install -y --no-install-recommends flatpak ostree
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -459,7 +459,7 @@ jobs:
           path: in
       - name: Verify the signed repository and make the bundle
         id: finish
-        run: packaging/flatpak-sign.sh --finish --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in signres --checked checked --work "$RUNNER_TEMP/finwork" --out "$RUNNER_TEMP/signed"
+        run: build/flatpak-sign.sh --finish --tag "$TAG" --commit "$COMMIT" --manifest in/release-manifest.txt --in signres --checked checked --work "$RUNNER_TEMP/finwork" --out "$RUNNER_TEMP/signed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flatpak-signed-${{ needs.validate.outputs.commit }}
@@ -491,7 +491,7 @@ jobs:
           ref: ${{ needs.validate.outputs.commit }}
           persist-credentials: false
       - name: Check the checkout is the validated commit
-        run: packaging/release-validate.sh --check-head "$COMMIT" --no-submodule
+        run: build/release-validate.sh --check-head "$COMMIT" --no-submodule
       - name: Install ostree
         run: sudo apt-get install -y --no-install-recommends ostree
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -513,11 +513,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PAGES_WAIT: "600"
-        run: packaging/release-publish.sh --mode "$MODE" --tag "$TAG" --commit "$COMMIT" --in in
+        run: build/release-publish.sh --mode "$MODE" --tag "$TAG" --commit "$COMMIT" --in in
       - name: Publish (first publication, creates gh-pages)
         if: ${{ env.BOOTSTRAP == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PAGES_WAIT: "600"
-        run: packaging/release-publish.sh --mode "$MODE" --tag "$TAG" --commit "$COMMIT" --in in --bootstrap
+        run: build/release-publish.sh --mode "$MODE" --tag "$TAG" --commit "$COMMIT" --in in --bootstrap

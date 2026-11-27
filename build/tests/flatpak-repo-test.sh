@@ -1,9 +1,9 @@
 #!/bin/sh
-# Offline (loopback only) integration test of the signed Flatpak repository: the real packaging/release-verify.sh and
-# packaging/flatpak-sign.sh sign a synthetic app with throwaway keys, and the real flatpak client, in an
+# Offline (loopback only) integration test of the signed Flatpak repository: the real build/release-verify.sh and
+# build/flatpak-sign.sh sign a synthetic app with throwaway keys, and the real flatpak client, in an
 # installation of its own, installs it, updates it and refuses tampered copies. No network, no D-Bus, no
 # compositor, and nothing of the real home or the real Flatpak installation (checked at the end).
-#   sh packaging/tests/flatpak-repo-test.sh
+#   sh build/tests/flatpak-repo-test.sh
 #   FLATPAK_TEST_BASE=dir   where the scratch tree goes (default $TMPDIR or /tmp; a disk is kinder than a tmpfs)
 #   KEEP=1                  keep the scratch tree; VERBOSE=1 print the log of a failed step
 # Needs flatpak, ostree, gpg, tar, python3; exits 77 (skipped) if one is missing. Exit 1 if a check fails.

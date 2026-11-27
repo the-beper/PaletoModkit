@@ -43,7 +43,7 @@ pub const NAME: &str = "Paleto Modkit";
 /// Reverse-DNS application ID: desktop file, icon and AppStream names.
 pub const APP_ID: &str = "io.github.the_beper.PaletoModkit";
 
-pub(crate) const ICON_PNG: &[u8] = include_bytes!("../../../packaging/icons/hicolor/256x256/apps/io.github.the_beper.PaletoModkit.png");
+pub(crate) const ICON_PNG: &[u8] = include_bytes!("../../../build/icons/hicolor/256x256/apps/io.github.the_beper.PaletoModkit.png");
 
 /// Whether this runs inside a Flatpak sandbox, which sees only some folders.
 pub(crate) fn sandboxed() -> bool {

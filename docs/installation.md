@@ -85,8 +85,8 @@ You need Rust 1.95 or later and the usual build tools. The converter also needs 
 git clone --recurse-submodules https://github.com/the-beper/PaletoModkit.git
 cd paleto-modkit
 cargo build --release
-./packaging/build-cwconv.sh   # optional: Legacy -> Enhanced conversion
-./packaging/install.sh
+./build/build-cwconv.sh   # optional: Legacy -> Enhanced conversion
+./build/install.sh
 ```
 
 Without the converter everything else works; Legacy files are then only reported, not converted.

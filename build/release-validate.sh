@@ -93,7 +93,7 @@ locked=$(awk '/^\[\[package\]\]/ { n = ""; next } /^name = "paleto-/ { n = $0; s
 [ -n "$locked" ] || die 2 "Cargo.lock lists no paleto-* package"
 bad=$(printf '%s\n' "$locked" | awk -v v="$VERSION" '$2 != v { print $1 " " $2 }')
 [ -z "$bad" ] || die 2 "Cargo.lock is not at $VERSION for: $bad"
-meta=packaging/$APP_ID.metainfo.xml
+meta=build/$APP_ID.metainfo.xml
 rel=$(xml_first_release "$meta")
 [ -n "$rel" ] || die 2 "$meta has no <release>"
 # shellcheck disable=SC2086

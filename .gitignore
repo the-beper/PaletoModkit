@@ -1,10 +1,9 @@
 target/
 magic.dat
 dist/
-packaging/cargo-sources.json
-packaging/nuget-sources.json
+build/cargo-sources.json
+build/nuget-sources.json
 .flatpak-builder/
 tmp/
-TODO.md
 NOTES.md
 /.claude/

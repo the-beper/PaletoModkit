@@ -2,7 +2,7 @@
 //! model of a game folder (nested archives included), exports it with
 //! `xml_export` into a work folder (XML and DDS files), imports that XML with
 //! CodeWalker's own importers (`target/cwxml/paleto-cwxml`, built with
-//! `PROJECT=cwxml packaging/build-cwconv.sh`; `PALETO_CWXML` names another
+//! `PROJECT=cwxml build/build-cwconv.sh`; `PALETO_CWXML` names another
 //! one), then reads the file CodeWalker built with our readers and compares
 //! it with the original: drawables and their names, levels of detail, and per
 //! level the vertices, triangles and positions. Enhanced files (told by their
@@ -72,7 +72,7 @@ fn main() {
     let every: usize = args[1].parse::<usize>().expect("N must be a number").max(1);
     let kinds: Vec<&str> = if args.len() > 2 { args[2..].iter().map(String::as_str).collect() } else { KINDS.to_vec() };
     let tool = std::env::var_os("PALETO_CWXML").map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cwxml/paleto-cwxml"));
-    assert!(tool.is_file(), "{} not found: build it with PROJECT=cwxml packaging/build-cwconv.sh", tool.display());
+    assert!(tool.is_file(), "{} not found: build it with PROJECT=cwxml build/build-cwconv.sh", tool.display());
     let work = std::env::temp_dir().join(format!("paleto-roundtrip-xml-{}", std::process::id()));
     let keys = keys();
     let mut stats: BTreeMap<String, Stats> = BTreeMap::new();

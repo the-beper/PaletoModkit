@@ -1,8 +1,8 @@
 #!/bin/sh
 # Simulates the release pipeline (the jobs of .github/workflows/release.yml) with the real scripts of
-# packaging/, a throwaway git remote, the gh stub, and throwaway signing keys: no network, no GitHub, and nothing
+# build/, a throwaway git remote, the gh stub, and throwaway signing keys: no network, no GitHub, and nothing
 # of the real home or Flatpak installation. Prints "PASS name" or "FAIL name: why" per scenario.
-#   sh packaging/tests/release-sim.sh [scenario...]     (no argument: all of them; -l lists them)
+#   sh build/tests/release-sim.sh [scenario...]     (no argument: all of them; -l lists them)
 #   SIM_BASE=dir   where the scratch tree goes (default $TMPDIR or /tmp; a disk is kinder than a tmpfs)
 #   KEEP=1         keep the scratch tree; VERBOSE=1 print the logs of a failed scenario
 # Needs flatpak, ostree, gpg, git, jq, tar, curl; exits 77 (skipped) if one is missing. Exit 1 if a scenario fails.
@@ -150,14 +150,14 @@ job_validate() { # RUN TAG MODE [EVENT]
     fi
     : > "$d/validate.out"
     run "$d/validate.log" in_dir "$d/src" env GITHUB_OUTPUT="$d/validate.out" GITHUB_SHA="$sha" GITHUB_REF="$ref" BOOTSTRAP="$BOOTSTRAP" \
-        sh packaging/release-validate.sh --tag "$2" --mode "$3" --event "$event"
+        sh build/release-validate.sh --tag "$2" --mode "$3" --event "$event"
 }
 
 job_build() { # RUN
     d=$LIVE/runs/$1
     commit=$(kv "$d/validate.out" commit)
     checkout "$d/build" "$commit"
-    run "$d/check-head.log" in_dir "$d/build" sh packaging/release-validate.sh --check-head "$commit"
+    run "$d/check-head.log" in_dir "$d/build" sh build/release-validate.sh --check-head "$commit"
     [ "$RC" = 0 ] || return 0
     RC=0
     if [ "$(kv "$d/validate.out" build_linux)" = true ]; then
@@ -173,7 +173,7 @@ job_verify() { # RUN
     linux=""
     [ ! -d "$d/linux" ] || linux=$d/linux
     : > "$d/verify.gho"
-    run "$d/verify.log" in_dir "$d/build" env GITHUB_OUTPUT="$d/verify.gho" sh packaging/release-verify.sh builds --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" \
+    run "$d/verify.log" in_dir "$d/build" env GITHUB_OUTPUT="$d/verify.gho" sh build/release-verify.sh builds --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" \
         ${linux:+--linux "$linux"} --flatpak "$d/fp" --out "$d/verified"
     # the job output: the later jobs check the manifest they download against it
     MANIFEST_SHA256=$(kv "$d/verify.gho" manifest_sha256)
@@ -201,14 +201,14 @@ job_prepare() {
     case $tag in
         *-rc.*) site="--fresh" ;;
         *)
-            run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages" $boot
+            run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages" $boot
             [ "$RC" = 0 ] || return 0
             site="--site $rt/pages $boot"
             ;;
     esac
     : > "$d/prepare.gho"
     # shellcheck disable=SC2086
-    run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/prepare.gho" sh packaging/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
+    run "$d/sign-prepare.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/prepare.gho" sh build/flatpak-sign.sh --prepare $sign_args --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" $site --work "$rt/prepwork" --out "$d/prepared"
     # PREPARED_HOOK DIR: a function that edits the output of --prepare, as a compromised prepare job would (which also pins what it wrote)
     if [ "$RC" = 0 ] && [ -n "${PREPARED_HOOK:-}" ]; then
@@ -227,14 +227,14 @@ job_check() {
     case $tag in
         *-rc.*) csite="--fresh" ;;
         *)
-            run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$ct" sh packaging/release-pages.sh fetch "$ct/pages" $boot
+            run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$ct" sh build/release-pages.sh fetch "$ct/pages" $boot
             [ "$RC" = 0 ] || return 0
             csite="--site $ct/pages $boot"
             ;;
     esac
     # shellcheck disable=SC2086
     run "$d/sign-check.log" in_dir "$d/build" env RUNNER_TEMP="$ct" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" PREPARED_SHA256="$(kv "$d/prepare.gho" prepared_sha256)" GITHUB_OUTPUT="$d/check.gho" \
-        sh packaging/flatpak-sign.sh --check-prepared $sign_args --manifest "$m" --in "$d/prepared" --work "$ct/checkwork" --out "$d/checked" $csite --check-remote
+        sh build/flatpak-sign.sh --check-prepared $sign_args --manifest "$m" --in "$d/prepared" --work "$ct/checkwork" --out "$d/checked" $csite --check-remote
 }
 
 # job_sign RUN: the artifact of the check job, unpacked without the key (step 1), then signed (the Sign step)
@@ -246,13 +246,13 @@ job_sign() {
     : > "$d/sign.gho"
     secret=$(cat "${SECRET_FILE:-$KEYS/K.sec}")
     run "$d/sign-unpack.log" in_dir "$d/build" env RUNNER_TEMP="$st" CHECKED_SHA256="$(kv "$d/check.gho" checked_sha256)" PREPARED_SHA256="$(kv "$d/prepare.gho" prepared_sha256)" \
-        sh packaging/flatpak-sign.sh --unpack $sign_args --in "$d/checked" --work "$st/signwork"
+        sh build/flatpak-sign.sh --unpack $sign_args --in "$d/checked" --work "$st/signwork"
     if [ "$RC" = 0 ]; then
         run "$d/sign-sign.log" in_dir "$d/build" env RUNNER_TEMP="$st" GITHUB_OUTPUT="$d/sign.gho" FLATPAK_GPG_PRIVATE_KEY="$secret" \
-            sh packaging/flatpak-sign.sh --sign $sign_args --work "$st/signwork" --out "$d/signres"
+            sh build/flatpak-sign.sh --sign $sign_args --work "$st/signwork" --out "$d/signres"
     fi
     sj=$RC
-    in_dir "$d/build" env RUNNER_TEMP="$st" sh packaging/flatpak-sign.sh --cleanup --work "$st/signwork" > "$d/cleanup.log" 2>&1 || true
+    in_dir "$d/build" env RUNNER_TEMP="$st" sh build/flatpak-sign.sh --cleanup --work "$st/signwork" > "$d/cleanup.log" 2>&1 || true
     RC=$sj
 }
 
@@ -265,7 +265,7 @@ job_finish() {
     : > "$d/finish.gho"
     run "$d/sign-finish.log" in_dir "$d/build" env RUNNER_TEMP="$ft" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" CHECKED_SHA256="$(kv "$d/check.gho" checked_sha256)" PREPARED_SHA256="$(kv "$d/prepare.gho" prepared_sha256)" \
         RESULT_SHA256="$(kv "$d/sign.gho" result_sha256)" GITHUB_OUTPUT="$d/finish.gho" \
-        sh packaging/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --checked "$d/checked" --work "$ft/finwork" --out "$d/signed"
+        sh build/flatpak-sign.sh --finish $sign_args --manifest "$m" --in "$d/signres" --checked "$d/checked" --work "$ft/finwork" --out "$d/signed"
 }
 
 # signing_jobs RUN: prepare, check, sign and finish in order, stopping at the first that fails (SIGN_FAIL names it); sign.log has all their logs
@@ -291,7 +291,7 @@ job_publish() { # RUN MODE
     boot=""
     [ "$BOOTSTRAP" != true ] || boot=--bootstrap
     run "$d/publish.log" in_dir "$d/build" env RUNNER_TEMP="$SIM/rt/$1" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" SIGNED_SHA256="$(kv "$d/finish.gho" signed_sha256)" PAGES_WAIT=3 PAGES_POLL=1 RELEASE_WAIT=6 RELEASE_POLL=1 GITHUB_RUN_ID="$1" GITHUB_RUN_ATTEMPT=1 \
-        sh packaging/release-publish.sh --mode "$mode" --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" --in "$d/in" $boot
+        sh build/release-publish.sh --mode "$mode" --tag "$(kv "$d/validate.out" tag)" --commit "$(kv "$d/validate.out" commit)" --in "$d/in" $boot
 }
 
 # pipeline RUN TAG MODE [EVENT [UNTIL]]: the jobs in order, stopping at the first that fails (like "needs").
@@ -378,14 +378,14 @@ sc_invalid_tag() {
 
 mut_cargo() { sed -i 's/^version = "1.6.0"/version = "1.5.1"/' "$1/Cargo.toml"; }
 mut_lock() { sed -i '/^name = "paleto-gui"/{n;s/version = "1.6.0"/version = "1.5.1"/}' "$1/Cargo.lock"; }
-mut_metainfo() { fx_metainfo "$1/packaging/$APP_ID.metainfo.xml" "$APP_ID" 1.5.1 2026-10-29; }
-mut_date() { sed -i 's|date="2026-10-29"|date="29/10/2026"|' "$1/packaging/$APP_ID.metainfo.xml"; }
+mut_metainfo() { fx_metainfo "$1/build/$APP_ID.metainfo.xml" "$APP_ID" 1.5.1 2026-10-29; }
+mut_date() { sed -i 's|date="2026-10-29"|date="29/10/2026"|' "$1/build/$APP_ID.metainfo.xml"; }
 mut_submodule() { git -C "$1" config -f .gitmodules submodule.third_party/codewalker.url https://example.invalid/CodeWalker.git; }
 mut_extra_submodule() { git -C "$1" config -f .gitmodules submodule.extra.path extra; git -C "$1" config -f .gitmodules submodule.extra.url "file://$CW"; }
-mut_rc_type() { sed -i 's/ type="development"//' "$1/packaging/$APP_ID.metainfo.xml"; }
-mut_stable_dev() { sed -i 's/date="2026-10-29"/date="2026-10-29" type="development"/' "$1/packaging/$APP_ID.metainfo.xml"; }
-mut_pin() { sed -i 's/^SDK_COMMIT=.*/SDK_COMMIT=/' "$1/packaging/release.conf"; }
-mut_identity() { sed -i 's/^APP_ID=.*/APP_ID=io.github.other.App/' "$1/packaging/release.conf"; }
+mut_rc_type() { sed -i 's/ type="development"//' "$1/build/$APP_ID.metainfo.xml"; }
+mut_stable_dev() { sed -i 's/date="2026-10-29"/date="2026-10-29" type="development"/' "$1/build/$APP_ID.metainfo.xml"; }
+mut_pin() { sed -i 's/^SDK_COMMIT=.*/SDK_COMMIT=/' "$1/build/release.conf"; }
+mut_identity() { sed -i 's/^APP_ID=.*/APP_ID=io.github.other.App/' "$1/build/release.conf"; }
 mutated() { # NAME TAG MUTATOR
     commit_release "${2#v}" "$3"
     tag_release "$2"
@@ -541,18 +541,18 @@ sc_tool_pin() {
     printf '#!/bin/sh\nexit 0\n' > "$SIM/fakebin/zsyncmake"
     chmod +x "$SIM/fakebin/cargo" "$SIM/fakebin/zsyncmake"
     rm -f "$SIM/cargo-ran"
-    sed "s/^APPIMAGETOOL_SHA256=.*/APPIMAGETOOL_SHA256=$bad/" "$w/packaging/release.conf" > "$SIM/bad.conf"
-    run "$SIM/br.log" in_dir "$w" env RELEASE_CONF="$SIM/bad.conf" PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    sed "s/^APPIMAGETOOL_SHA256=.*/APPIMAGETOOL_SHA256=$bad/" "$w/build/release.conf" > "$SIM/bad.conf"
+    run "$SIM/br.log" in_dir "$w" env RELEASE_CONF="$SIM/bad.conf" PATH="$SIM/fakebin:$PATH" sh build/build-release.sh
     assert_rc "build-release.sh with a wrong appimagetool hash" 2
     [ ! -e "$SIM/cargo-ran" ] || fail "the build ran with an unverified tool"
     [ ! -e "$w/target/tools/appimagetool-$bad" ] || fail "the unverified appimagetool is in place"
-    sed "s/^APPIMAGE_RUNTIME_SHA256=.*/APPIMAGE_RUNTIME_SHA256=/" "$w/packaging/release.conf" > "$SIM/empty.conf"
-    run "$SIM/br.log" in_dir "$w" env RELEASE_CONF="$SIM/empty.conf" PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    sed "s/^APPIMAGE_RUNTIME_SHA256=.*/APPIMAGE_RUNTIME_SHA256=/" "$w/build/release.conf" > "$SIM/empty.conf"
+    run "$SIM/br.log" in_dir "$w" env RELEASE_CONF="$SIM/empty.conf" PATH="$SIM/fakebin:$PATH" sh build/build-release.sh
     assert_rc "build-release.sh with an empty pin" 2
-    run "$SIM/br.log" in_dir "$w" env EXPECT_VERSION=9.9.9 PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    run "$SIM/br.log" in_dir "$w" env EXPECT_VERSION=9.9.9 PATH="$SIM/fakebin:$PATH" sh build/build-release.sh
     assert_rc "build-release.sh with another version than Cargo.toml" 2
     # with the right pins it gets as far as the build (the fake cargo stops it)
-    run "$SIM/br.log" in_dir "$w" env PATH="$SIM/fakebin:$PATH" sh packaging/build-release.sh
+    run "$SIM/br.log" in_dir "$w" env PATH="$SIM/fakebin:$PATH" sh build/build-release.sh
     assert_rc "build-release.sh with the right pins reaches cargo" 99
     [ -x "$w/target/tools/appimagetool-$(sha256sum "$SIM/tools/appimagetool" | cut -d' ' -f1)" ] || fail "the verified appimagetool is not in place"
 }
@@ -584,19 +584,19 @@ printf 'sdk_commit=1\napp_commit=%s\n' "$(ostree --repo="$work/repo" rev-parse a
 echo bundle > "$work/PaletoModkit-x86_64.flatpak"
 ENGINE
     chmod +x "$SIM/fakeeng/podman"
-    fx_unsigned_repo "$SIM/fakerepo" "$w/packaging/$APP_ID.metainfo.xml" "$APP_ID"
+    fx_unsigned_repo "$SIM/fakerepo" "$w/build/$APP_ID.metainfo.xml" "$APP_ID"
     FAKE_LOG=$SIM/engine.log
     FAKE_REPO=$SIM/fakerepo
     export FAKE_LOG FAKE_REPO
     # shellcheck disable=SC2329
     bf() { in_dir "$w" env PATH="$SIM/fakeeng:$PATH" WORK="$SIM/bfwork" OUT="$SIM/bfout" "$@"; }
-    run "$SIM/bf.log" bf GPG_KEY_ID=ABCD sh packaging/build-flatpak.sh
+    run "$SIM/bf.log" bf GPG_KEY_ID=ABCD sh build/build-flatpak.sh
     assert_rc "with GPG_KEY_ID" 1
-    run "$SIM/bf.log" bf GNUPGHOME="$SIM/keys" sh packaging/build-flatpak.sh
+    run "$SIM/bf.log" bf GNUPGHOME="$SIM/keys" sh build/build-flatpak.sh
     assert_rc "with GNUPGHOME" 1
-    run "$SIM/bf.log" bf FAKE_ROOTLESS=false sh packaging/build-flatpak.sh
+    run "$SIM/bf.log" bf FAKE_ROOTLESS=false sh build/build-flatpak.sh
     assert_rc "rootful engine" 1
-    run "$SIM/bf.log" bf EXPORT_REPO=1 BUNDLE=0 sh packaging/build-flatpak.sh
+    run "$SIM/bf.log" bf EXPORT_REPO=1 BUNDLE=0 sh build/build-flatpak.sh
     assert_rc "release build" 0
     assert_file "unsigned repository tar" "$SIM/bfout/flatpak-unsigned-repo.tar"
     assert_file "build description" "$SIM/bfout/flatpak-build.txt"
@@ -607,15 +607,15 @@ ENGINE
     assert_log "$SIM/engine.log" "export FLATPAK_SYSTEM_DIR=/work/flatpak"
     if grep -q -i 'gnupg\|GPG' "$SIM/engine.log"; then fail "the container was given something about GPG"; fi
     # what a release verify makes of the exported repository
-    run "$SIM/bf.log" in_dir "$w" sh packaging/release-verify.sh builds --tag v1.5.1 --commit "$(git -C "$w" rev-parse HEAD)" --flatpak "$SIM/bfout" --out "$SIM/bfverified"
+    run "$SIM/bf.log" in_dir "$w" sh build/release-verify.sh builds --tag v1.5.1 --commit "$(git -C "$w" rev-parse HEAD)" --flatpak "$SIM/bfout" --out "$SIM/bfverified"
     assert_rc "verify of the exported repository" 0
-    # the default (local) build still leaves the bundle where packaging/flatpak-bg.sh expects it
-    run "$SIM/bf.log" bf sh packaging/build-flatpak.sh
+    # the default (local) build still leaves the bundle where build/flatpak-bg.sh expects it
+    run "$SIM/bf.log" bf sh build/build-flatpak.sh
     assert_rc "local build" 0
     assert_file "local bundle" "$SIM/bfout/PaletoModkit-x86_64.flatpak"
     # an empty SDK pin refuses a release build
-    sed 's/^SDK_COMMIT=.*/SDK_COMMIT=/' "$w/packaging/release.conf" > "$SIM/nosdk.conf"
-    run "$SIM/bf.log" bf RELEASE_CONF="$SIM/nosdk.conf" EXPORT_REPO=1 sh packaging/build-flatpak.sh
+    sed 's/^SDK_COMMIT=.*/SDK_COMMIT=/' "$w/build/release.conf" > "$SIM/nosdk.conf"
+    run "$SIM/bf.log" bf RELEASE_CONF="$SIM/nosdk.conf" EXPORT_REPO=1 sh build/build-flatpak.sh
     assert_rc "release build with an empty pin" 2
 }
 
@@ -626,15 +626,15 @@ sc_sim_guard() {
     job_validate 1 v1.6.0 release
     assert_rc "baseline validate" 0
     d=$LIVE/runs/1
-    run "$SIM/g.log" in_dir "$d/src" env REMOTE=https://github.com/the-beper/PaletoModkit.git GITHUB_OUTPUT=/dev/null sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push
+    run "$SIM/g.log" in_dir "$d/src" env REMOTE=https://github.com/the-beper/PaletoModkit.git GITHUB_OUTPUT=/dev/null sh build/release-validate.sh --tag v1.6.0 --mode release --event push
     assert_rc "github remote" 1
-    run "$SIM/g.log" in_dir "$d/src" env GH_REPO=the-beper/PaletoModkit GITHUB_OUTPUT=/dev/null sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push
+    run "$SIM/g.log" in_dir "$d/src" env GH_REPO=the-beper/PaletoModkit GITHUB_OUTPUT=/dev/null sh build/release-validate.sh --tag v1.6.0 --mode release --event push
     assert_rc "real repository name" 1
-    run "$SIM/g.log" in_dir "$d/src" env PATH=/usr/bin:/bin GITHUB_OUTPUT=/dev/null sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push
+    run "$SIM/g.log" in_dir "$d/src" env PATH=/usr/bin:/bin GITHUB_OUTPUT=/dev/null sh build/release-validate.sh --tag v1.6.0 --mode release --event push
     assert_rc "no gh stub" 1
     printf '#!/bin/sh\nexit 0\n' > "$SIM/gh"
     chmod +x "$SIM/gh"
-    run "$SIM/g.log" in_dir "$d/src" env GH_REPO=sim/x sh -c "PATH=$SIM:\$PATH; export PATH; sh packaging/release-validate.sh --tag v1.6.0 --mode release --event push"
+    run "$SIM/g.log" in_dir "$d/src" env GH_REPO=sim/x sh -c "PATH=$SIM:\$PATH; export PATH; sh build/release-validate.sh --tag v1.6.0 --mode release --event push"
     assert_rc "a gh that is not the stub" 1
     # and the stub itself refuses a real repository
     run "$SIM/g.log" env GH_REPO=the-beper/PaletoModkit gh api repos/the-beper/PaletoModkit/releases
@@ -1222,9 +1222,9 @@ sc_sign_secret_env() {
     done
     : > "$rt/seen"
     : > "$rt/calls"
-    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages"
     assert_rc "fetch" 0
-    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages2"
+    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages2"
     assert_rc "fetch again" 0
     m=$d/verified/release-manifest.txt
     args="--tag $tag --commit $commit --manifest $m --unsigned $d/fp/flatpak-unsigned-repo.tar --site $rt/pages --work $rt/pw --out $d/prepared"
@@ -1234,30 +1234,30 @@ sc_sign_secret_env() {
     fargs="--tag $tag --commit $commit --manifest $m --in $d/signres --checked $d/checked --work $rt/fw --out $d/signed"
     secret=$(cat "$KEYS/K.sec")
     # shellcheck disable=SC2086
-    run "$d/p0.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --prepare $args
+    run "$d/p0.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh build/flatpak-sign.sh --prepare $args
     assert_rc "prepare with the secret" 1
     assert_log "$d/p0.log" "without the secret"
     # shellcheck disable=SC2086
-    run "$d/p1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/p1.gho" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --prepare $args
+    run "$d/p1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/p1.gho" PATH="$rt/shim:$PATH" sh build/flatpak-sign.sh --prepare $args
     assert_rc "prepare" 0
     pp=$(kv "$d/p1.gho" prepared_sha256)
     # shellcheck disable=SC2086
-    run "$d/p1b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --check-prepared $cargs
+    run "$d/p1b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh build/flatpak-sign.sh --check-prepared $cargs
     assert_rc "check-prepared with the secret" 1
     # shellcheck disable=SC2086
-    run "$d/p1c.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$pp" GITHUB_OUTPUT="$d/p1c.gho" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --check-prepared $cargs
+    run "$d/p1c.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$pp" GITHUB_OUTPUT="$d/p1c.gho" PATH="$rt/shim:$PATH" sh build/flatpak-sign.sh --check-prepared $cargs
     assert_rc "check-prepared" 0
     ckp=$(kv "$d/p1c.gho" checked_sha256)
     # shellcheck disable=SC2086
-    run "$d/p1d.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --unpack $uargs
+    run "$d/p1d.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" FLATPAK_GPG_PRIVATE_KEY="$secret" sh build/flatpak-sign.sh --unpack $uargs
     assert_rc "unpack with the secret" 1
     # shellcheck disable=SC2086
-    run "$d/p1e.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --unpack $uargs
+    run "$d/p1e.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh build/flatpak-sign.sh --unpack $uargs
     assert_rc "unpack" 0
     : > "$rt/seen"
     : > "$rt/calls"
     # shellcheck disable=SC2086
-    run "$d/p2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/p2.gho" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign $sargs
+    run "$d/p2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" GITHUB_OUTPUT="$d/p2.gho" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$secret" sh build/flatpak-sign.sh --sign $sargs
     assert_rc "sign" 0
     assert_eq "the secret seen by a child process of --sign" 0 "$(wc -c < "$rt/seen")"
     # the sign step unpacks nothing and makes no commit, no appstream data and no delta: it signs
@@ -1270,10 +1270,10 @@ sc_sign_secret_env() {
     done
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
     # shellcheck disable=SC2086
-    run "$d/p3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --finish $fargs
+    run "$d/p3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh build/flatpak-sign.sh --finish $fargs
     assert_rc "finish with the secret" 1
     # shellcheck disable=SC2086
-    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/p2.gho" result_sha256)" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh packaging/flatpak-sign.sh --finish $fargs
+    run "$d/p4.log" in_dir "$d/build" env RUNNER_TEMP="$rt" RESULT_SHA256="$(kv "$d/p2.gho" result_sha256)" CHECKED_SHA256="$ckp" PREPARED_SHA256="$pp" PATH="$rt/shim:$PATH" sh build/flatpak-sign.sh --finish $fargs
     assert_rc "finish" 0
     # the delta is made here, by the step without the key, after the signing
     grep -q 'static-delta generate' "$rt/calls" || fail "the finish step made no static delta"
@@ -1332,26 +1332,26 @@ sc_sign_prepared_checks() {
     mkdir -p "$rt"
     secret=$(cat "$KEYS/K.sec")
     m=$d/verified/release-manifest.txt
-    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages"
     assert_rc "fetch" 0
-    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages2"
+    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages2"
     assert_rc "fetch again" 0
     # shellcheck disable=SC2086
-    run "$d/q1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag $tag --commit $commit --manifest "$m" \
+    run "$d/q1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/flatpak-sign.sh --prepare --tag $tag --commit $commit --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw" --out "$d/prepared"
     assert_rc "prepare" 0
     for f in flatpak-prepared-repo.tar flatpak-prepared.txt; do assert_file "prepared output" "$d/prepared/$f"; done
     # shellcheck disable=SC2329
     chk_it() { # IN TAG [OPTION]
-        in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$(sha256sum "$1/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --check-prepared --tag "$2" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/w" --out "$rt/co" --site "$rt/pages2" ${3:+"$3"}
+        in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$(sha256sum "$1/flatpak-prepared.txt" | cut -d' ' -f1)" sh build/flatpak-sign.sh --check-prepared --tag "$2" --commit "$commit" --manifest "$m" --in "$1" --work "$rt/w" --out "$rt/co" --site "$rt/pages2" ${3:+"$3"}
     }
     # shellcheck disable=SC2329
     unpack_it() {
-        in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$rt/co/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$d/prepared/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$rt/co" --work "$rt/sw"
+        in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$rt/co/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$d/prepared/flatpak-prepared.txt" | cut -d' ' -f1)" sh build/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$rt/co" --work "$rt/sw"
     }
     # shellcheck disable=SC2329
     sign_it() {
-        in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh packaging/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/sw" --out "$d/signres"
+        in_dir "$d/build" env RUNNER_TEMP="$rt" FLATPAK_GPG_PRIVATE_KEY="$secret" sh build/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/sw" --out "$d/signres"
     }
     # a prepared repository that changed after it was described
     rm -rf "$d/prepared.bad"
@@ -1365,7 +1365,7 @@ sc_sign_prepared_checks() {
     assert_rc "check for another tag" 2
     # the description of the preparation is pinned by the job output of prepare-flatpak: no pin, another pin
     for pin in "" "$(printf 'a%.0s' $(seq 64))"; do
-        run "$d/q3b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$pin" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" \
+        run "$d/q3b.log" in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$pin" sh build/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" \
             --in "$d/prepared" --work "$rt/w" --out "$rt/co" --site "$rt/pages2"
         assert_rc "check with the pin '$pin' of the preparation" 2
         assert_log "$d/q3b.log" "pinned"
@@ -1373,10 +1373,10 @@ sc_sign_prepared_checks() {
     # a prepare job that lies about everything: another build of the same commit, prepared consistently, its
     # description edited to name the verified build. Only the content checksum against the manifest can tell.
     fx_flatpak "$d/build" "$d/fp2"
-    run "$d/q5.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-verify.sh builds --tag "$tag" --commit "$commit" --flatpak "$d/fp2" --out "$d/verified2"
+    run "$d/q5.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-verify.sh builds --tag "$tag" --commit "$commit" --flatpak "$d/fp2" --out "$d/verified2"
     assert_rc "verify the other build" 0
     # shellcheck disable=SC2086
-    run "$d/q6.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag $tag --commit $commit --manifest "$d/verified2/release-manifest.txt" \
+    run "$d/q6.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/flatpak-sign.sh --prepare --tag $tag --commit $commit --manifest "$d/verified2/release-manifest.txt" \
         --unsigned "$d/fp2/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw2" --out "$d/prepared2"
     assert_rc "prepare the other build" 0
     sed -i "s/^unsigned_tar_sha256=.*/unsigned_tar_sha256=$(kv "$m" flatpak_unsigned_tar_sha256)/" "$d/prepared2/flatpak-prepared.txt"
@@ -1434,14 +1434,14 @@ sc_sign_hostile_prepared() {
     rt=$SIM/rt/hx
     mkdir -p "$rt"
     m=$d/verified/release-manifest.txt
-    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages"
     assert_rc "fetch" 0
-    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages2"
+    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages2"
     assert_rc "fetch again" 0
-    run "$d/h1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
+    run "$d/h1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw" --out "$d/prepared"
     assert_rc "prepare" 0
-    run "$d/h2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
+    run "$d/h2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" --fresh --work "$rt/pwf" --out "$d/preparedf"
     assert_rc "prepare --fresh" 0
     base_app=$(ostree --repo="$rt/pages/repo" rev-parse "$APP_REF")
@@ -1451,7 +1451,7 @@ sc_sign_hostile_prepared() {
     hx_check() { # IN OPTION...: --check-prepared of a prepared directory
         i=$1
         shift
-        in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$(sha256sum "$i/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" --in "$i" --work "$rt/w" --out "$rt/co" "$@" --check-remote
+        in_dir "$d/build" env RUNNER_TEMP="$rt" PREPARED_SHA256="$(sha256sum "$i/flatpak-prepared.txt" | cut -d' ' -f1)" sh build/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" --manifest "$m" --in "$i" --work "$rt/w" --out "$rt/co" "$@" --check-remote
     }
     # shellcheck disable=SC2329
     hx_make() { # NAME MUTATOR: $d/hx.NAME is the prepared directory with the repository MUTATOR changed, described as a lying prepare job would
@@ -1668,7 +1668,7 @@ sc_sign_hostile_result() {
         done
         [ ! -f "$chk/base.txt" ] || sed -i "s/^base_sha256=.*/base_sha256=$(sha256sum "$chk/base.txt" | cut -d' ' -f1)/" "$chk/flatpak-check-result.txt"
         in_dir "$d/build" env RUNNER_TEMP="$rt" PATH="${HR_PATH:-$PATH}" RESULT_SHA256="$(sha256sum "$1/flatpak-sign-result.txt" | cut -d' ' -f1)" CHECKED_SHA256="$(sha256sum "$chk/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="$(sha256sum "$chk/prepared.txt" | cut -d' ' -f1)" \
-            sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --checked "$chk" --work "$rt/fw" --out "$rt/out"
+            sh build/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$1" --checked "$chk" --work "$rt/fw" --out "$rt/out"
     }
     # shellcheck disable=SC2329
     hr_chk() { rm -rf "$d/hc.$1"; cp -a "$d/checked" "$d/hc.$1"; }
@@ -1893,24 +1893,24 @@ sc_sign_pins() {
     m=$d/verified/release-manifest.txt
     good=$(kv "$d/verify.gho" manifest_sha256)
     assert_eq "the pin is the hash of the manifest" "$(sha256sum "$m" | cut -d' ' -f1)" "$good"
-    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages"
+    run "$d/pages.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages"
     assert_rc "fetch" 0
-    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-pages.sh fetch "$rt/pages2"
+    run "$d/pages2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-pages.sh fetch "$rt/pages2"
     assert_rc "fetch again" 0
-    run "$d/n1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
+    run "$d/n1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m" \
         --unsigned "$d/fp/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw" --out "$d/prepared"
     assert_rc "prepare" 0
     # a forged manifest with a prepared repository that fits it: another build of the same commit, verified and prepared consistently
     fx_flatpak "$d/build" "$d/fp2"
-    run "$d/n2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/release-verify.sh builds --tag "$tag" --commit "$commit" --flatpak "$d/fp2" --out "$d/verified2"
+    run "$d/n2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/release-verify.sh builds --tag "$tag" --commit "$commit" --flatpak "$d/fp2" --out "$d/verified2"
     assert_rc "verify the other build" 0
     m2=$d/verified2/release-manifest.txt
-    run "$d/n3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh packaging/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m2" \
+    run "$d/n3.log" in_dir "$d/build" env RUNNER_TEMP="$rt" sh build/flatpak-sign.sh --prepare --tag "$tag" --commit "$commit" --manifest "$m2" \
         --unsigned "$d/fp2/flatpak-unsigned-repo.tar" --site "$rt/pages" --work "$rt/pw2" --out "$d/prepared2"
     assert_rc "prepare the other build" 0
     # shellcheck disable=SC2329
     pin_check() { # PIN MANIFEST PREPARED
-        in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" PREPARED_SHA256="$(sha256sum "$3/flatpak-prepared.txt" | cut -d' ' -f1)" sh packaging/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" \
+        in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" PREPARED_SHA256="$(sha256sum "$3/flatpak-prepared.txt" | cut -d' ' -f1)" sh build/flatpak-sign.sh --check-prepared --tag "$tag" --commit "$commit" \
             --manifest "$2" --in "$3" --work "$rt/w" --out "$rt/co" --site "$rt/pages2" --check-remote
     }
     run "$d/n4.log" pin_check "$(sha256sum "$m2" | cut -d' ' -f1)" "$m2" "$d/prepared2"
@@ -1933,7 +1933,7 @@ sc_sign_pins() {
     m=$e/verified/release-manifest.txt
     # shellcheck disable=SC2329
     fin() { # MANIFEST_PIN RESULT_PIN IN [CHECKED_PIN [CHECKED_DIR [PREPARED_PIN]]]
-        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" RESULT_SHA256="$2" CHECKED_SHA256="${4-$ckp}" PREPARED_SHA256="${6-$ppin}" GITHUB_OUTPUT="$rt/fin.gho" sh packaging/flatpak-sign.sh --finish --tag "$tag" \
+        in_dir "$e/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$1" RESULT_SHA256="$2" CHECKED_SHA256="${4-$ckp}" PREPARED_SHA256="${6-$ppin}" GITHUB_OUTPUT="$rt/fin.gho" sh build/flatpak-sign.sh --finish --tag "$tag" \
             --commit "$(kv "$e/validate.out" commit)" --manifest "$m" --in "$3" --checked "${5:-$e/checked}" --work "$rt/fw" --out "$rt/out"
     }
     mp=$(kv "$e/verify.gho" manifest_sha256)
@@ -2059,7 +2059,7 @@ sc_check_split() {
     # shellcheck disable=SC2329
     unp() { # PIN IN WORK [SHIMS]: --unpack with the remote unreachable
         in_dir "$d/build" env RUNNER_TEMP="$rt" REMOTE="file://$SIM/nowhere.git" ${4:+PATH="$rt/shim:$PATH"} CHECKED_SHA256="$1" PREPARED_SHA256="$pp" \
-            sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$2" --work "$3"
+            sh build/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$2" --work "$3"
     }
 
     # (1) the signing machine: nothing is run by --unpack, and the Sign step runs three things
@@ -2069,7 +2069,7 @@ sc_check_split() {
     assert_eq "calls of ostree, gpg, flatpak, git or curl by --unpack" 0 "$(wc -c < "$rt/calls")"
     assert_file "the unpacked repository" "$rt/sw/repo/objects"
     run "$d/c2.log" in_dir "$d/build" env RUNNER_TEMP="$rt" REMOTE="file://$SIM/nowhere.git" PATH="$rt/shim:$PATH" FLATPAK_GPG_PRIVATE_KEY="$(cat "$KEYS/K.sec")" \
-        sh packaging/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/sw" --out "$d/signres"
+        sh build/flatpak-sign.sh --sign --tag "$tag" --commit "$commit" --work "$rt/sw" --out "$d/signres"
     assert_rc "sign with the remote unreachable" 0
     for t in ostree flatpak gpg; do [ "$(grep -c "^$t " "$rt/calls")" -gt 0 ] || fail "the shim of $t was never called: the check proves nothing"; done
     if grep -q -e '^git ' -e '^curl ' "$rt/calls"; then fail "the sign step ran git or curl"; fi
@@ -2127,7 +2127,7 @@ sc_check_split() {
     # shellcheck disable=SC2329
     fin() { # CHECKED_PIN CHECKED_DIR
         in_dir "$d/build" env RUNNER_TEMP="$rt" MANIFEST_SHA256="$(kv "$d/verify.gho" manifest_sha256)" CHECKED_SHA256="$1" PREPARED_SHA256="$pp" RESULT_SHA256="$(kv "$d/sign.gho" result_sha256)" \
-            sh packaging/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$d/signres" --checked "$2" --work "$rt/fw" --out "$rt/out"
+            sh build/flatpak-sign.sh --finish --tag "$tag" --commit "$commit" --manifest "$m" --in "$d/signres" --checked "$2" --work "$rt/fw" --out "$rt/out"
     }
     run "$d/c7.log" fin "$ck" "$d/checked"
     assert_rc "finish with the real pin" 0
@@ -2181,7 +2181,7 @@ sc_check_compromised() {
     # shellcheck disable=SC2329
     cc_unpack() { # NAME: the check job pins its own record; the pin of the preparation is the real one
         in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$(sha256sum "$d/cc.$1/flatpak-check-result.txt" | cut -d' ' -f1)" PREPARED_SHA256="${CC_PIN:-$pp}" \
-            sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/cc.$1" --work "$rt/sw.$1"
+            sh build/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/cc.$1" --work "$rt/sw.$1"
     }
     # shellcheck disable=SC2329
     cc_refuse() { # NAME MUTATOR PATTERN
@@ -2285,7 +2285,7 @@ sc_check_compromised() {
     assert_log "$d/cc.dup.log" "twice"
     [ ! -e "$rt/sw.dup/repo" ] || fail "dup: a repository was unpacked"
     # the preparation's pin, empty or foreign
-    run "$d/cc.pin1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="" sh packaging/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/checked" --work "$rt/sw.pin1"
+    run "$d/cc.pin1.log" in_dir "$d/build" env RUNNER_TEMP="$rt" CHECKED_SHA256="$ckp" PREPARED_SHA256="" sh build/flatpak-sign.sh --unpack --tag "$tag" --commit "$commit" --in "$d/checked" --work "$rt/sw.pin1"
     assert_rc "unpack with no pin of the preparation" 2
     assert_log "$d/cc.pin1.log" "pinned"
     assert_eq "keyrings left" 0 "$(leftover_gnupg)"
@@ -2330,14 +2330,14 @@ sc_check_head() {
     rm -rf "$x"
     git clone -q "$REMOTE" "$x"
     git -C "$x" checkout -q --detach "$commit"
-    run "$LIVE/runs/1/ch1.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$commit"
+    run "$LIVE/runs/1/ch1.log" in_dir "$x" sh build/release-validate.sh --check-head "$commit"
     assert_rc "check-head without the submodule" 2
-    run "$LIVE/runs/1/ch2.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$commit" --no-submodule
+    run "$LIVE/runs/1/ch2.log" in_dir "$x" sh build/release-validate.sh --check-head "$commit" --no-submodule
     assert_rc "check-head --no-submodule" 0
-    run "$LIVE/runs/1/ch3.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$(printf 'f%.0s' $(seq 40))" --no-submodule
+    run "$LIVE/runs/1/ch3.log" in_dir "$x" sh build/release-validate.sh --check-head "$(printf 'f%.0s' $(seq 40))" --no-submodule
     assert_rc "check-head --no-submodule on another commit" 2
     git -C "$x" submodule update -q --init
-    run "$LIVE/runs/1/ch4.log" in_dir "$x" sh packaging/release-validate.sh --check-head "$commit"
+    run "$LIVE/runs/1/ch4.log" in_dir "$x" sh build/release-validate.sh --check-head "$commit"
     assert_rc "check-head with the submodule" 0
 }
 
@@ -2364,7 +2364,7 @@ make_template() {
     w=$LIVE/work
     mkdir -p "$w"
     fx_project "$w" 1.5.1 "file://$CW" "$PKG"
-    write_conf "$w/packaging/release.conf"
+    write_conf "$w/build/release.conf"
     git -C "$w" init -q
     git -C "$w" submodule add -q "file://$CW" third_party/codewalker
     git -C "$w" add -A

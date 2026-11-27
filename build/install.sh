@@ -12,7 +12,7 @@ ID=io.github.the_beper.PaletoModkit
 PREFIX=${PREFIX:-$HOME/.local}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-# Release archive layout (bin/ + share/) or source tree (target/release + packaging/).
+# Release archive layout (bin/ + share/) or source tree (target/release + build/).
 if [ -x "$HERE/bin/paleto-modkit" ]; then
     BIN=$HERE/bin
     SHARE=$HERE/share
@@ -56,13 +56,13 @@ fi
 
 install -Dm755 "$BIN/paleto-modkit" "$PREFIX/bin/paleto-modkit"
 install -Dm755 "$BIN/paleto" "$PREFIX/bin/paleto"
-# The Legacy -> Enhanced converter, when built (packaging/build-cwconv.sh).
+# The Legacy -> Enhanced converter, when built (build/build-cwconv.sh).
 if [ -x "$CWCONV/paleto-cwconv" ]; then
     rm -rf "$PREFIX/lib/paleto-modkit/cwconv"
     mkdir -p "$PREFIX/lib/paleto-modkit"
     cp -r "$CWCONV" "$PREFIX/lib/paleto-modkit/cwconv"
 else
-    echo "note: paleto-cwconv not built, so Legacy files cannot be converted (packaging/build-cwconv.sh)"
+    echo "note: paleto-cwconv not built, so Legacy files cannot be converted (build/build-cwconv.sh)"
 fi
 if [ -n "$SHARE" ]; then
     (cd "$SHARE" && find . -type f) | while read -r f; do

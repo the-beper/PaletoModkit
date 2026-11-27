@@ -1,7 +1,7 @@
 #!/bin/sh
 # Checks clean-dist.sh, which build-release.sh runs before it builds: it removes what the build makes and
 # nothing else, so a foreign file or folder kept in dist/ survives. No network, no git.
-#   sh packaging/tests/clean-dist-test.sh
+#   sh build/tests/clean-dist-test.sh
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)

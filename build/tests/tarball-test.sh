@@ -1,8 +1,8 @@
 #!/bin/sh
-# Checks reproducible_tar (packaging/release-lib.sh), which makes the release tarball: the same contents give the
+# Checks reproducible_tar (build/release-lib.sh), which makes the release tarball: the same contents give the
 # same bytes whatever the file times, creation order or umask, and different contents or another time do not.
 # Needs GNU tar, gzip, sha256sum. No network, no git.
-#   sh packaging/tests/tarball-test.sh
+#   sh build/tests/tarball-test.sh
 set -eu
 
 tar --version 2> /dev/null | grep -q "GNU tar" || { echo "SKIP: GNU tar is needed"; exit 77; }

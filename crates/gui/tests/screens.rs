@@ -120,7 +120,7 @@ fn mock_game(temp_dir: &Path) -> (paleto_core::Game, PathBuf) {
     {
         let file = std::fs::File::create(&package_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let icon_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/icons/hicolor/128x128/apps/io.github.the_beper.PaletoModkit.png"));
+        let icon_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/icons/hicolor/128x128/apps/io.github.the_beper.PaletoModkit.png"));
         if let Ok(icon_bytes) = std::fs::read(icon_path) {
             zip.start_file("icon.png", SimpleFileOptions::default()).unwrap();
             zip.write_all(&icon_bytes).unwrap();
@@ -516,7 +516,7 @@ fn docs() {
     }
     // SAFETY: set before the app starts its threads; run this test alone.
     unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
-    // The converter from packaging/build-cwconv.sh, when built.
+    // The converter from build/build-cwconv.sh, when built.
     let converter = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cwconv/paleto-cwconv");
     if converter.is_file() {
         unsafe { std::env::set_var("PALETO_CWCONV", &converter) };

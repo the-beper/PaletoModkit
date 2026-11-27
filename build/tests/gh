@@ -1,5 +1,5 @@
 #!/bin/sh
-# A stand-in for the GitHub CLI, for packaging/tests/release-sim.sh: the few calls of release-lib.sh (the gh_*
+# A stand-in for the GitHub CLI, for build/tests/release-sim.sh: the few calls of release-lib.sh (the gh_*
 # wrappers), served from a folder, never from the network.
 #   GH_STUB_DIR     the state: rel/<id>/{tag,draft,prerelease,notes}, rel/<id>/assets/<name> (+ .meta), latest, log
 #   GH_STUB_REMOTE  the git remote that tags are looked up in (--verify-tag)

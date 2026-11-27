@@ -16,10 +16,10 @@ use std::process::{Command, Stdio};
 
 use crate::APP_ID;
 
-const DESKTOP: &str = include_str!("../../../packaging/io.github.the_beper.PaletoModkit.desktop");
-const ICON_SVG: &[u8] = include_bytes!("../../../packaging/icons/hicolor/scalable/apps/io.github.the_beper.PaletoModkit.svg");
+const DESKTOP: &str = include_str!("../../../build/io.github.the_beper.PaletoModkit.desktop");
+const ICON_SVG: &[u8] = include_bytes!("../../../build/icons/hicolor/scalable/apps/io.github.the_beper.PaletoModkit.svg");
 const ICON_SYMBOLIC: &[u8] =
-    include_bytes!("../../../packaging/icons/hicolor/symbolic/apps/io.github.the_beper.PaletoModkit-symbolic.svg");
+    include_bytes!("../../../build/icons/hicolor/symbolic/apps/io.github.the_beper.PaletoModkit-symbolic.svg");
 /// Marks entries written here, so ones installed otherwise are left alone.
 const MARKER: &str = "X-Paleto-AppImage=true";
 
